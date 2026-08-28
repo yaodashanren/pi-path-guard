@@ -9,15 +9,17 @@ Path Guard — pi 扩展：防误删 / 防误覆盖 / 防误改。
 ## 安装
 
 ```bash
-# 方式一：本地目录
+# 方式一：从 git 安装（推荐）
+pi install git:github.com/yaodashanren/pi-path-guard@v1
+
+# 方式二：本地目录（开发/内部分发）
 pi install /path/to/path-guard
 
-# 方式二：临时试用（不写入 settings）
+# 方式三：临时试用（不写入 settings）
 pi -e ./path-guard
 
-# 方式三（发布后）：npm 或 git
-pi install npm:pi-path-guard
-pi install git:github.com/<user>/pi-path-guard@v1
+# 方式四（npm 发布后）：scope 包
+# pi install npm:@yaosu/pi-path-guard
 ```
 
 安装后 `/reload` 或重启 pi 生效。
@@ -63,11 +65,7 @@ block = 直接阻止（无确认机会）；confirm = 弹窗询问；pass = 放�
 
 ## 开发与测试
 
-自动化测试（83 断言）位于 `/home/yaosu/docs/plans/test-pathguard.ts`，模拟 pi API 加载真实扩展：
-
-```bash
-cd /home/yaosu/docs/plans && node --experimental-strip-types test-pathguard.ts
-```
+自动化测试（83 断言）模拟 pi API 加载真实扩展，覆盖 4 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互与 trusted 确认流程。
 
 ## License
 

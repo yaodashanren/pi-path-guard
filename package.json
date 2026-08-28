@@ -1,0 +1,30 @@
+{
+  "name": "pi-path-guard",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Path Guard extension for pi — 防误删 / 防误覆盖 / 防误改，支持 strict / normal / loose / trusted 四种防护模式（/guard 命令切换）",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "path-guard",
+    "safety",
+    "permission"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "yaosu"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  }
+}

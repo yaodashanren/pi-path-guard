@@ -1,39 +1,42 @@
 /**
- * Path Guard Extension v3 — 防误删 / 防误覆盖 / 防误改
+ * Path Guard Extension v3 — protects against accidental deletes / overwrites / edits
  *
- * 以 path-guard-p620.ts 为基底，合并 path-guard-ayydesk.ts 的优势点并修复已知缺陷：
+ * Built on path-guard-p620.ts, merging strengths from path-guard-ayydesk.ts and fixing known gaps:
  *
- * v2 相对 p620 的新增/改进:
- *   1. 前缀命令剥除（sudo/doas/pkexec/env/nohup/command/builtin/time/nice/xargs/
- *      timeout/setsid/stdbuf/ionice/chroot/watch）→ 分析真实命令。
- *      修复 p620 对 "timeout 5 rm -rf /etc"、"nohup rm -rf x" 等直接放行的漏洞。
- *   2. git 破坏性命令检查（clean -f / reset --hard / checkout -- . / restore . /
- *      branch -D / push --force / stash drop），支持 -C/-c 等全局选项前缀。
- *      修复 p620 只拦 git clean 的漏洞。
- *   3. 块设备重定向正则去掉 \b 边界，修复 "echo x > /dev/sda"（空格写法）漏检。
- *   4. realpath 解析升级为"逐段向上找最近存在祖先"（ayydesk 方案），修复深层
- *      不存在路径经软链写穿到项目外的漏洞。
- *   5. mv/cp/install/tee/ln -f/rsync 目标存在性覆盖检测（含 -t 目标形式、
- *      tee -a 追加豁免、rsync --delete 确认）——项目内覆盖 → 询问，项目外 → 阻止。
- *   6. "> 已存在文件" 截断检测（含 2> / &>，排除 >> 追加与 /dev/null 等设备）→ 询问。
- *   7. write/edit 先解析 cwd 真实路径再判内外，修复符号链接 cwd 下项目内写操作
- *      被误判为项目外的假阳性。
+ * v2 additions over p620:
+ *   1. Prefix-command stripping (sudo/doas/pkexec/env/nohup/command/builtin/time/nice/xargs/
+ *      timeout/setsid/stdbuf/ionice/chroot/watch) → analyze the real command.
+ *      Fixes p620 letting "timeout 5 rm -rf /etc", "nohup rm -rf x" etc. through.
+ *   2. Git destructive-command checks (clean -f / reset --hard / checkout -- . / restore . /
+ *      branch -D / push --force / stash drop), honoring -C/-c global option prefixes.
+ *      Fixes p620 only blocking git clean.
+ *   3. Block-device redirect regex without the  boundary, fixing "echo x > /dev/sda" (spaced) misses.
+ *   4. realpath resolution upgraded to "walk up to nearest existing ancestor" (ayydesk approach),
+ *      fixing deep missing paths being written through symlinks to outside the project.
+ *   5. mv/cp/install/tee/ln -f/rsync existing-target overwrite detection (incl. -t target form,
+ *      tee -a append exemption, rsync --delete confirmation) — in-project overwrite → confirm,
+ *      outside → block.
+ *   6. "> existing file" truncate detection (incl. 2> / &>, excluding >> append and devices) → confirm.
+ *   7. write/edit resolves the real cwd path before judging in/out, fixing false positives where
+ *      an in-project write under a symlinked cwd was misjudged as outside.
  *
- * 保留 p620 的全部能力:
- *   - 受保护路径拦截（.env / .ssh / 密钥 / 凭据，不区分项目内外）
- *   - shell 包装器递归（bash -c / eval，深度受限）；source / . 保守确认
- *   - dd / curl -o / wget -O / truncate / sed -i / perl -i / ruby -i / unzip -o 判定
- *   - 危险命令正则（sudo / chmod 777 / ssh / find -delete / mkfs 等）
- *   - 复合命令分段汇总，fail-safe：任一硬性阻止 → 整体阻止
- *   - 引号感知的分词（单引号/双引号正确处理）
+ * All p620 capabilities retained:
+ *   - Protected-path interception (.env / .ssh / keys / credentials, regardless of project)
+ *   - Shell wrapper recursion (bash -c / eval, depth-limited); source / . conservative confirm
+ *   - dd / curl -o / wget -O / truncate / sed -i / perl -i / ruby -i / unzip -o judgment
+ *   - Dangerous command regexes (sudo / chmod 777 / ssh / find -delete / mkfs etc.)
+ *   - Compound-command segmentation aggregation, fail-safe: any hard block blocks everything
+ *   - Quote-aware tokenization (single/double quotes handled correctly)
  *
- * v3 新增（自 v2 升级）：防护模式（/guard 命令，会话内切换，新会话回到 normal）
- *   - strict   全防护：项目内写操作也询问；Confirm 组危险命令直接阻止
- *   - normal   默认：Block 组危险命令直接阻止，Confirm 组询问
- *   - loose    放宽：项目内/外新建与删除免问（覆盖已存在仍需确认）
- *   - trusted  最宽松：覆盖/删除普通文件也免问
- *   - 受保护路径（凭据/配置/密钥）与 Block 组（格式化/关机/批量删除/写块设备）
- *     在任何模式下都直接阻止，无确认机会
+ * v3 adds (upgrade from v2): guard modes (/guard command, switchable per session; new sessions
+ * reset to normal)
+ *   - strict   full protection: in-project writes also prompt; Confirm-group commands blocked
+ *   - normal   default: Block-group commands blocked directly, Confirm group prompts
+ *   - loose    relaxed: in/out-project creates and deletes pass without prompting (overwrites of
+ *              existing targets still confirmed)
+ *   - trusted  most permissive: overwrites and ordinary-file deletes pass too
+ *   - Protected paths (credentials/config/keys) and the Block group (format/shutdown/bulk-delete/
+ *     block-device writes) are blocked directly in every mode, with no confirmation opportunity
  */
 
 import type {
@@ -57,29 +60,29 @@ import {
 import { homedir } from "node:os";
 import { realpathSync, existsSync, statSync } from "node:fs";
 
-// ─── 配置 ───────────────────────────────────────────────────────────
+// ─── Configuration ──────────────────────────────────────────────────────
 
-/** 受保护路径片段 — 命中则阻止写/编辑 */
+/** Protected path fragments — matching paths block writes/edits */
 const PROTECTED_PATH_PATTERNS = [
 	".env",
 	".git/",
-	".ssh/", // SSH 配置与密钥
-	// HOME 级凭据/配置（bash 重定向/覆盖、write 工具均拦截）
-	".aws/", // AWS 凭据
-	".kube/", // Kubernetes 管理配置
-	".docker/", // Docker 登录凭据
-	".gnupg/", // GPG 密钥
-	".git-credentials", // 明文 git 凭据
-	".npmrc", // npm 令牌
-	".pypirc", // PyPI 令牌
-	".netrc", // 通用登录凭据
-	".bashrc", // shell 配置（持久化/后门向量）
+	".ssh/", // SSH config & keys
+	// HOME-level credentials/config (intercepted for bash redirects, overwrites, and the write tool)
+	".aws/", // AWS credentials
+	".kube/", // Kubernetes admin config
+	".docker/", // Docker login credentials
+	".gnupg/", // GPG keys
+	".git-credentials", // plaintext git credentials
+	".npmrc", // npm tokens
+	".pypirc", // PyPI tokens
+	".netrc", // generic login credentials
+	".bashrc", // shell config (persistence/backdoor vector)
 	".zshrc",
 	".profile",
 	".bash_profile",
-	"credentials", // 项目内凭据文件
-	"*.pem", // 私钥（后缀匹配）
-	"*.key", // 私钥（后缀匹配）
+	"credentials", // in-project credential files
+	"*.pem", // private keys (suffix match)
+	"*.key", // private keys (suffix match)
 	"node_modules/",
 	".next/",
 	".nuxt/",
@@ -93,7 +96,7 @@ const PROTECTED_PATH_PATTERNS = [
 	"vendor/", // Go vendor / PHP composer
 ];
 
-/** Block 组危险命令 — 系统级破坏，任何模式直接阻止（无确认机会） */
+/** Block group — system-destructive; blocked in every mode (no confirmation opportunity) */
 const BLOCK_DANGEROUS_PATTERNS: RegExp[] = [
 	/\bmkfs\./,
 	/\bmkswap\b/,
@@ -102,26 +105,26 @@ const BLOCK_DANGEROUS_PATTERNS: RegExp[] = [
 	/\bshutdown\b/,
 	/\binit\s+0\b/,
 	/\binit\s+6\b/,
-	/\bdd\b[^;|&]*\bof=\s*\/dev\/(sda|sdb|sdc|nvme|mmcblk)/, // dd 直接写块设备（写普通文件由 judgeDd 拦）
-	/(>|>>)\s*\/dev\/(sda|sdb|sdc|nvme|mmcblk)/, // 直接写入块设备（注意：不能用 \b，> 前常为空格）
-	/\bfind\b[^;|&]*-delete\b/, // find ... -delete 批量删除
-	/\bfind\b[^;|&]*-exec(dir)?\b[^;|&]*\brm\b/, // find ... -exec rm 批量删除
-	/\bxargs\b[^;|&]*\brm\b/, // xargs rm 批量删除（judgeGit 之外的双保险）
+	/\bdd\b[^;|&]*\bof=\s*\/dev\/(sda|sdb|sdc|nvme|mmcblk)/, // dd writing directly to a block device (ordinary files handled by judgeDd)
+	/(>|>>)\s*\/dev\/(sda|sdb|sdc|nvme|mmcblk)/, // direct write to a block device (note: no \b — > is often preceded by a space)
+	/\bfind\b[^;|&]*-delete\b/, // find ... -delete bulk delete
+	/\bfind\b[^;|&]*-exec(dir)?\b[^;|&]*\brm\b/, // find ... -exec rm bulk delete
+	/\bxargs\b[^;|&]*\brm\b/, // xargs rm bulk delete (backup beyond judgeGit)
 ];
 
-/** Confirm 组危险命令 — 提权/远程/危险权限：strict 阻止，normal/loose/trusted 询问 */
+/** Confirm group — privilege escalation / remote / risky permissions: blocked in strict, confirmed otherwise */
 const CONFIRM_DANGEROUS_PATTERNS: RegExp[] = [
 	/\bsudo\b/,
 	/\b(doas|pkexec)\b/,
 	/\b(chmod|chown)\b.*777/,
-	/(?<!\.)\b(ssh|scp|sftp|rsh|telnet)\b/, // 远程执行/远程操作（lookbehind 避免误伤 ~/.ssh/ 等路径）
-	/\bwget\s+-O\s+\/dev\/null\b/, // 下载直接丢弃（无害但保守）
+	/(?<!\.)\b(ssh|scp|sftp|rsh|telnet)\b/, // remote execution/operation (lookbehind avoids false hits on ~/.ssh/ etc.)
+	/\bwget\s+-O\s+\/dev\/null\b/, // download discarded directly (harmless but conservative)
 ];
 
-/** 需要特殊处理的删除命令 */
+/** Delete commands requiring special handling */
 const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink", "shred", "wipe"]);
 
-/** 覆盖类命令 — 默认会覆盖已存在的目标文件（ln 需 -f/--force，单独特判） */
+/** Overwrite commands — overwrite existing targets by default (ln needs -f/--force; handled separately) */
 const OVERWRITE_COMMANDS = new Set([
 	"mv",
 	"cp",
@@ -131,10 +134,10 @@ const OVERWRITE_COMMANDS = new Set([
 	"rsync",
 ]);
 
-/** 就地编辑命令（-i 原地改写） */
+/** In-place edit commands (-i rewrites in place) */
 const INPLACE_EDITORS = new Set(["sed", "perl", "ruby"]);
 
-/** shell 包装器：-c 参数是内联代码，需递归检查 */
+/** Shell wrappers: the -c argument is inline code that needs recursive checking */
 const SHELL_WRAPPERS = new Set([
 	"bash",
 	"sh",
@@ -146,7 +149,7 @@ const SHELL_WRAPPERS = new Set([
 	"tcsh",
 ]);
 
-/** 前缀命令：剥除后检查真实命令 */
+/** Prefix commands: strip before checking the real command */
 const PREFIX_COMMANDS = new Set([
 	"sudo",
 	"doas",
@@ -166,10 +169,10 @@ const PREFIX_COMMANDS = new Set([
 	"watch",
 ]);
 
-/** 前缀命令中带参数值的 flag（剥除时需多跳一个 token） */
+/** Prefix flags that take a value (skip one extra token when stripping) */
 const FLAGS_WITH_ARG = new Set(["-u", "--user", "-g", "--group"]);
 
-/** 输出重定向到这些设备不算破坏性截断 */
+/** Redirecting to these devices is not a destructive truncate */
 const DEVICE_TARGETS = new Set([
 	"/dev/null",
 	"/dev/stdout",
@@ -180,15 +183,15 @@ const DEVICE_TARGETS = new Set([
 
 const HOME = homedir();
 
-// ─── 防护模式 ─────────────────────────────────────────────────────
+// ─── Guard Modes ─────────────────────────────────────────────────────
 
-/** 防护模式：strict 全防护 / normal 默认 / loose 放宽 / trusted 最宽松 */
+/** Guard mode: strict (full) / normal (default) / loose (relaxed) / trusted (most permissive) */
 type GuardMode = "strict" | "normal" | "loose" | "trusted";
 
-/** 当前会话的防护模式（/guard 命令切换，session_start 重置为 normal） */
+/** Current session guard mode (switched via /guard; reset to normal on session_start) */
 let currentMode: GuardMode = "normal";
 
-/** 合法模式集合 */
+/** Valid guard modes */
 const GUARD_MODES: readonly GuardMode[] = [
 	"strict",
 	"normal",
@@ -196,12 +199,12 @@ const GUARD_MODES: readonly GuardMode[] = [
 	"trusted",
 ];
 
-/** 是否为合法模式（供 /guard 命令参数校验） */
+/** Whether a string is a valid guard mode (for /guard argument validation) */
 function isGuardMode(m: string): m is GuardMode {
 	return (GUARD_MODES as readonly string[]).includes(m);
 }
 
-/** 模式描述（/guard 交互式选项展示，英文在前） */
+/** Mode descriptions (shown in the /guard interactive picker; English first, Chinese brief after) */
 const MODE_DESCRIPTIONS: Record<GuardMode, string> = {
 	strict:
 		"Strict: confirm in-project writes, block dangerous commands / 全防护：项目内写也询问，危险命令直接阻止",
@@ -213,7 +216,7 @@ const MODE_DESCRIPTIONS: Record<GuardMode, string> = {
 		"Trusted: pass overwrites & ordinary-file deletes / 最宽松：覆盖/删除普通文件也免问",
 };
 
-/** 详细判定矩阵（/guard 交互式选择标题展示，全英文） */
+/** Full decision matrix (shown as the /guard picker title, English only) */
 const MODE_MATRIX = [
 	"Path Guard Mode Matrix (B=block / ?=confirm / .=pass)",
 	"  Checkpoint                          strict  normal  loose  trusted",
@@ -231,69 +234,69 @@ const MODE_MATRIX = [
 	"  No UI (headless)                       B       B       B       B",
 ].join("\n");
 
-/** 守卫判定结果：{ block, reason } 阻止 / undefined 放行（askConfirm 返回 Promise） */
+/** Guard verdict: { block, reason } to block / undefined to allow (askConfirm returns a Promise) */
 type GuardVerdict =
 	| ToolCallEventResult
 	| undefined
 	| Promise<ToolCallEventResult | undefined>;
 
-// ─── 主入口 ─────────────────────────────────────────────────────────
+// ─── Entry ────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-	// 每次新会话回到 normal（启动 / /new / /resume 均触发 session_start）
+	// Reset to normal on every new session (startup, /new, /resume all fire session_start)
 	pi.on("session_start", () => {
 		currentMode = "normal";
 	});
 
-	// /guard 斜杠命令：查看 / 切换防护模式
+	// /guard slash command: view / switch guard mode
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard 模式: /guard 查看当前, /guard <strict|normal|loose|trusted> 切换",
+			"Path Guard modes: /guard shows the current mode, /guard <strict|normal|loose|trusted> switches",
 		handler: async (args, ctx) => {
 			const m = args?.trim().toLowerCase() ?? "";
 
-			// 带合法参数 → 直接切换（快捷方式，不弹窗）；trusted 需警告确认
+			// Valid argument → switch directly (shortcut, no picker); trusted requires a warning confirmation
 			if (isGuardMode(m)) {
 				if (m === "trusted" && !(await confirmTrustedSwitch(ctx))) {
-					ctx.ui.notify("已取消：trusted 模式需确认后切换", "info");
+					ctx.ui.notify("Cancelled: switching to trusted requires confirmation", "info");
 					return;
 				}
 				currentMode = m;
 				ctx.ui.notify(
-					`Path Guard 已切换: ${m}（本会话生效，新会话回到 normal）`,
+					`Path Guard switched to: ${m} (session-only; new sessions reset to normal)`,
 					"info",
 				);
 				return;
 			}
 
-			// 无 UI → 无法交互，仅显示当前模式
+			// No UI → cannot interact; just show the current mode
 			if (!ctx.hasUI) {
-				ctx.ui.notify(`Path Guard 当前模式: ${currentMode}`, "info");
+				ctx.ui.notify(`Path Guard current mode: ${currentMode}`, "info");
 				return;
 			}
 
-			// 交互式选择（无参或参数不合法时兜底）：标题展示详细矩阵，选项选择模式
+			// Interactive picker (fallback for no/invalid arg): matrix as title, mode choices
 			const choices = GUARD_MODES.map(
 				(mo) =>
-					`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === currentMode ? "（当前）" : ""}`,
+					`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === currentMode ? " (current)" : ""}`,
 			);
 			const chosen = await ctx.ui.select(
 				`${MODE_MATRIX}\n\nCurrent mode: ${currentMode} — choose one:`,
 				choices,
 			);
 			if (!chosen) {
-				ctx.ui.notify("已取消，模式保持不变", "info");
+				ctx.ui.notify("Cancelled, mode unchanged", "info");
 				return;
 			}
 			const picked = chosen.split(/\s+/)[0] as GuardMode;
 			if (isGuardMode(picked)) {
 				if (picked === "trusted" && !(await confirmTrustedSwitch(ctx))) {
-					ctx.ui.notify("已取消：trusted 模式需确认后切换", "info");
+					ctx.ui.notify("Cancelled: switching to trusted requires confirmation", "info");
 					return;
 				}
 				currentMode = picked;
 				ctx.ui.notify(
-					`Path Guard 已切换: ${picked}（本会话生效，新会话回到 normal）`,
+					`Path Guard switched to: ${picked} (session-only; new sessions reset to normal)`,
 					"info",
 				);
 			}
@@ -313,7 +316,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-/** write/edit 守卫：受保护 → 阻止；项目外 / cwd 即 HOME → 弹窗 */
+/** write/edit guard: protected → block; outside project / cwd is HOME → confirm */
 function checkWriteEdit(
 	input: WriteToolInput | EditToolInput,
 	ctx: ExtensionContext,
@@ -321,49 +324,49 @@ function checkWriteEdit(
 	const path = input.path;
 	if (!path) return;
 
-	// 先解析 cwd 真实路径（cwd 本身可能是软链），再解析目标真实路径，
-	// 防止经项目内软链接写穿到外部受保护位置，也避免软链 cwd 假阳性
+	// Resolve the real cwd first (cwd may itself be a symlink), then the real target path,
+	// preventing symlink escape to protected locations and symlink-cwd false positives
 	const realCwd = resolveReal(ctx.cwd);
 	const real = resolveReal(resolve(realCwd, expandHome(path)));
 
-	// ① 受保护路径（含 HOME 级凭据/配置，不区分项目内外）→ 直接阻止
+	// ① Protected path (incl. HOME-level credentials/config, inside or outside project) → block
 	if (matchesProtectedPath(real)) {
 		return {
 			block: true,
-			reason: `路径 "${real}" 受保护，已阻止写入。`,
+			reason: `Path "${real}" is protected; write blocked.`,
 		};
 	}
 
-	// ② 项目目录外 → strict/normal 弹窗；loose/trusted 放行（对真实路径判定，软链接指向外部也会命中）
+	// ② Outside the project dir → strict/normal confirm; loose/trusted pass (judged on the real path, so symlink escape also matches)
 	if (isOutsideCwd(real, realCwd)) {
 		if (currentMode === "loose" || currentMode === "trusted") return;
 		return askConfirm(
 			ctx,
-			`⚠️ 文件路径在项目目录之外\n\n路径: ${real}\n项目: ${realCwd}`,
+			`⚠️ File path is outside the project directory\n\nPath: ${real}\nProject: ${realCwd}`,
 		);
 	}
 
-	// ③ cwd 即 HOME（写入落在 HOME 下）→ strict/normal 弹窗；loose/trusted 放行
+	// ③ cwd is HOME (write lands under HOME) → strict/normal confirm; loose/trusted pass
 	if (realCwd === HOME) {
 		if (currentMode === "loose" || currentMode === "trusted") return;
 		return askConfirm(
 			ctx,
-			`⚠️ HOME 目录下的写操作\n\n路径: ${real}\nHOME: ${HOME}\n\n确认写入？`,
+			`⚠️ Write operation in HOME directory\n\nPath: ${real}\nHOME: ${HOME}\n\nConfirm write?`,
 		);
 	}
 
-	// ④ 项目内 → strict 全量询问；其余模式放行
+	// ④ In-project → strict prompts for everything; other modes pass
 	if (currentMode === "strict") {
 		return askConfirm(
 			ctx,
-			`⚠️ strict 模式：项目内写操作\n\n路径: ${real}\n\n确认写入？`,
+			`⚠️ strict mode: in-project write operation\n\nPath: ${real}\n\nConfirm write?`,
 		);
 	}
 
-	return; // 项目内且安全，放行
+	return; // In-project and safe: allow
 }
 
-/** bash 守卫：分段扫描汇总后统一判定（防止 "rm -rf safe && sudo reboot" 分段绕过） */
+/** bash guard: scan segments then decide once (prevents "rm -rf safe && sudo reboot" segment bypass) */
 function checkBashCommand(
 	input: BashToolInput,
 	ctx: ExtensionContext,
@@ -373,8 +376,8 @@ function checkBashCommand(
 
 	const realCwd = resolveReal(ctx.cwd);
 
-	// 先按 &&、||、;、|、换行 分段，逐段检查并汇总结果，
-	// 全部扫描完再统一判定 —— 避免首个守卫分段就 return 导致后续分段绕过
+	// Split by &&, ||, ;, |, newline; check each segment and aggregate results,
+	// then decide once — so an early return from the first guarded segment can't skip later ones
 	const blockReasons: string[] = [];
 	const confirmNeeded: string[] = [];
 
@@ -390,51 +393,51 @@ function checkBashCommand(
 		}
 	}
 
-	// 汇总判定：任一硬性阻止 → 整体阻止（fail-safe）
+	// Aggregate: any hard block → block everything (fail-safe)
 	if (blockReasons.length > 0) {
 		return {
 			block: true,
-			reason: `命令被阻止:\n${blockReasons.join("\n")}`,
+			reason: `Command blocked:\n${blockReasons.join("\n")}`,
 		};
 	}
-	// 有需确认的分段 → 弹窗一次，统一确认
+	// Segments needing confirmation → one prompt, confirm together
 	if (confirmNeeded.length > 0) {
 		return askConfirm(
 			ctx,
-			`⚠️ 需要确认的命令\n\n${confirmNeeded
+			`⚠️ Commands requiring confirmation\n\n${confirmNeeded
 				.map((s) => `· ${s}`)
-				.join("\n")}\n\n确认执行？`,
+				.join("\n")}\n\nConfirm execution?`,
 		);
 	}
-	return; // 安全命令，放行
+	return; // Safe command: allow
 }
 
-/** 单个分段的判定结果 */
+/** Verdict for a single segment */
 type SegmentVerdict =
 	| { kind: "block"; reason: string }
 	| { kind: "confirm" }
 	| { kind: "pass" };
 
-/** 逐段判定：受保护重定向 → block；危险命令 → confirm/block；其余交子判定/包装器递归 */
+/** Per-segment check: protected redirect → block; dangerous commands → confirm/block; the rest to sub-judges / wrapper recursion */
 function classifySegment(
 	trimmed: string,
 	realCwd: string,
 	hasUI: boolean,
 	depth = 0,
 ): SegmentVerdict {
-	// 递归深度保护（bash -c / eval 嵌套过深 → 无法静态检查，保守确认）
+	// Recursion depth guard (bash -c / eval nested too deep to statically check → conservative confirm)
 	if (depth > 4) return { kind: "confirm" };
 
-	// ① 重定向检查：
-	//    - 写入受保护路径（echo x > .env 之类）→ 直接阻止
-	//    - "> 已存在文件"（截断，非 >> 追加、非设备）→ 弹窗确认
+	// ① Redirect check:
+	//    - Write to a protected path (echo x > .env etc.) → block
+	//    - "> existing file" (truncate, not >> append, not a device) → confirm
 	const redirect = extractRedirectTarget(trimmed);
 	if (redirect) {
 		const real = resolveReal(resolve(realCwd, expandHome(redirect.target)));
 		if (matchesProtectedPath(real)) {
 			return {
 				kind: "block",
-				reason: `重定向写入受保护路径: ${trimmed}`,
+				reason: `Redirect writes to protected path: ${trimmed}`,
 			};
 		}
 		if (
@@ -446,32 +449,32 @@ function classifySegment(
 		}
 	}
 
-	// ② 危险命令：
-	//    - Block 组（格式化/关机/批量删除/写块设备）→ 任何模式直接阻止
-	//    - Confirm 组（sudo/ssh/chmod 777）→ strict 阻止，其余模式询问
+	// ② Dangerous commands:
+	//    - Block group (format/shutdown/bulk-delete/block-device writes) → blocked in every mode
+	//    - Confirm group (sudo/ssh/chmod 777) → blocked in strict, confirmed otherwise
 	const danger = dangerousLevel(trimmed);
 	if (danger === "block") {
 		return {
 			kind: "block",
-			reason: `系统级破坏命令已阻止: ${trimmed}`,
+			reason: `System-destructive command blocked: ${trimmed}`,
 		};
 	}
 	if (danger === "confirm") {
 		if (currentMode === "strict") {
 			return {
 				kind: "block",
-				reason: `危险命令已阻止（strict 模式）: ${trimmed}`,
+				reason: `Dangerous command blocked (strict mode): ${trimmed}`,
 			};
 		}
 		return hasUI
 			? { kind: "confirm" }
-			: { kind: "block", reason: `危险命令已阻止（无交互界面）: ${trimmed}` };
+			: { kind: "block", reason: `Dangerous command blocked (no interactive UI): ${trimmed}` };
 	}
 
 	const cmdInfo = parseCommand(trimmed);
 	if (!cmdInfo) return { kind: "pass" };
 
-	// ③ shell 包装器（bash -c 'code' / eval 'code'）→ 递归检查内层代码
+	// ③ Shell wrapper (bash -c 'code' / eval 'code') → recursively check the inner code
 	const wrapperVerdict = judgeShellWrapper(
 		trimmed,
 		cmdInfo,
@@ -481,16 +484,16 @@ function classifySegment(
 	);
 	if (wrapperVerdict.kind !== "pass") return wrapperVerdict;
 
-	// ④ source / .：执行脚本文件，内容不可静态解析 → 保守确认
+	// ④ source / .: runs a script file whose contents can't be statically analyzed → conservative confirm
 	if (cmdInfo.command === "source" || cmdInfo.command === ".") {
 		return { kind: "confirm" };
 	}
 
-	// ⑤-⑪ 目标型写命令流水线（git / dd / 下载 / truncate / 就地编辑 / 删除 / 覆盖 / unzip -o）
+	// ⑤-⑪ Pipeline for target-writing commands (git / dd / download / truncate / in-place edit / delete / overwrite / unzip -o)
 	return judgeWriters(trimmed, cmdInfo, realCwd);
 }
 
-/** shell 包装器判定：bash -c / eval 内层代码递归执行同一套检查，汇总后返回 */
+/** Shell wrapper verdict: recursively run the same checks on bash -c / eval inner code */
 function judgeShellWrapper(
 	_trimmed: string,
 	cmdInfo: CmdInfo,
@@ -513,14 +516,14 @@ function judgeShellWrapper(
 	if (blockReasons.length > 0) {
 		return {
 			kind: "block",
-			reason: `内层命令被阻止:\n${blockReasons.join("\n")}`,
+			reason: `Inner command blocked:\n${blockReasons.join("\n")}`,
 		};
 	}
 	if (confirmNeeded.length > 0) return { kind: "confirm" };
 	return { kind: "pass" };
 }
 
-/** 目标型写命令流水线：逐个判定，任一非 pass 立即返回；全部通过才放行 */
+/** Target-writing pipeline: judge each; return on the first non-pass; allow only when all pass */
 function judgeWriters(
 	trimmed: string,
 	cmdInfo: CmdInfo,
@@ -539,14 +542,14 @@ function judgeWriters(
 		const v = judge(trimmed, cmdInfo, realCwd);
 		if (v.kind !== "pass") return v;
 	}
-	// 解压强制覆盖（unzip -o）：归档内容不可预知 → 保守确认
+	// Forced extraction overwrite (unzip -o): archive contents unknowable → conservative confirm
 	if (cmdInfo.command === "unzip" && hasShortFlag(cmdInfo.args, "o")) {
 		return { kind: "confirm" };
 	}
 	return { kind: "pass" };
 }
 
-/** git 破坏性命令判定：clean -f / reset --hard / checkout -- . / restore . / branch -D / push --force / stash drop */
+/** git destructive commands: clean -f / reset --hard / checkout -- . / restore . / branch -D / push --force / stash drop */
 function judgeGit(
 	_trimmed: string,
 	cmdInfo: CmdInfo,
@@ -555,7 +558,7 @@ function judgeGit(
 	if (cmdInfo.command !== "git") return { kind: "pass" };
 
 	const args = cmdInfo.args;
-	// 跳过 git 全局选项（-C dir / -c key=val / --git-dir= 等），取子命令
+	// Skip git global options (-C dir / -c key=val / --git-dir= etc.), find the subcommand
 	let i = 0;
 	while (i < args.length) {
 		const a = args[i];
@@ -595,7 +598,7 @@ function judgeGit(
 	return { kind: "pass" };
 }
 
-/** 删除类命令判定（rm, rmdir, shred 等）；非删除命令 → pass */
+/** Delete-command verdict (rm, rmdir, shred, ...); non-delete commands → pass */
 function judgeDelete(
 	trimmed: string,
 	cmdInfo: CmdInfo,
@@ -603,7 +606,7 @@ function judgeDelete(
 ): SegmentVerdict {
 	if (!isDeleteCommand(cmdInfo.command)) return { kind: "pass" };
 
-	// 查询类（command -v rm / rm --version 等，无路径参数）→ 放行
+	// Query forms (command -v rm / rm --version etc., no path args) → pass
 	if (
 		cmdInfo.args.every((a) => a.startsWith("-")) &&
 		/(-v|-V|--version|-h|--help)\b/.test(trimmed)
@@ -613,17 +616,17 @@ function judgeDelete(
 
 	const pathArgs = extractPathArgs(cmdInfo.args, realCwd);
 
-	// 受保护路径优先：任何模式都阻止（trusted 下删除外部普通文件前先过滤受保护）
+	// Protected paths first: blocked in every mode (trusted filters protected before passing outside deletes)
 	for (const p of pathArgs) {
 		if (matchesProtectedPath(p.path)) {
 			return {
 				kind: "block",
-				reason: `删除命令涉及受保护路径: ${p.path}`,
+				reason: `Delete command targets protected path: ${p.path}`,
 			};
 		}
 	}
 
-	// 找不到具体路径（rm "$HOME/.ssh"、rm ./* 等变量/通配符，无法静态解析）→ 保守确认（所有模式）
+	// No concrete path (rm "$HOME/.ssh", rm ./* — variable/wildcard, not statically resolvable) → conservative confirm (all modes)
 	if (pathArgs.length === 0) {
 		return { kind: "confirm" };
 	}
@@ -631,16 +634,16 @@ function judgeDelete(
 	const externalPaths = pathArgs.filter((p) => p.isOutside);
 	if (externalPaths.length > 0) {
 		const list = externalPaths.map((p) => p.path).join(", ");
-		// trusted → 放行（普通文件，受保护已过滤）；loose → 询问；strict/normal → 阻止
+		// trusted → pass (ordinary files, protected already filtered); loose → confirm; strict/normal → block
 		if (currentMode === "trusted") return { kind: "pass" };
 		if (currentMode === "loose") return { kind: "confirm" };
 		return {
 			kind: "block",
-			reason: `删除命令涉及项目目录外的路径: ${list}`,
+			reason: `Delete command targets paths outside the project directory: ${list}`,
 		};
 	}
 
-	// 项目内删除：strict/normal → 确认；loose/trusted → 放行
+	// In-project delete: strict/normal → confirm; loose/trusted → pass
 	if (currentMode === "loose" || currentMode === "trusted") {
 		return { kind: "pass" };
 	}
@@ -648,11 +651,11 @@ function judgeDelete(
 }
 
 /**
- * 覆盖类命令判定（mv/cp/install/tee/ln -f/rsync）：
- *   - 目标命中受保护路径 → 阻止
- *   - 目标已存在（文件，或目录且有 basename 冲突）→ 项目内确认 / 项目外阻止
- *   - 目标不存在 → 项目外写入确认 / 项目内放行（纯重命名/新建）
- *   - -n/--no-clobber（明确不覆盖）、ln 无 -f、tee -a（追加）→ 放行
+ * Overwrite-command verdict (mv/cp/install/tee/ln -f/rsync):
+ *   - Target hits a protected path → block
+ *   - Target exists (file, or dir with a basename conflict) → confirm in-project / block outside
+ *   - Target missing → confirm outside write / pass in-project (pure rename/create)
+ *   - -n/--no-clobber (explicit no-overwrite), ln without -f, tee -a (append) → pass
  */
 function judgeOverwrite(
 	_trimmed: string,
@@ -661,27 +664,27 @@ function judgeOverwrite(
 ): SegmentVerdict {
 	if (!OVERWRITE_COMMANDS.has(cmdInfo.command)) return { kind: "pass" };
 
-	// ln 只有在带 -f/--force 时才会覆盖已存在目标
+	// ln only overwrites existing targets with -f/--force
 	if (cmdInfo.command === "ln" && !hasForceFlag(cmdInfo.args)) {
 		return { kind: "pass" };
 	}
-	// -n/--no-clobber：明确不覆盖，安全放行
+	// -n/--no-clobber: explicit no-overwrite, safe to pass
 	if (cmdInfo.args.includes("-n") || cmdInfo.args.includes("--no-clobber")) {
 		return { kind: "pass" };
 	}
-	// tee -a / --append：追加不覆盖
+	// tee -a / --append: append, no overwrite
 	if (
 		cmdInfo.command === "tee" &&
 		(cmdInfo.args.includes("-a") || cmdInfo.args.includes("--append"))
 	) {
 		return { kind: "pass" };
 	}
-	// rsync --delete：删除目标目录中多余文件 → 保守确认
+	// rsync --delete: removes extra files in the target dir → conservative confirm
 	if (cmdInfo.command === "rsync" && cmdInfo.args.includes("--delete")) {
 		return { kind: "confirm" };
 	}
 
-	// 解析目标：-t dir src... 形式 vs 常规形式（最后一个 operand 为目标）
+	// Resolve target: -t dir src... form vs the regular form (last operand is the target)
 	let target: string | null = null;
 	let sources: string[] = [];
 	const tIdx = cmdInfo.args.indexOf("-t");
@@ -697,52 +700,52 @@ function judgeOverwrite(
 	}
 	if (!target || sources.length === 0) return { kind: "pass" };
 
-	// 变量/通配符无法静态解析 → 保守确认
+	// Variable/wildcard not statically resolvable → conservative confirm
 	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
 		return { kind: "confirm" };
 	}
 
 	const real = resolveReal(resolve(realCwd, expandHome(target)));
-	// ① 目标命中受保护路径 → 直接阻止
+	// ① Target hits a protected path → block
 	if (matchesProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `命令可能覆盖受保护路径: ${cmdInfo.command} ${target}`,
+			reason: `Command may overwrite protected path: ${cmdInfo.command} ${target}`,
 		};
 	}
 
 	const outside = isOutsideCwd(real, realCwd);
 
-	// 项目外覆盖已存在目标：normal/strict → block；loose → confirm；trusted → pass
+	// Outside overwrite of an existing target: normal/strict → block; loose → confirm; trusted → pass
 	const outsideOverwriteVerdict = (): SegmentVerdict => {
 		if (currentMode === "trusted") return { kind: "pass" };
 		if (currentMode === "loose") return { kind: "confirm" };
 		return {
 			kind: "block",
-			reason: `命令将覆盖项目目录外的目标: ${cmdInfo.command} ${target}`,
+			reason: `Command will overwrite a target outside the project directory: ${cmdInfo.command} ${target}`,
 		};
 	};
 
-	// ② 目标是已存在目录：检查每个源 basename 是否有冲突
+	// ② Target is an existing directory: check each source basename for conflicts
 	if (existsSync(real) && isDirectory(real)) {
 		const conflict = sources.some((s) => {
-			// 源无法静态解析 → 保守视为冲突
+			// Source not statically resolvable → treat as a conflict
 			if (s.startsWith("$") || s.includes("*") || s.includes("?")) return true;
 			const srcReal = resolveReal(resolve(realCwd, expandHome(s)));
 			return existsSync(join(real, basename(srcReal)));
 		});
 		if (!conflict) return { kind: "pass" };
-		// 覆盖已存在目标：项目外按模式，项目内确认（覆盖类最差也是 confirm）
+		// Overwriting an existing target: outside per mode, in-project confirm (overwrites are never silently passed)
 		return outside ? outsideOverwriteVerdict() : { kind: "confirm" };
 	}
 
-	// ③ 目标是已存在文件：会被覆盖
+	// ③ Target is an existing file: will be overwritten
 	if (existsSync(real)) {
 		return outside ? outsideOverwriteVerdict() : { kind: "confirm" };
 	}
 
-	// ④ 目标不存在：项目外 → normal/strict 确认、loose/trusted 放行；
-	//    项目内 → strict 确认、其余放行（纯重命名/新建）
+	// ④ Target missing: outside → normal/strict confirm, loose/trusted pass;
+	//    in-project → strict confirm, others pass (pure rename/create)
 	if (outside) {
 		return currentMode === "loose" || currentMode === "trusted"
 			? { kind: "pass" }
@@ -751,13 +754,13 @@ function judgeOverwrite(
 	return currentMode === "strict" ? { kind: "confirm" } : { kind: "pass" };
 }
 
-/** shell 包装器解包：bash/sh/zsh -c 'code'、eval 'code' → 返回内层代码；否则 null */
+/** Unwrap a shell wrapper: bash/sh/zsh -c 'code', eval 'code' → inner code; else null */
 function unwrapShellWrapper(cmdInfo: CmdInfo): string | null {
 	if (SHELL_WRAPPERS.has(cmdInfo.command)) {
 		for (let i = 0; i < cmdInfo.args.length; i++) {
 			const a = cmdInfo.args[i];
-			if (a === "--") break; // 之后的都不是 flag
-			// 短 flag 含 c（-c、-ec 等组合）；长 flag 不算
+			if (a === "--") break; // everything after is not a flag
+			// short flag contains c (-c, -ec combos); long flags don't count
 			if (a.startsWith("-") && !a.startsWith("--") && a.includes("c")) {
 				const inner = cmdInfo.args.slice(i + 1).join(" ");
 				return inner.trim() || null;
@@ -772,19 +775,19 @@ function unwrapShellWrapper(cmdInfo: CmdInfo): string | null {
 	return null;
 }
 
-/** 是否带短 flag（支持 -i.bak / -pi 等组合；仅单横线形式） */
+/** Whether args contain a short flag (supports -i.bak / -pi combos; single-dash only) */
 function hasShortFlag(args: string[], ch: string): boolean {
 	return args.some(
 		(a) => a.startsWith("-") && !a.startsWith("--") && a.slice(1).includes(ch),
 	);
 }
 
-/** 是否带长 flag（--name 或 --name=value） */
+/** Whether args contain a long flag (--name or --name=value) */
 function hasLongFlag(args: string[], name: string): boolean {
 	return args.some((a) => a === `--${name}` || a.startsWith(`--${name}=`));
 }
 
-/** dd 判定：of= 指向受保护文件 → 阻止（写块设备由危险模式覆盖） */
+/** dd verdict: of= pointing at a protected file → block (block-device writes covered by dangerous patterns) */
 function judgeDd(
 	trimmed: string,
 	cmdInfo: CmdInfo,
@@ -800,13 +803,13 @@ function judgeDd(
 		}
 		const real = resolveReal(resolve(realCwd, expandHome(target)));
 		if (matchesProtectedPath(real)) {
-			return { kind: "block", reason: `dd 写入受保护路径: ${trimmed}` };
+			return { kind: "block", reason: `dd writes to protected path: ${trimmed}` };
 		}
 	}
 	return { kind: "pass" };
 }
 
-/** curl/wget 判定：输出目标命中受保护路径 → 阻止 */
+/** curl/wget verdict: output target hits a protected path → block */
 function judgeDownload(
 	_trimmed: string,
 	cmdInfo: CmdInfo,
@@ -824,20 +827,20 @@ function judgeDownload(
 	if (matchesProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `下载写入受保护路径: ${cmdInfo.command} ${target}`,
+			reason: `Download writes to protected path: ${cmdInfo.command} ${target}`,
 		};
 	}
 	return { kind: "pass" };
 }
 
-/** 提取下载命令的输出目标；无显式目标则 null */
+/** Extract the download output target; null if none explicit */
 function downloadTarget(command: string, args: string[]): string | null {
 	return command === "wget"
 		? wgetDownloadTarget(args)
 		: curlDownloadTarget(args);
 }
 
-/** wget 输出目标（-O / --output / --output-document 均带参数） */
+/** wget output target (-O / --output / --output-document all take an argument) */
 function wgetDownloadTarget(args: string[]): string | null {
 	for (let i = 0; i < args.length; i++) {
 		const a = args[i];
@@ -851,7 +854,7 @@ function wgetDownloadTarget(args: string[]): string | null {
 	return null;
 }
 
-/** curl 输出目标（-o / --output 带参数；-O 无参数，取 URL basename） */
+/** curl output target (-o / --output take an argument; -O has none, uses the URL basename) */
 function curlDownloadTarget(args: string[]): string | null {
 	for (let i = 0; i < args.length; i++) {
 		const a = args[i];
@@ -874,14 +877,14 @@ function curlDownloadTarget(args: string[]): string | null {
 	return null;
 }
 
-/** truncate 判定：目标命中受保护路径 → 阻止；目标已存在（非设备）→ 确认 */
+/** truncate verdict: target hits a protected path → block; existing non-device target → confirm */
 function judgeTruncate(
 	_trimmed: string,
 	cmdInfo: CmdInfo,
 	realCwd: string,
 ): SegmentVerdict {
 	if (cmdInfo.command !== "truncate") return { kind: "pass" };
-	// 存在无法静态解析的目标（变量/通配符）→ 保守确认
+	// Any target not statically resolvable (variable/wildcard) → conservative confirm
 	if (
 		cmdInfo.args.some(
 			(a) =>
@@ -893,9 +896,9 @@ function judgeTruncate(
 	}
 	for (const t of extractPathArgs(cmdInfo.args, realCwd)) {
 		if (matchesProtectedPath(t.path)) {
-			return { kind: "block", reason: `truncate 截断受保护路径: ${t.raw}` };
+			return { kind: "block", reason: `truncate truncates protected path: ${t.raw}` };
 		}
-		// 已存在的普通文件被截断 → 确认（防误覆盖）
+		// Existing ordinary file truncated → confirm (prevent accidental overwrite)
 		if (!DEVICE_TARGETS.has(t.path) && existsSync(t.path)) {
 			return { kind: "confirm" };
 		}
@@ -903,7 +906,7 @@ function judgeTruncate(
 	return { kind: "pass" };
 }
 
-/** 就地编辑判定（sed -i / perl -i / ruby -i）：目标命中受保护路径 → 阻止 */
+/** In-place edit verdict (sed -i / perl -i / ruby -i): target hits a protected path → block */
 function judgeInPlace(
 	_trimmed: string,
 	cmdInfo: CmdInfo,
@@ -916,7 +919,7 @@ function judgeInPlace(
 	) {
 		return { kind: "pass" };
 	}
-	// sed 语法: sed -i 'script' file — 目标文件在最后（多文件场景只取最后一个，够保守）
+	// sed syntax: sed -i 'script' file — target file is last (multi-file: only the last is checked; conservative enough)
 	const dest = lastDestArg(cmdInfo.args);
 	if (!dest) return { kind: "pass" };
 	if (dest.startsWith("$") || dest.includes("*") || dest.includes("?")) {
@@ -926,15 +929,15 @@ function judgeInPlace(
 	if (matchesProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `就地编辑受保护路径: ${cmdInfo.command} ${dest}`,
+			reason: `In-place edit of protected path: ${cmdInfo.command} ${dest}`,
 		};
 	}
 	return { kind: "pass" };
 }
 
-// ─── 路径工具 ──────────────────────────────────────────────────────
+// ─── Path Utils ───────────────────────────────────────────────────────
 
-/** 判断绝对路径是否在 cwd 之外 */
+/** Whether an absolute path is outside cwd */
 function isOutsideCwd(absolutePath: string, cwd: string): boolean {
 	const normCwd = normalize(cwd);
 	const normPath = normalize(absolutePath);
@@ -943,7 +946,7 @@ function isOutsideCwd(absolutePath: string, cwd: string): boolean {
 	return rel.startsWith("..") || rel === normPath;
 }
 
-/** 不区分项目内外的受保护判定（供 bash 重定向/覆盖检查与 write 守卫使用） */
+/** Protected-path match regardless of in/out project (used by bash redirect/overwrite checks and the write guard) */
 function matchesProtectedPath(absolutePath: string): boolean {
 	const segments = normalize(absolutePath).toLowerCase().split(sep);
 
@@ -952,7 +955,7 @@ function matchesProtectedPath(absolutePath: string): boolean {
 		const isDir = pat.endsWith("/");
 		const core = isDir ? pat.slice(0, -1) : pat;
 
-		// 后缀模式（*.pem、*.key）：匹配任意路径段
+		// Suffix patterns (*.pem, *.key): match any path segment
 		if (core.startsWith("*.")) {
 			const suffix = core.slice(1);
 			if (segments.some((seg) => seg.endsWith(suffix))) return true;
@@ -962,11 +965,11 @@ function matchesProtectedPath(absolutePath: string): boolean {
 		for (let i = 0; i < segments.length; i++) {
 			const seg = segments[i];
 			if (seg === core) {
-				// 目录模式（.git/、node_modules/ 等）命中任意目录段；
-				// 文件模式（.env）只命中末段
+				// Dir patterns (.git/, node_modules/, etc.) match any directory segment;
+				// file patterns (.env) only match the last segment
 				if (isDir || i === segments.length - 1) return true;
 			}
-			// 文件模式变体（.env.local / .env.production，末段）
+			// File-pattern variants (.env.local / .env.production, last segment)
 			if (!isDir && i === segments.length - 1 && seg.startsWith(core + ".")) {
 				return true;
 			}
@@ -976,10 +979,10 @@ function matchesProtectedPath(absolutePath: string): boolean {
 }
 
 /**
- * 危险命令分级：
- *   - "block"   → 系统级破坏（格式化/关机/批量删除/写块设备），任何模式直接阻止
- *   - "confirm" → 提权/远程/危险权限（sudo/ssh/chmod 777），strict 阻止、其余询问
- *   - null      → 非危险命令
+ * Dangerous command classification:
+ *   - "block"   → system-destructive (format/shutdown/bulk-delete/block-device writes), blocked in every mode
+ *   - "confirm" → privilege/remote/risky (sudo/ssh/chmod 777), blocked in strict, confirmed otherwise
+ *   - null      → not dangerous
  */
 function dangerousLevel(fullCommand: string): "block" | "confirm" | null {
 	for (const pattern of BLOCK_DANGEROUS_PATTERNS) {
@@ -991,16 +994,16 @@ function dangerousLevel(fullCommand: string): "block" | "confirm" | null {
 	return null;
 }
 
-// ─── 命令解析 ─────────────────────────────────────────────────────
+// ─── Command Parsing ──────────────────────────────────────────────────
 
 interface CmdInfo {
-	command: string; // 基础命令名 (rm, rmdir 等)
-	args: string[]; // 非 flag 参数（潜在路径）
+	command: string; // base command name (rm, rmdir, etc.)
+	args: string[]; // non-flag args (potential paths)
 }
 
-/** 解析 shell 命令，拆出命令名和参数（剥除前缀命令后取真实命令） */
+/** Parse a shell command into name and args (strips prefix commands first) */
 function parseCommand(fullCommand: string): CmdInfo | null {
-	// 去掉命令替换 $(...)、子 shell (...)、分组 {...} 包裹
+	// Strip command-substitution $(...), subshell (...), and group {...} wrappers
 	let cleaned = fullCommand.trim();
 	cleaned = cleaned.replace(/^\$\(\s*/, "").replace(/\s*\)$/, "");
 	cleaned = cleaned.replace(/^\(\s*/, "").replace(/\s*\)$/, "");
@@ -1009,17 +1012,17 @@ function parseCommand(fullCommand: string): CmdInfo | null {
 	const tokens = splitShellTokens(cleaned);
 	if (tokens.length === 0) return null;
 
-	// 剥除前缀命令（sudo/nohup/timeout/env 等）及其 flag / 数字 / VAR= 赋值参数
+	// Strip prefix commands (sudo/nohup/timeout/env etc.) along with their flags / numbers / VAR= assignments
 	const stripped = stripPrefixTokens(tokens);
 	if (stripped.length === 0) return null;
 
-	// 去掉 \ 前缀（如 \rm）与路径前缀（/bin/rm）
+	// Drop the backslash prefix (\rm) and path prefix (/bin/rm)
 	const raw = stripped[0].split("/").pop() ?? stripped[0];
 	const base = raw.replace(/^\\(?=[A-Za-z])/, "");
 	return { command: base, args: stripped.slice(1) };
 }
 
-/** 剥除前缀命令（sudo 等），跳过其 flag / 数字 / VAR= 赋值参数 */
+/** Strip prefix commands (sudo etc.), skipping their flags / numbers / VAR= assignments */
 function stripPrefixTokens(tokens: string[]): string[] {
 	const t = [...tokens];
 	while (t.length > 0 && PREFIX_COMMANDS.has(t[0])) {
@@ -1033,18 +1036,18 @@ function stripPrefixTokens(tokens: string[]): string[] {
 			const flag = t.shift()!;
 			if (FLAGS_WITH_ARG.has(flag)) t.shift();
 		}
-		// chroot 的第一个参数是 NEWROOT 路径，跳过
+		// chroot's first argument is the NEWROOT path; skip it
 		if (prefix === "chroot" && t.length > 0) t.shift();
 	}
 	return t;
 }
 
-/** 判断是否为删除类命令 */
+/** Whether the command is a delete command */
 function isDeleteCommand(cmd: string): boolean {
 	return DELETE_COMMANDS.has(cmd);
 }
 
-/** 是否带强制覆盖 flag（-f / --force，支持 -sf / -fdx 等组合） */
+/** Whether args carry a force flag (-f / --force, supports -sf / -fdx combos) */
 function hasForceFlag(args: string[]): boolean {
 	return args.some((a) => {
 		if (!a.startsWith("-")) return false;
@@ -1053,7 +1056,7 @@ function hasForceFlag(args: string[]): boolean {
 	});
 }
 
-/** 覆盖类命令的“目标”——最后一个非 flag 参数；无则 null */
+/** Overwrite command "target" — last non-flag arg; null if none */
 function lastDestArg(args: string[]): string | null {
 	for (let i = args.length - 1; i >= 0; i--) {
 		const a = args[i];
@@ -1064,7 +1067,7 @@ function lastDestArg(args: string[]): string | null {
 	return null;
 }
 
-/** 从参数中提取可能是路径的 token，解析为绝对路径并判断内外 */
+/** Extract path-like tokens from args, resolve to absolute, classify in/out */
 function extractPathArgs(
 	args: string[],
 	cwd: string,
@@ -1072,9 +1075,9 @@ function extractPathArgs(
 	const results: Array<{ raw: string; path: string; isOutside: boolean }> = [];
 
 	for (const arg of args) {
-		// 跳过 flag
+		// Skip flags
 		if (arg.startsWith("-")) continue;
-		// 跳过通配符/重定向
+		// Skip wildcards/redirects
 		if (
 			arg.includes("*") ||
 			arg.includes("?") ||
@@ -1084,14 +1087,14 @@ function extractPathArgs(
 			arg === "2>>"
 		)
 			continue;
-		// 变量引用（如 "$HOME/.ssh"）无法静态解析 → 跳过，最终会落入"无路径→弹窗"分支
+		// Variable refs ("$HOME/.ssh") not statically resolvable → skip; falls into the no-path→confirm branch
 		if (arg.startsWith("$")) continue;
 
-		// 展开 ~ / ~/xxx 到 HOME，否则会被当作项目内相对路径
+		// Expand ~ / ~/xxx to HOME, or it'd be treated as an in-project relative path
 		const expanded = expandHome(arg);
 
 		const resolved = resolve(cwd, expanded);
-		// 解析符号链接，防止删除目标实际位于项目外
+		// Resolve symlinks so a delete target can't actually live outside the project
 		const real = resolveReal(resolved);
 		const outside = isOutsideCwd(real, cwd);
 		results.push({ raw: arg, path: real, isOutside: outside });
@@ -1100,45 +1103,45 @@ function extractPathArgs(
 	return results;
 }
 
-/** 展开 ~ / ~/xxx 到 HOME */
+/** Expand ~ / ~/xxx to HOME */
 function expandHome(p: string): string {
 	if (p === "~") return HOME;
 	if (p.startsWith("~/")) return join(HOME, p.slice(2));
 	return p;
 }
 
-/** 重定向目标：{ op, target }；无则 null */
+/** Redirect target: { op, target }; null if none */
 interface RedirectTarget {
-	op: string; // 重定向操作符（>、2>、&>、>>、2>> 等）
-	target: string; // 目标路径
+	op: string; // redirect operator (>, 2>, &>, >>, 2>>, ...)
+	target: string; // target path
 }
 
-/** 提取重定向写入目标（> file、2>>file、&> file 等）；无则 null */
+/** Extract the redirect write target (> file, 2>>file, &> file, ...); null if none */
 function extractRedirectTarget(fullCommand: string): RedirectTarget | null {
 	const tokens = splitShellTokens(fullCommand);
 	const REDIR = /^([0-9]*&?>+)(.*)$/;
 	for (let i = 0; i < tokens.length; i++) {
 		const m = REDIR.exec(tokens[i]);
 		if (!m) continue;
-		// 同 token 内紧跟的目标（echo hi >.env）
+		// Target glued to the same token (echo hi >.env)
 		if (m[2]) {
-			// 2>&1 之类 fd 复制 → 跳过
+			// fd duplication like 2>&1 → skip
 			if (!m[2].startsWith("&")) return { op: m[1], target: m[2] };
 			continue;
 		}
-		// 目标在下一个 token（> /dev/sda）
+		// Target in the next token (> /dev/sda)
 		const next = tokens[i + 1];
 		if (next && !next.startsWith("&")) return { op: m[1], target: next };
 	}
 	return null;
 }
 
-/** 是否为截断型重定向（单个 >，非 >> 追加） */
+/** Whether the operator is truncating (single >, not >> append) */
 function isTruncatingOp(op: string): boolean {
 	return op.endsWith(">") && !op.endsWith(">>");
 }
 
-/** 极简 shell token 拆分（支持单引号/双引号） */
+/** Minimal shell tokenizer (handles single/double quotes) */
 function splitShellTokens(input: string): string[] {
 	const tokens: string[] = [];
 	let current = "";
@@ -1166,7 +1169,7 @@ function splitShellTokens(input: string): string[] {
 	return tokens;
 }
 
-/** 按 shell 操作符分段（&&、||、;、|、换行），引号内不分段 */
+/** Split by shell operators (&&, ||, ;, |, newline); never inside quotes */
 function splitSegments(input: string): string[] {
 	const segments: string[] = [];
 	let current = "";
@@ -1194,7 +1197,7 @@ function splitSegments(input: string): string[] {
 			if (isSep) {
 				if (current.trim()) segments.push(current.trim());
 				current = "";
-				if (ch === "&") i++; // 跳过第二个 &
+				if (ch === "&") i++; // skip the second &
 				continue;
 			}
 		}
@@ -1204,7 +1207,7 @@ function splitSegments(input: string): string[] {
 	return segments;
 }
 
-/** 判断路径是否为目录 */
+/** Whether the path is a directory */
 function isDirectory(p: string): boolean {
 	try {
 		return statSync(p).isDirectory();
@@ -1214,10 +1217,11 @@ function isDirectory(p: string): boolean {
 }
 
 /**
- * 解析符号链接，返回真实路径。
- * 路径不存在时，从最近父目录向上逐级解析，找到第一个能解析的祖先后拼接剩余部分。
- * 与“从根向下”的方案不同，从后往前能正确解析中段的软链（如 项目内 lnk -> 外部目录），
- * 防止深层不存在路径经软链写穿到项目外；也正确处理软链 cwd。
+ * Resolve symlinks to the real path.
+ * For missing paths, walk upward from the nearest existing ancestor, resolve the first
+ * resolvable parent, and append the remainder. Unlike top-down resolution, this correctly
+ * handles mid-path symlinks (e.g. in-project lnk -> external dir), preventing deep missing
+ * paths from being written through a symlink to outside the project; also handles symlink cwd.
  */
 function resolveReal(p: string): string {
 	try {
@@ -1227,7 +1231,7 @@ function resolveReal(p: string): string {
 		const tail: string[] = [];
 		for (;;) {
 			const parent = dirname(cur);
-			if (parent === cur) break; // 已到根，路径全部不存在
+			if (parent === cur) break; // reached root; path doesn't exist at all
 			try {
 				const real = realpathSync(parent);
 				return join(real, basename(cur), ...tail);
@@ -1240,17 +1244,17 @@ function resolveReal(p: string): string {
 	}
 }
 
-// ─── UI 交互 ─────────────────────────────────────────────────────
+// ─── UI Interaction ───────────────────────────────────────────────────
 
-/** trusted 模式切换前的警告确认：提示行为边界非常宽松，需用户明确确认 */
+/** Warning confirmation before switching to trusted: behavior boundary is very loose; requires explicit user confirmation */
 async function confirmTrustedSwitch(
 	ctx: ExtensionCommandContext,
 ): Promise<boolean> {
-	// 无 UI（headless）无法确认 → 保守拒绝切换
+	// No UI (headless) cannot confirm → conservatively refuse the switch
 	if (!ctx.hasUI) return false;
 	return ctx.ui.confirm(
-		"⚠️ 切换到 trusted 模式？",
-		"trusted 是最宽松模式：项目内删除、项目外覆盖/删除普通文件均不再询问，\n仅受保护路径与系统级破坏命令仍被阻止。\n\n此模式下 pi 的行为边界非常宽松，请确认是否切换。",
+		"⚠️ Switch to trusted mode?",
+		"trusted is the most permissive mode: in-project deletes and outside overwrites/deletes of\nordinary files are no longer prompted. Only protected paths and system-destructive commands\nremain blocked.\n\npi's behavior boundary is very loose in this mode — please confirm the switch.",
 	);
 }
 
@@ -1259,16 +1263,16 @@ async function askConfirm(
 	message: string,
 ): Promise<ToolCallEventResult | undefined> {
 	if (!ctx.hasUI) {
-		return { block: true, reason: "无交互界面，已阻止" };
+		return { block: true, reason: "No interactive UI; blocked" };
 	}
 
 	const choice = await ctx.ui.select(message, [
-		"✅ 允许 (Allow)",
-		"❌ 拒绝 (Deny)",
+		"✅ Allow",
+		"❌ Deny",
 	]);
 
-	if (choice !== "✅ 允许 (Allow)") {
-		return { block: true, reason: "用户拒绝了操作" };
+	if (choice !== "✅ Allow") {
+		return { block: true, reason: "User denied the operation" };
 	}
-	return undefined; // 放行
+	return undefined; // allow
 }

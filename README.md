@@ -69,9 +69,17 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 
 ## Development / 开发与测试
 
-Automated tests (83 assertions) load the real extension with a mocked pi API, covering the 4 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction and trusted-mode confirmation flow.
+Automated tests (83 assertions) load the real extension with a mocked pi API, covering the 4 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction and trusted-mode confirmation flow:
 
-自动化测试（83 断言）模拟 pi API 加载真实扩展，覆盖 4 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互与 trusted 确认流程。
+```bash
+cd tests && node --experimental-strip-types test-pathguard.ts
+```
+
+自动化测试（83 断言）模拟 pi API 加载真实扩展，覆盖 4 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互与 trusted 确认流程：
+
+```bash
+cd tests && node --experimental-strip-types test-pathguard.ts
+```
 
 ## License
 

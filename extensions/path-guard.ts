@@ -258,7 +258,10 @@ export default function (pi: ExtensionAPI) {
 			// Valid argument → switch directly (shortcut, no picker); trusted requires a warning confirmation
 			if (isGuardMode(m)) {
 				if (m === "trusted" && !(await confirmTrustedSwitch(ctx))) {
-					ctx.ui.notify("Cancelled: switching to trusted requires confirmation", "info");
+					ctx.ui.notify(
+						"Cancelled: switching to trusted requires confirmation",
+						"info",
+					);
 					return;
 				}
 				currentMode = m;
@@ -291,7 +294,10 @@ export default function (pi: ExtensionAPI) {
 			const picked = chosen.split(/\s+/)[0] as GuardMode;
 			if (isGuardMode(picked)) {
 				if (picked === "trusted" && !(await confirmTrustedSwitch(ctx))) {
-					ctx.ui.notify("Cancelled: switching to trusted requires confirmation", "info");
+					ctx.ui.notify(
+						"Cancelled: switching to trusted requires confirmation",
+						"info",
+					);
 					return;
 				}
 				currentMode = picked;
@@ -468,7 +474,10 @@ function classifySegment(
 		}
 		return hasUI
 			? { kind: "confirm" }
-			: { kind: "block", reason: `Dangerous command blocked (no interactive UI): ${trimmed}` };
+			: {
+					kind: "block",
+					reason: `Dangerous command blocked (no interactive UI): ${trimmed}`,
+				};
 	}
 
 	const cmdInfo = parseCommand(trimmed);
@@ -896,7 +905,10 @@ function judgeTruncate(
 	}
 	for (const t of extractPathArgs(cmdInfo.args, realCwd)) {
 		if (matchesProtectedPath(t.path)) {
-			return { kind: "block", reason: `truncate truncates protected path: ${t.raw}` };
+			return {
+				kind: "block",
+				reason: `truncate truncates protected path: ${t.raw}`,
+			};
 		}
 		// Existing ordinary file truncated → confirm (prevent accidental overwrite)
 		if (!DEVICE_TARGETS.has(t.path) && existsSync(t.path)) {
@@ -1266,10 +1278,7 @@ async function askConfirm(
 		return { block: true, reason: "No interactive UI; blocked" };
 	}
 
-	const choice = await ctx.ui.select(message, [
-		"✅ Allow",
-		"❌ Deny",
-	]);
+	const choice = await ctx.ui.select(message, ["✅ Allow", "❌ Deny"]);
 
 	if (choice !== "✅ Allow") {
 		return { block: true, reason: "User denied the operation" };

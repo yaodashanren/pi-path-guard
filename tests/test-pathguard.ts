@@ -3,7 +3,7 @@
  * Loads the real extension with a mocked pi API and verifies judgment per mode.
  * Verdict recognition: returns {block:true} → block; calls ui.select → confirm; otherwise → pass
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -679,6 +679,93 @@ check(
 		)
 	).verdict,
 	"block",
+);
+
+// ── mode persistence via settings.json ─────────────────────
+const PERSIST = "/tmp/pgtest/persist";
+const PERSIST_SETTINGS = join(PERSIST, ".pi", "settings.json");
+mkdirSync(join(PERSIST, ".pi"), { recursive: true });
+
+// A. session_start restores a saved project mode (trusted project)
+rmSync(PERSIST_SETTINGS, { force: true });
+writeFileSync(
+	PERSIST_SETTINGS,
+	JSON.stringify({ pathGuard: { mode: "loose" } }),
+);
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: PERSIST,
+		isProjectTrusted: () => true,
+		ui: { theme: themeMock, setStatus: () => {} },
+	},
+);
+check(
+	"session_start restores saved project mode",
+	(await currentModeShown()).includes("loose") ? "loose" : "?",
+	"loose",
+);
+
+// B. project mode ignored when project is untrusted → falls back to global/normal
+writeFileSync(
+	PERSIST_SETTINGS,
+	JSON.stringify({ pathGuard: { mode: "naked" } }),
+);
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: PERSIST,
+		isProjectTrusted: () => false,
+		ui: { theme: themeMock, setStatus: () => {} },
+	},
+);
+check(
+	"project mode ignored when project untrusted",
+	(await currentModeShown()).includes("normal") ? "normal" : "?",
+	"normal",
+);
+
+// C. /guard switch in a trusted project persists the mode to project settings
+rmSync(PERSIST_SETTINGS, { force: true });
+let persistNotify: string[] = [];
+await commands["guard"].handler("trusted", {
+	cwd: PERSIST,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: (m: string) => persistNotify.push(m),
+		confirm: async () => true,
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+const persisted = JSON.parse(readFileSync(PERSIST_SETTINGS, "utf8"));
+check(
+	"guard switch persists mode to project settings",
+	persisted.pathGuard?.mode === "trusted" ? "trusted" : "?",
+	"trusted",
+);
+check(
+	"guard persist notify mentions project settings",
+	persistNotify.join(" ").includes("project settings") ? "project" : "?",
+	"project",
+);
+
+// D. no cwd → session-only, not persisted
+let noCwdNotify: string[] = [];
+await commands["guard"].handler("loose", {
+	hasUI: true,
+	ui: {
+		notify: (m: string) => noCwdNotify.push(m),
+		confirm: async () => true,
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"guard switch without cwd is session-only",
+	noCwdNotify.join(" ").includes("session-only") ? "session-only" : "?",
+	"session-only",
 );
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

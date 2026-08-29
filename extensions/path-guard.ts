@@ -42,6 +42,11 @@
  *   checks, git destructive, truncate, outside deletes/overwrites); only system-destructive
  *   Block-group commands (mkfs/reboot/block-device writes/bulk delete) are still confirmed.
  *   Switching to naked requires a double confirmation (stronger than trusted's single warning).
+ *
+ * v3.2 adds (upgrade from v3.1): mode persistence across sessions. The active mode is read from
+ *   settings.json on session_start (project .pi/settings.json overrides the global
+ *   ~/.pi/agent/settings.json, falling back to normal) and written back when /guard switches
+ *   mode — project settings in a trusted project, otherwise global settings. Key: pathGuard.mode.
  */
 
 import type {
@@ -64,7 +69,13 @@ import {
 	sep,
 } from "node:path";
 import { homedir } from "node:os";
-import { realpathSync, existsSync, statSync } from "node:fs";
+import {
+	realpathSync,
+	existsSync,
+	statSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 
 // ─── Configuration ──────────────────────────────────────────────────────
 
@@ -189,6 +200,11 @@ const DEVICE_TARGETS = new Set([
 
 const HOME = homedir();
 
+/** pi project config dir name (default CONFIG_DIR_NAME is `.pi`). */
+const CONFIG_DIR = ".pi";
+/** Global settings.json path (default pi agent dir). */
+const GLOBAL_SETTINGS_PATH = join(HOME, ".pi", "agent", "settings.json");
+
 // ─── Guard Modes ─────────────────────────────────────────────────────
 
 /** Guard mode: strict (full) / normal (default) / loose (relaxed) / trusted (most permissive) / naked (no protection) */
@@ -268,16 +284,94 @@ function refreshModeStatus(ui: ExtensionUIContext) {
 	ui.setStatus("path-guard", t.fg(color, label));
 }
 
+// ─── Settings persistence (mode survives across sessions) ─────────────
+
+/** Global settings.json path (~/.pi/agent/settings.json). */
+function globalSettingsPath(): string {
+	return GLOBAL_SETTINGS_PATH;
+}
+
+/** Project settings.json path (cwd/.pi/settings.json), or undefined when no cwd. */
+function projectSettingsPath(cwd: string | undefined): string | undefined {
+	return cwd ? join(cwd, CONFIG_DIR, "settings.json") : undefined;
+}
+
+/** Read the saved guard mode from a settings.json file, or undefined if absent/invalid. */
+function readSettingsMode(filePath: string | undefined): GuardMode | undefined {
+	if (!filePath) return undefined;
+	try {
+		if (!existsSync(filePath)) return undefined;
+		const data = JSON.parse(readFileSync(filePath, "utf8")) as {
+			pathGuard?: { mode?: string };
+		};
+		const mode = data?.pathGuard?.mode;
+		return typeof mode === "string" && isGuardMode(mode) ? mode : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Effective saved mode at session start: project settings override global,
+ * falling back to normal. Project-local config is only honored for trusted
+ * projects; otherwise only the global setting applies.
+ */
+function readSavedMode(cwd: string | undefined, trusted: boolean): GuardMode {
+	const proj = projectSettingsPath(cwd);
+	if (proj && trusted) {
+		const pm = readSettingsMode(proj);
+		if (pm) return pm;
+	}
+	return readSettingsMode(globalSettingsPath()) ?? "normal";
+}
+
+/**
+ * Persist a mode to settings.json. In a trusted project it writes the project
+ * settings file (cwd/.pi/settings.json); otherwise the global settings file.
+ * Requires a cwd; returns "project" | "global" | "none" (none = not persisted).
+ */
+function persistMode(
+	mode: GuardMode,
+	cwd: string | undefined,
+	trusted: boolean,
+): string {
+	if (!cwd) return "none"; // no context to persist to
+	const target = trusted ? projectSettingsPath(cwd) : globalSettingsPath();
+	if (!target) return "none";
+	try {
+		let data: Record<string, unknown> = {};
+		if (existsSync(target)) {
+			data = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown>;
+		}
+		const guard = (data.pathGuard as Record<string, unknown>) ?? {};
+		guard.mode = mode;
+		data.pathGuard = guard;
+		writeFileSync(target, JSON.stringify(data, null, 2) + "\n", "utf8");
+		return trusted ? "project" : "global";
+	} catch {
+		return "none";
+	}
+}
+
+/** Human-readable persistence note for notify messages. */
+function persistNote(where: string): string {
+	if (where === "project")
+		return "saved to project settings (.pi/settings.json)";
+	if (where === "global") return "saved to global settings";
+	return "session-only (not persisted)";
+}
+
 export default function (pi: ExtensionAPI) {
-	// Reset to normal on every new session (startup, /new, /resume all fire session_start)
+	// Restore the persisted mode on every new session (startup, /new, /resume all
+	// fire session_start). Project settings override global; falls back to normal.
 	pi.on("session_start", (_event, ctx) => {
-		setMode("normal", ctx.ui);
+		setMode(readSavedMode(ctx.cwd, ctx.isProjectTrusted?.() === true), ctx.ui);
 	});
 
 	// /guard slash command: view / switch guard mode
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard modes: /guard shows the current mode, /guard <strict|normal|loose|trusted|naked> switches",
+			"Path Guard modes: /guard shows the current mode, /guard <strict|normal|loose|trusted|naked> switches (persisted to settings)",
 		handler: async (args, ctx) => {
 			const m = args?.trim().toLowerCase() ?? "";
 
@@ -292,8 +386,9 @@ export default function (pi: ExtensionAPI) {
 				}
 				currentMode = m;
 				refreshModeStatus(ctx.ui);
+				const where = persistMode(m, ctx.cwd, ctx.isProjectTrusted?.() === true);
 				ctx.ui.notify(
-					`Path Guard switched to: ${m} (session-only; new sessions reset to normal)`,
+					`Path Guard switched to: ${m} (${persistNote(where)})`,
 					"info",
 				);
 				return;
@@ -329,8 +424,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				currentMode = picked;
 				refreshModeStatus(ctx.ui);
+				const where = persistMode(
+					picked,
+					ctx.cwd,
+					ctx.isProjectTrusted?.() === true,
+				);
 				ctx.ui.notify(
-					`Path Guard switched to: ${picked} (session-only; new sessions reset to normal)`,
+					`Path Guard switched to: ${picked} (${persistNote(where)})`,
 					"info",
 				);
 			}

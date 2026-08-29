@@ -35,7 +35,7 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 - `/guard` — interactive mode picker (title shows the full decision matrix; choices are bilingual) 交互式选择防护模式（标题展示完整判定矩阵，选项中英双语）
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive picker 非法参数 → 兜底弹出交互选择
-- Every new session resets to `normal` 每次新会话自动回到 `normal`
+- The active mode persists across sessions via settings.json (`pathGuard.mode`): project `.pi/settings.json` overrides global `~/.pi/agent/settings.json`, falling back to `normal`. `/guard <mode>` writes it back (project settings in a trusted project, else global). 模式跨会话持久化到 settings.json（`pathGuard.mode`）：项目 `.pi/settings.json` 优先于全局 `~/.pi/agent/settings.json`，缺省回 `normal`；`/guard <mode>` 切换时回写（受信任项目写项目配置，否则写全局）
 - The active mode is shown in the footer status bar (`🛡 <mode>`, `🛡 NAKED` in warning color) 当前模式显示在底部状态栏（`🛡 <mode>`，naked 用警示色 `🛡 NAKED`）
 
 ### Guard mode matrix / 防护模式矩阵
@@ -73,13 +73,13 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 
 ## Development / 开发与测试
 
-Automated tests (99 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, and the footer status indicator:
+Automated tests (104 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, and settings.json mode persistence:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（99 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示等流程：
+自动化测试（104 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts

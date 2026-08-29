@@ -1,8 +1,8 @@
 {
   "name": "@yaosu/pi-path-guard",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "type": "module",
-  "description": "Path Guard for pi — blocks destructive commands & path overwrites, protects .env/keys, with strict/normal/loose/trusted guard modes (/guard). pi 防误删/防误覆盖扩展，支持 4 种防护模式。",
+  "description": "Path Guard for pi — blocks destructive commands & path overwrites, protects .env/keys, with strict/normal/loose/trusted/naked guard modes (/guard). pi 防误删/防误覆盖扩展，支持 5 种防护模式。",
   "keywords": [
     "pi-package",
     "pi-extension",

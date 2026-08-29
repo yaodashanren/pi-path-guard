@@ -37,6 +37,11 @@
  *   - trusted  most permissive: overwrites and ordinary-file deletes pass too
  *   - Protected paths (credentials/config/keys) and the Block group (format/shutdown/bulk-delete/
  *     block-device writes) are blocked directly in every mode, with no confirmation opportunity
+ *
+ * v3.1 adds (upgrade from v3): naked mode — passes almost everything (protected paths, write/edit
+ *   checks, git destructive, truncate, outside deletes/overwrites); only system-destructive
+ *   Block-group commands (mkfs/reboot/block-device writes/bulk delete) are still confirmed.
+ *   Switching to naked requires a double confirmation (stronger than trusted's single warning).
  */
 
 import type {
@@ -185,8 +190,8 @@ const HOME = homedir();
 
 // ─── Guard Modes ─────────────────────────────────────────────────────
 
-/** Guard mode: strict (full) / normal (default) / loose (relaxed) / trusted (most permissive) */
-type GuardMode = "strict" | "normal" | "loose" | "trusted";
+/** Guard mode: strict (full) / normal (default) / loose (relaxed) / trusted (most permissive) / naked (no protection) */
+type GuardMode = "strict" | "normal" | "loose" | "trusted" | "naked";
 
 /** Current session guard mode (switched via /guard; reset to normal on session_start) */
 let currentMode: GuardMode = "normal";
@@ -197,6 +202,7 @@ const GUARD_MODES: readonly GuardMode[] = [
 	"normal",
 	"loose",
 	"trusted",
+	"naked",
 ];
 
 /** Whether a string is a valid guard mode (for /guard argument validation) */
@@ -214,24 +220,26 @@ const MODE_DESCRIPTIONS: Record<GuardMode, string> = {
 		"Loose: pass new-file writes & deletes, confirm overwrites / 放宽：新建/删除免问，覆盖需确认",
 	trusted:
 		"Trusted: pass overwrites & ordinary-file deletes / 最宽松：覆盖/删除普通文件也免问",
+	naked:
+		"Naked: pass everything except system-destructive cmds (confirmed) / 裸奔：除系统级破坏命令外全部放行（破坏命令弹窗询问）",
 };
 
 /** Full decision matrix (shown as the /guard picker title, English only) */
 const MODE_MATRIX = [
 	"Path Guard Mode Matrix (B=block / ?=confirm / .=pass)",
-	"  Checkpoint                          strict  normal  loose  trusted",
-	"  Protected paths .env/.ssh/keys         B       B       B       B",
-	"  System-destructive mkfs/reboot         B       B       B       B",
-	"  Privilege/remote sudo/ssh/chmod777     B       ?       ?       ?",
-	"  Git destructive reset --hard           ?       ?       ?       ?",
-	"  In-project write/edit/new              ?       .       .       .",
-	"  In-project delete                      ?       ?       .       .",
-	"  Outside write (new file)               ?       ?       .       .",
-	"  Outside overwrite existing             B       B       ?       .",
-	"  Outside delete ordinary                B       B       ?       .",
-	"  Truncate existing > file               ?       ?       ?       ?",
-	"  HOME dir write                         ?       ?       .       .",
-	"  No UI (headless)                       B       B       B       B",
+	"  Checkpoint                          strict  normal  loose  trusted  naked",
+	"  Protected paths .env/.ssh/keys         B       B       B       B       .",
+	"  System-destructive mkfs/reboot         B       B       B       B       ?",
+	"  Privilege/remote sudo/ssh/chmod777     B       ?       ?       ?       .",
+	"  Git destructive reset --hard           ?       ?       ?       ?       .",
+	"  In-project write/edit/new              ?       .       .       .       .",
+	"  In-project delete                      ?       ?       .       .       .",
+	"  Outside write (new file)               ?       ?       .       .       .",
+	"  Outside overwrite existing             B       B       ?       .       .",
+	"  Outside delete ordinary                B       B       ?       .       .",
+	"  Truncate existing > file               ?       ?       ?       ?       .",
+	"  HOME dir write                         ?       ?       .       .       .",
+	"  No UI (headless)                       B       B       B       B       .",
 ].join("\n");
 
 /** Guard verdict: { block, reason } to block / undefined to allow (askConfirm returns a Promise) */
@@ -251,15 +259,15 @@ export default function (pi: ExtensionAPI) {
 	// /guard slash command: view / switch guard mode
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard modes: /guard shows the current mode, /guard <strict|normal|loose|trusted> switches",
+			"Path Guard modes: /guard shows the current mode, /guard <strict|normal|loose|trusted|naked> switches",
 		handler: async (args, ctx) => {
 			const m = args?.trim().toLowerCase() ?? "";
 
-			// Valid argument → switch directly (shortcut, no picker); trusted requires a warning confirmation
+			// Valid argument → switch directly (shortcut, no picker); trusted/naked require a warning confirmation
 			if (isGuardMode(m)) {
-				if (m === "trusted" && !(await confirmTrustedSwitch(ctx))) {
+				if (!(await confirmModeSwitch(m, ctx))) {
 					ctx.ui.notify(
-						"Cancelled: switching to trusted requires confirmation",
+						`Cancelled: switching to ${m} requires confirmation`,
 						"info",
 					);
 					return;
@@ -293,9 +301,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			const picked = chosen.split(/\s+/)[0] as GuardMode;
 			if (isGuardMode(picked)) {
-				if (picked === "trusted" && !(await confirmTrustedSwitch(ctx))) {
+				if (!(await confirmModeSwitch(picked, ctx))) {
 					ctx.ui.notify(
-						"Cancelled: switching to trusted requires confirmation",
+						`Cancelled: switching to ${picked} requires confirmation`,
 						"info",
 					);
 					return;
@@ -329,6 +337,9 @@ function checkWriteEdit(
 ): GuardVerdict {
 	const path = input.path;
 	if (!path) return;
+
+	// naked disables ALL checks (incl. protected paths & the write/edit tools) → pass everything
+	if (currentMode === "naked") return;
 
 	// Resolve the real cwd first (cwd may itself be a symlink), then the real target path,
 	// preventing symlink escape to protected locations and symlink-cwd false positives
@@ -433,6 +444,14 @@ function classifySegment(
 ): SegmentVerdict {
 	// Recursion depth guard (bash -c / eval nested too deep to statically check → conservative confirm)
 	if (depth > 4) return { kind: "confirm" };
+
+	// naked: pass everything EXCEPT system-destructive Block-group commands, which are confirmed
+	// (protected paths, write/edit, git destructive, truncate, etc. all pass in naked mode)
+	if (currentMode === "naked") {
+		return dangerousLevel(trimmed) === "block"
+			? { kind: "confirm" }
+			: { kind: "pass" };
+	}
 
 	// ① Redirect check:
 	//    - Write to a protected path (echo x > .env etc.) → block
@@ -1268,6 +1287,34 @@ async function confirmTrustedSwitch(
 		"⚠️ Switch to trusted mode?",
 		"trusted is the most permissive mode: in-project deletes and outside overwrites/deletes of\nordinary files are no longer prompted. Only protected paths and system-destructive commands\nremain blocked.\n\npi's behavior boundary is very loose in this mode — please confirm the switch.",
 	);
+}
+
+/** Double confirmation before switching to naked: disables ALL protection (incl. protected paths, destructive commands, and write/edit checks) */
+async function confirmNakedSwitch(
+	ctx: ExtensionCommandContext,
+): Promise<boolean> {
+	// No UI (headless) cannot confirm → conservatively refuse the switch
+	if (!ctx.hasUI) return false;
+	const first = await ctx.ui.confirm(
+		"⚠️ Switch to NAKED mode?",
+		"naked passes nearly everything: protected paths (.env/.ssh/keys), write/edit tool checks, git\ndestructive ops, truncation, and outside deletes/overwrites are no longer blocked or prompted.\nOnly system-destructive commands (mkfs/reboot/bulk-delete/block-device writes) are still\nconfirmed — everything else is allowed without a prompt.",
+	);
+	if (!first) return false;
+	// Second, final confirmation — makes an accidental /guard naked far less likely
+	return ctx.ui.confirm(
+		"⚠️⚠️ FINAL confirmation — disable ALL protection?",
+		"This is the final step. After this, path-guard passes nearly every operation with no blocking and\nno confirmation, including writes to protected paths and git destructive / truncate / outside\ndelete operations. Only system-destructive commands (mkfs/reboot/bulk-delete/block-device\nwrites) will still prompt for confirmation.\n\nOnly switch if you are certain you want minimal protection.",
+	);
+}
+
+/** Mode-switch confirmation: trusted → single warn; naked → double warn; others → no confirmation */
+async function confirmModeSwitch(
+	mode: GuardMode,
+	ctx: ExtensionCommandContext,
+): Promise<boolean> {
+	if (mode === "trusted") return confirmTrustedSwitch(ctx);
+	if (mode === "naked") return confirmNakedSwitch(ctx);
+	return true;
 }
 
 async function askConfirm(

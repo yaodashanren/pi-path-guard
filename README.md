@@ -33,32 +33,35 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 ### `/guard` command
 
 - `/guard` — interactive mode picker (title shows the full decision matrix; choices are bilingual) 交互式选择防护模式（标题展示完整判定矩阵，选项中英双语）
-- `/guard <strict|normal|loose|trusted>` — quick switch (trusted requires a warning confirmation) 快捷切换（trusted 需警告确认）
+- `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive picker 非法参数 → 兜底弹出交互选择
 - Every new session resets to `normal` 每次新会话自动回到 `normal`
 
 ### Guard mode matrix / 防护模式矩阵
 
-| Checkpoint / 判定点 | strict | normal | loose | trusted |
-| --- | --- | --- | --- | --- |
-| Protected paths (.env/.ssh/keys/credentials) / 受保护路径 | block | block | block | block |
-| Block group (mkfs/reboot/block-device writes/bulk delete) / Block 组危险命令 | block | block | block | block |
-| Confirm group (sudo/ssh/chmod 777 …) / Confirm 组 | block | confirm | confirm | confirm |
-| git destructive (reset --hard/clean -f …) / git 破坏性 | confirm | confirm | confirm | confirm |
-| In-project write/edit/new / 项目内写/改/新建 | confirm | pass | pass | pass |
-| In-project delete / 项目内删除 | confirm | confirm | pass | pass |
-| Outside write (new file) / 项目外写新文件 | confirm | confirm | pass | pass |
-| Outside overwrite existing / 项目外覆盖已存在 | block | block | confirm | pass |
-| Outside delete ordinary / 项目外删除普通文件 | block | block | confirm | pass |
-| `>` truncate existing file / 截断已有文件 | confirm | confirm | confirm | confirm |
-| cwd=HOME write / HOME 目录写 | confirm | confirm | pass | pass |
-| No UI (headless) / 无交互界面 | block* | block* | block* | block* |
+| Checkpoint / 判定点 | strict | normal | loose | trusted | naked |
+| --- | --- | --- | --- | --- | --- |
+| Protected paths (.env/.ssh/keys/credentials) / 受保护路径 | block | block | block | block | pass |
+| Block group (mkfs/reboot/block-device writes/bulk delete) / Block 组危险命令 | block | block | block | block | confirm |
+| Confirm group (sudo/ssh/chmod 777 …) / Confirm 组 | block | confirm | confirm | confirm | pass |
+| git destructive (reset --hard/clean -f …) / git 破坏性 | confirm | confirm | confirm | confirm | pass |
+| In-project write/edit/new / 项目内写/改/新建 | confirm | pass | pass | pass | pass |
+| In-project delete / 项目内删除 | confirm | confirm | pass | pass | pass |
+| Outside write (new file) / 项目外写新文件 | confirm | confirm | pass | pass | pass |
+| Outside overwrite existing / 项目外覆盖已存在 | block | block | confirm | pass | pass |
+| Outside delete ordinary / 项目外删除普通文件 | block | block | confirm | pass | pass |
+| `>` truncate existing file / 截断已有文件 | confirm | confirm | confirm | confirm | pass |
+| cwd=HOME write / HOME 目录写 | confirm | confirm | pass | pass | pass |
+| No UI (headless) / 无交互界面 | block* | block* | block* | block* | pass |
 
 *block = denied directly, no confirmation opportunity / 直接阻止，无确认机会；confirm = prompt / 弹窗询问；pass = allow / 放行；\*headless: items that would be confirmed are blocked instead / 无 UI 时需确认项一律阻止
 
+> ⚠️ **naked mode / 裸奔模式**: passes almost everything — protected paths, the write/edit tool checks, git destructive, truncation, outside deletes/overwrites all pass even with no UI. Only system-destructive commands (mkfs/reboot/bulk-delete/block-device writes) are still **confirmed**. Switching requires a **double confirmation** (two prompts). Use only when you want minimal path-guard interference.
+> ⚠️ **裸奔模式**：除系统级破坏命令外几乎全部放行——受保护路径、write/edit 工具检查、git 破坏性、截断、外部删除/覆盖均放行，无 UI 下也放行；但系统级破坏命令（mkfs/reboot/批量删除/写块设备）仍会**弹窗询问**。切换需要**两级确认**（两次弹窗）。仅当你需要最少的路径守护干扰时使用。
+
 ### Core capabilities / 核心能力
 
-- **Protected-path interception / 受保护路径拦截**: `.env` / `.ssh` / `.aws` / `.kube` / private keys (`*.pem`/`*.key`) / credentials / shell configs (`.bashrc` …) / `node_modules` / `dist` / `build` … blocked hard in every mode — 任何模式下硬性阻止
+- **Protected-path interception / 受保护路径拦截**: `.env` / `.ssh` / `.aws` / `.kube` / private keys (`*.pem`/`*.key`) / credentials / shell configs (`.bashrc` …) / `node_modules` / `dist` / `build` … blocked hard in every mode (except naked) — 任何模式下硬性阻止（naked 除外）
 - **Block group / Block 组危险命令**: `mkfs.*` / `mkswap` / `poweroff` / `reboot` / `shutdown` / `dd` to block devices / `> /dev/sdX` / `find -delete` / `find -exec rm` / `xargs rm`
 - **Confirm group / Confirm 组**: `sudo` / `doas` / `pkexec` / `chmod 777` / `ssh` / `scp` / `sftp` / `rsh` / `telnet` / `wget -O /dev/null`
 - **Overwrite detection / 覆盖检测**: `mv` / `cp` / `install` / `tee` / `ln -f` / `rsync --delete` on existing targets, classified by in/out project — 目标已存在时按内外策略处理
@@ -69,13 +72,13 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 
 ## Development / 开发与测试
 
-Automated tests (83 assertions) load the real extension with a mocked pi API, covering the 4 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction and trusted-mode confirmation flow:
+Automated tests (96 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction, trusted-mode confirmation, and naked-mode double confirmation:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（83 断言）模拟 pi API 加载真实扩展，覆盖 4 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互与 trusted 确认流程：
+自动化测试（96 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts

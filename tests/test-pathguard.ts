@@ -176,7 +176,7 @@ await commands["guard"].handler("bogus", {
 });
 check(
 	"/guard invalid arg falls back to select",
-	bogusOptions.length === 4 ? "select" : "?",
+	bogusOptions.length === 5 ? "select" : "?",
 	"select",
 );
 
@@ -492,6 +492,117 @@ for (const mode of ["loose", "trusted"]) {
 		"pass",
 	);
 }
+
+// ── naked: ALL protection disabled (incl. protected paths, destructive cmds, write/edit) ──
+newSession(); // reset to normal before the naked checks
+// naked switch requires TWO confirmations
+// rejecting the first level → short-circuits (no second prompt), no switch
+let nakedConfirms = 0;
+await commands["guard"].handler("naked", {
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		confirm: async () => {
+			nakedConfirms++;
+			return false; // reject every confirmation
+		},
+	},
+});
+check(
+	"naked first-confirm rejected → no switch (no 2nd prompt)",
+	nakedConfirms === 1 ? "rejected" : "?",
+	"rejected",
+);
+check(
+	"naked rejected at level 1 → mode stays normal",
+	(await currentModeShown()).includes("normal") ? "normal" : "?",
+	"normal",
+);
+
+// allowing level 1 but rejecting level 2 → both prompts asked, still no switch
+nakedConfirms = 0;
+let nakedStep = 0;
+await commands["guard"].handler("naked", {
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		confirm: async () => {
+			nakedConfirms++;
+			nakedStep++;
+			return nakedStep === 1; // allow first, reject second
+		},
+	},
+});
+check(
+	"naked asks double confirmation before switching",
+	nakedConfirms === 2 ? "double-confirm" : "?",
+	"double-confirm",
+);
+check(
+	"naked rejected at final confirmation → no switch",
+	(await currentModeShown()).includes("normal") ? "normal" : "?",
+	"normal",
+);
+
+// both confirmations allowed → switch succeeds
+await setMode("naked");
+check(
+	"naked confirmed (double) → switches",
+	(await currentModeShown()).includes("naked") ? "naked" : "?",
+	"naked",
+);
+
+// in naked mode everything passes, even protected paths & destructive commands
+check(
+	"naked write to protected .env → pass",
+	(await runTool("write", { path: join(PROJ, ".env") }, { cwd: PROJ })).verdict,
+	"pass",
+);
+check(
+	"naked bash mkfs (block group) → confirm",
+	(await runCmd("mkfs.ext4 /dev/sdb1", PROJ)).verdict,
+	"confirm",
+);
+check(
+	"naked bash shutdown (block group) → confirm",
+	(await runCmd("shutdown now", PROJ)).verdict,
+	"confirm",
+);
+check(
+	"naked bash echo > .env → pass",
+	(await runCmd(`echo x > ${PROJ}/.env`, PROJ)).verdict,
+	"pass",
+);
+check(
+	"naked rm outside → pass",
+	(await runCmd(`rm ${OUT}/del.txt`, PROJ)).verdict,
+	"pass",
+);
+check(
+	"naked rm .ssh file → pass",
+	(await runCmd(`rm ${homedir()}/.ssh/config`, PROJ)).verdict,
+	"pass",
+);
+
+// no-UI naked switch refused (conservative: cannot confirm)
+nakedConfirms = 0;
+await commands["guard"].handler("naked", {
+	hasUI: false,
+	ui: { notify: () => {}, confirm: async () => true },
+});
+check(
+	"naked no-UI switch refused (no confirm asks)",
+	nakedConfirms === 0 ? "refused" : "?",
+	"refused",
+);
+
+// new session resets to normal
+newSession();
+check(
+	"naked resets to normal on new session",
+	(await currentModeShown()).includes("normal") ? "normal" : "?",
+	"normal",
+);
 
 // ── no UI: items needing confirmation are blocked (in-project write stays pass) ─
 await setMode("normal");

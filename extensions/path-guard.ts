@@ -47,6 +47,13 @@
  *   settings.json on session_start (project .pi/settings.json overrides the global
  *   ~/.pi/agent/settings.json, falling back to normal) and written back when /guard switches
  *   mode — project settings in a trusted project, otherwise global settings. Key: pathGuard.mode.
+ *
+ * v3.3 adds (upgrade from v3.2): configurable protected paths and tunable rules.
+ *   - User-configured protected paths (pathGuard.extraProtected, or /guard paths add|rm|list|clear)
+ *     are enforced in EVERY mode including naked.
+ *   - The 5 modes' judgement rules are tunable per mode via pathGuard.rules.{mode}.{rule} in
+ *     settings.json (rule = block|confirm|pass; valid rule IDs listed in RULE_IDS). The built-in
+ *     defaults exactly reproduce v3.2 behaviour; overrides only adjust the listed rule.
  */
 
 import type {
@@ -259,6 +266,163 @@ const MODE_MATRIX = [
 	"  No UI (headless)                       B       B       B       B       .",
 ].join("\n");
 
+// ─── Tunable rules & user-configured protected paths ──────────────────
+
+/** Decision level a rule can produce. */
+type RuleLevel = "block" | "confirm" | "pass";
+
+/**
+ * Tunable rule IDs — each is a single decision point in the judgement logic.
+ * A rule's effective value for the current mode = settings override ?? default.
+ */
+type RuleId =
+	| "blockGroup" // system-destructive mkfs/reboot/dev-write/bulk-delete
+	| "confirmGroup" // privilege/remote sudo/ssh/chmod777
+	| "writeOutside" // write/edit targeting a path outside the project
+	| "writeHome" // write/edit under HOME
+	| "writeInProject" // write/edit creating/overwriting in the project
+	| "deleteOutside" // rm outside the project
+	| "deleteInProject" // rm in the project
+	| "overwriteOutsideExisting" // mv/cp over an existing target outside
+	| "overwriteOutsideNew" // mv/cp creating a target outside
+	| "overwriteInProject" // mv/cp overwrite in the project
+	| "truncate" // `> existing file` / truncate
+	| "gitDestructive"; // git clean -f / reset --hard / checkout . / push --force …
+
+const RULE_IDS: readonly RuleId[] = [
+	"blockGroup",
+	"confirmGroup",
+	"writeOutside",
+	"writeHome",
+	"writeInProject",
+	"deleteOutside",
+	"deleteInProject",
+	"overwriteOutsideExisting",
+	"overwriteOutsideNew",
+	"overwriteInProject",
+	"truncate",
+	"gitDestructive",
+];
+
+function isRuleLevel(v: string | undefined): v is RuleLevel {
+	return v === "block" || v === "confirm" || v === "pass";
+}
+
+/** Default rules per built-in mode — reproduces the v3.1 hardcoded behaviour exactly. */
+const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
+	strict: {
+		blockGroup: "block",
+		confirmGroup: "block",
+		writeOutside: "confirm",
+		writeHome: "confirm",
+		writeInProject: "confirm",
+		deleteOutside: "block",
+		deleteInProject: "confirm",
+		overwriteOutsideExisting: "block",
+		overwriteOutsideNew: "confirm",
+		overwriteInProject: "confirm",
+		truncate: "confirm",
+		gitDestructive: "confirm",
+	},
+	normal: {
+		blockGroup: "block",
+		confirmGroup: "confirm",
+		writeOutside: "confirm",
+		writeHome: "confirm",
+		writeInProject: "pass",
+		deleteOutside: "block",
+		deleteInProject: "confirm",
+		overwriteOutsideExisting: "block",
+		overwriteOutsideNew: "confirm",
+		overwriteInProject: "confirm",
+		truncate: "confirm",
+		gitDestructive: "confirm",
+	},
+	loose: {
+		blockGroup: "block",
+		confirmGroup: "confirm",
+		writeOutside: "pass",
+		writeHome: "pass",
+		writeInProject: "pass",
+		deleteOutside: "confirm",
+		deleteInProject: "pass",
+		overwriteOutsideExisting: "confirm",
+		overwriteOutsideNew: "pass",
+		overwriteInProject: "confirm",
+		truncate: "confirm",
+		gitDestructive: "confirm",
+	},
+	trusted: {
+		blockGroup: "block",
+		confirmGroup: "confirm",
+		writeOutside: "pass",
+		writeHome: "pass",
+		writeInProject: "pass",
+		deleteOutside: "pass",
+		deleteInProject: "pass",
+		overwriteOutsideExisting: "pass",
+		overwriteOutsideNew: "pass",
+		overwriteInProject: "confirm",
+		truncate: "confirm",
+		gitDestructive: "confirm",
+	},
+	naked: {
+		blockGroup: "confirm",
+		confirmGroup: "pass",
+		writeOutside: "pass",
+		writeHome: "pass",
+		writeInProject: "pass",
+		deleteOutside: "pass",
+		deleteInProject: "pass",
+		overwriteOutsideExisting: "pass",
+		overwriteOutsideNew: "pass",
+		overwriteInProject: "pass",
+		truncate: "pass",
+		gitDestructive: "pass",
+	},
+};
+
+/** Effective rule level for the current mode (settings override ?? built-in default). */
+function rl(rule: RuleId): RuleLevel {
+	return config.rules[currentMode]?.[rule] ?? DEFAULT_MODES[currentMode][rule];
+}
+
+/** Map a rule to a segment verdict: block (with reason) / confirm / pass. */
+function ruleVerdict(rule: RuleId, blockReason: string): SegmentVerdict {
+	const lvl = rl(rule);
+	if (lvl === "block") return { kind: "block", reason: blockReason };
+	if (lvl === "confirm") return { kind: "confirm" };
+	return { kind: "pass" };
+}
+
+/** Whether the current mode is naked (many conservative confirms become pass). */
+const inNaked = () => currentMode === "naked";
+
+/**
+ * User-configured protected paths (pathGuard.extraProtected). Unlike built-in
+ * protected paths, these are enforced in EVERY mode — including naked.
+ */
+let extraProtected: string[] = [];
+
+/** Match a resolved absolute path against a user-configured protected entry. */
+function isUserProtectedPath(absolutePath: string): boolean {
+	for (const entry of extraProtected) {
+		const e = normalize(resolveReal(entry));
+		if (absolutePath === e) return true;
+		if (absolutePath.startsWith(e + sep)) return true;
+	}
+	return false;
+}
+
+/** Expand ~, resolve relative entries against cwd, and resolve symlinks (so the stored path matches the real path used in checks). */
+function normalizeProtectedEntry(
+	entry: string,
+	cwd: string | undefined,
+): string {
+	const expanded = expandHome(entry.trim());
+	return resolveReal(resolve(cwd ?? HOME, expanded));
+}
+
 /** Guard verdict: { block, reason } to block / undefined to allow (askConfirm returns a Promise) */
 type GuardVerdict =
 	| ToolCallEventResult
@@ -296,46 +460,93 @@ function projectSettingsPath(cwd: string | undefined): string | undefined {
 	return cwd ? join(cwd, CONFIG_DIR, "settings.json") : undefined;
 }
 
-/** Read the saved guard mode from a settings.json file, or undefined if absent/invalid. */
-function readSettingsMode(filePath: string | undefined): GuardMode | undefined {
+/**
+ * Loaded path-guard config: active mode, user-configured protected paths, and
+ * per-mode rule overrides. Repopulated from settings.json on every session_start.
+ */
+interface PathGuardConfig {
+	mode: GuardMode;
+	extraProtected: string[];
+	rules: Partial<Record<GuardMode, Partial<Record<RuleId, RuleLevel>>>>;
+}
+
+let config: PathGuardConfig = { mode: "normal", extraProtected: [], rules: {} };
+
+/** Read and validate the raw pathGuard block from a settings.json file, or undefined. */
+function readSettingsGuard(
+	filePath: string | undefined,
+): Partial<PathGuardConfig> | undefined {
 	if (!filePath) return undefined;
 	try {
 		if (!existsSync(filePath)) return undefined;
 		const data = JSON.parse(readFileSync(filePath, "utf8")) as {
-			pathGuard?: { mode?: string };
+			pathGuard?: {
+				mode?: string;
+				extraProtected?: string[];
+				rules?: Record<string, Record<string, string>>;
+			};
 		};
-		const mode = data?.pathGuard?.mode;
-		return typeof mode === "string" && isGuardMode(mode) ? mode : undefined;
+		const g = data?.pathGuard;
+		if (!g) return undefined;
+		const out: Partial<PathGuardConfig> = {};
+		if (typeof g.mode === "string" && isGuardMode(g.mode)) out.mode = g.mode;
+		if (Array.isArray(g.extraProtected)) {
+			out.extraProtected = g.extraProtected.filter(
+				(p): p is string => typeof p === "string",
+			);
+		}
+		if (g.rules && typeof g.rules === "object") {
+			const rules: PathGuardConfig["rules"] = {};
+			for (const [m, overrides] of Object.entries(g.rules)) {
+				if (!isGuardMode(m) || !overrides || typeof overrides !== "object")
+					continue;
+				const clean: Partial<Record<RuleId, RuleLevel>> = {};
+				for (const [r, lvl] of Object.entries(overrides)) {
+					if ((RULE_IDS as readonly string[]).includes(r) && isRuleLevel(lvl)) {
+						clean[r as RuleId] = lvl;
+					}
+				}
+				if (Object.keys(clean).length > 0) rules[m] = clean;
+			}
+			if (Object.keys(rules).length > 0) out.rules = rules;
+		}
+		return out;
 	} catch {
 		return undefined;
 	}
 }
 
 /**
- * Effective saved mode at session start: project settings override global,
- * falling back to normal. Project-local config is only honored for trusted
- * projects; otherwise only the global setting applies.
+ * Effective config at session start: project settings override global, falling
+ * back to normal. Project-local config is only honored for trusted projects;
+ * otherwise only the global setting applies. extraProtected entries are resolved
+ * against cwd (~ and relative paths expanded); project entries are appended after
+ * global ones.
  */
-function readSavedMode(cwd: string | undefined, trusted: boolean): GuardMode {
-	const proj = projectSettingsPath(cwd);
-	if (proj && trusted) {
-		const pm = readSettingsMode(proj);
-		if (pm) return pm;
-	}
-	return readSettingsMode(globalSettingsPath()) ?? "normal";
+function readSavedConfig(
+	cwd: string | undefined,
+	trusted: boolean,
+): PathGuardConfig {
+	const global = readSettingsGuard(globalSettingsPath()) ?? {};
+	const project = trusted
+		? (readSettingsGuard(projectSettingsPath(cwd)) ?? {})
+		: {};
+	const mode = project.mode ?? global.mode ?? "normal";
+	const extraProtected = [
+		...(global.extraProtected ?? []),
+		...(project.extraProtected ?? []),
+	].map((e) => normalizeProtectedEntry(e, cwd));
+	const rules = { ...global.rules, ...project.rules };
+	return { mode, extraProtected, rules };
 }
 
 /**
- * Persist a mode to settings.json. In a trusted project it writes the project
- * settings file (cwd/.pi/settings.json); otherwise the global settings file.
- * Requires a cwd; returns "project" | "global" | "none" (none = not persisted).
+ * Persist the whole config to settings.json. In a trusted project it writes the
+ * project settings file (cwd/.pi/settings.json); otherwise the global settings
+ * file. Requires a cwd; returns "project" | "global" | "none".
  */
-function persistMode(
-	mode: GuardMode,
-	cwd: string | undefined,
-	trusted: boolean,
-): string {
-	if (!cwd) return "none"; // no context to persist to
+function persistConfig(cwd: string | undefined, trusted: boolean): string {
+	if (!cwd) return "none";
 	const target = trusted ? projectSettingsPath(cwd) : globalSettingsPath();
 	if (!target) return "none";
 	try {
@@ -344,7 +555,17 @@ function persistMode(
 			data = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown>;
 		}
 		const guard = (data.pathGuard as Record<string, unknown>) ?? {};
-		guard.mode = mode;
+		guard.mode = config.mode;
+		if (extraProtected.length > 0) {
+			guard.extraProtected = extraProtected;
+		} else {
+			delete guard.extraProtected;
+		}
+		if (Object.keys(config.rules).length > 0) {
+			guard.rules = config.rules;
+		} else {
+			delete guard.rules;
+		}
 		data.pathGuard = guard;
 		writeFileSync(target, JSON.stringify(data, null, 2) + "\n", "utf8");
 		return trusted ? "project" : "global";
@@ -361,19 +582,98 @@ function persistNote(where: string): string {
 	return "session-only (not persisted)";
 }
 
+/** Path Guard paths usage message. */
+const PATHS_USAGE =
+	"Path Guard paths usage:\n" +
+	"  /guard paths list\n" +
+	"  /guard paths add <path>\n" +
+	"  /guard paths rm <path>\n" +
+	"  /guard paths clear\n\n" +
+	"Custom protected paths are guarded in EVERY mode (including naked).";
+
+/**
+ * /guard paths … subcommand handler: list / add / rm / clear user-configured
+ * protected paths. Updates the in-memory config and persists to settings.json.
+ */
+async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
+	const rest = raw.replace(/^paths\s*/i, "").trim();
+	const spaceIdx = rest.indexOf(" ");
+	const sub = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).toLowerCase();
+	const arg = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).trim();
+	const show = (msg: string) => ctx.ui.notify(msg, "info");
+
+	switch (sub) {
+		case "list":
+		case "show":
+			if (extraProtected.length === 0) {
+				return show("Path Guard: no custom protected paths configured");
+			}
+			return show(
+				`Path Guard custom protected paths (${extraProtected.length}):\n` +
+					extraProtected.map((p) => `· ${p}`).join("\n"),
+			);
+		case "add": {
+			if (!arg) return show("Usage: /guard paths add <path>");
+			const norm = normalizeProtectedEntry(arg, ctx.cwd);
+			if (extraProtected.includes(norm)) {
+				return show(`Path Guard: already protected — ${norm}`);
+			}
+			extraProtected.push(norm);
+			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			return show(
+				`Path Guard: added protected path ${norm} (${persistNote(where)})`,
+			);
+		}
+		case "rm":
+		case "remove": {
+			if (!arg) return show("Usage: /guard paths rm <path>");
+			const norm = normalizeProtectedEntry(arg, ctx.cwd);
+			const idx = extraProtected.indexOf(norm);
+			if (idx === -1) {
+				return show(`Path Guard: not a custom protected path — ${norm}`);
+			}
+			extraProtected.splice(idx, 1);
+			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			return show(
+				`Path Guard: removed protected path ${norm} (${persistNote(where)})`,
+			);
+		}
+		case "clear": {
+			if (extraProtected.length === 0) {
+				return show("Path Guard: no custom protected paths to clear");
+			}
+			extraProtected = [];
+			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			return show(
+				`Path Guard: cleared all custom protected paths (${persistNote(where)})`,
+			);
+		}
+		default:
+			return show(PATHS_USAGE);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
-	// Restore the persisted mode on every new session (startup, /new, /resume all
-	// fire session_start). Project settings override global; falls back to normal.
+	// Restore the persisted config on every new session (startup, /new, /resume all
+	// fire session_start): active mode + user protected paths + rule overrides.
 	pi.on("session_start", (_event, ctx) => {
-		setMode(readSavedMode(ctx.cwd, ctx.isProjectTrusted?.() === true), ctx.ui);
+		config = readSavedConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+		extraProtected = config.extraProtected;
+		setMode(config.mode, ctx.ui);
 	});
 
-	// /guard slash command: view / switch guard mode
+	// /guard slash command: view / switch mode, and manage custom protected paths
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard modes: /guard shows the current mode, /guard <strict|normal|loose|trusted|naked> switches (persisted to settings)",
+			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths add|rm|list|clear <path> manages custom protected paths",
 		handler: async (args, ctx) => {
-			const m = args?.trim().toLowerCase() ?? "";
+			const raw = args?.trim() ?? "";
+			const m = raw.toLowerCase();
+
+			// ── /guard paths … : manage user-configured protected paths (any mode) ──
+			if (m === "paths" || m.startsWith("paths ")) {
+				return handlePathsCommand(raw, ctx);
+			}
 
 			// Valid argument → switch directly (shortcut, no picker); trusted/naked require a warning confirmation
 			if (isGuardMode(m)) {
@@ -384,9 +684,9 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
-				currentMode = m;
-				refreshModeStatus(ctx.ui);
-				const where = persistMode(m, ctx.cwd, ctx.isProjectTrusted?.() === true);
+				config.mode = m;
+				setMode(m, ctx.ui);
+				const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
 				ctx.ui.notify(
 					`Path Guard switched to: ${m} (${persistNote(where)})`,
 					"info",
@@ -422,13 +722,9 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
-				currentMode = picked;
-				refreshModeStatus(ctx.ui);
-				const where = persistMode(
-					picked,
-					ctx.cwd,
-					ctx.isProjectTrusted?.() === true,
-				);
+				config.mode = picked;
+				setMode(picked, ctx.ui);
+				const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
 				ctx.ui.notify(
 					`Path Guard switched to: ${picked} (${persistNote(where)})`,
 					"info",
@@ -458,15 +754,23 @@ function checkWriteEdit(
 	const path = input.path;
 	if (!path) return;
 
-	// naked disables ALL checks (incl. protected paths & the write/edit tools) → pass everything
-	if (currentMode === "naked") return;
-
 	// Resolve the real cwd first (cwd may itself be a symlink), then the real target path,
 	// preventing symlink escape to protected locations and symlink-cwd false positives
 	const realCwd = resolveReal(ctx.cwd);
 	const real = resolveReal(resolve(realCwd, expandHome(path)));
 
-	// ① Protected path (incl. HOME-level credentials/config, inside or outside project) → block
+	// ① User-configured protected paths are guarded in EVERY mode (incl. naked).
+	if (isUserProtectedPath(real)) {
+		return {
+			block: true,
+			reason: `Path "${real}" is user-protected; write blocked.`,
+		};
+	}
+
+	// ② naked passes everything else (built-in protected paths & the write/edit tools).
+	if (currentMode === "naked") return;
+
+	// ③ Built-in protected path (incl. HOME-level credentials/config, inside or outside project) → block
 	if (matchesProtectedPath(real)) {
 		return {
 			block: true,
@@ -474,32 +778,43 @@ function checkWriteEdit(
 		};
 	}
 
-	// ② Outside the project dir → strict/normal confirm; loose/trusted pass (judged on the real path, so symlink escape also matches)
-	if (isOutsideCwd(real, realCwd)) {
-		if (currentMode === "loose" || currentMode === "trusted") return;
-		return askConfirm(
-			ctx,
-			`⚠️ File path is outside the project directory\n\nPath: ${real}\nProject: ${realCwd}`,
-		);
+	const outside = isOutsideCwd(real, realCwd);
+
+	// ④ Outside the project dir OR cwd is HOME → per writeOutside / writeHome rule
+	if (outside || realCwd === HOME) {
+		const rule = outside ? "writeOutside" : "writeHome";
+		const lvl = rl(rule);
+		if (lvl === "block") {
+			return {
+				block: true,
+				reason: `Write blocked by rule (${rule}): ${real}`,
+			};
+		}
+		if (lvl === "confirm") {
+			return askConfirm(
+				ctx,
+				outside
+					? `⚠️ File path is outside the project directory\n\nPath: ${real}\nProject: ${realCwd}`
+					: `⚠️ Write operation in HOME directory\n\nPath: ${real}\nHOME: ${HOME}\n\nConfirm write?`,
+			);
+		}
+		return; // pass
 	}
 
-	// ③ cwd is HOME (write lands under HOME) → strict/normal confirm; loose/trusted pass
-	if (realCwd === HOME) {
-		if (currentMode === "loose" || currentMode === "trusted") return;
-		return askConfirm(
-			ctx,
-			`⚠️ Write operation in HOME directory\n\nPath: ${real}\nHOME: ${HOME}\n\nConfirm write?`,
-		);
+	// ⑤ In-project → per writeInProject rule
+	const lvl = rl("writeInProject");
+	if (lvl === "block") {
+		return {
+			block: true,
+			reason: `Write blocked by rule (writeInProject): ${real}`,
+		};
 	}
-
-	// ④ In-project → strict prompts for everything; other modes pass
-	if (currentMode === "strict") {
+	if (lvl === "confirm") {
 		return askConfirm(
 			ctx,
 			`⚠️ strict mode: in-project write operation\n\nPath: ${real}\n\nConfirm write?`,
 		);
 	}
-
 	return; // In-project and safe: allow
 }
 
@@ -565,21 +880,19 @@ function classifySegment(
 	// Recursion depth guard (bash -c / eval nested too deep to statically check → conservative confirm)
 	if (depth > 4) return { kind: "confirm" };
 
-	// naked: pass everything EXCEPT system-destructive Block-group commands, which are confirmed
-	// (protected paths, write/edit, git destructive, truncate, etc. all pass in naked mode)
-	if (currentMode === "naked") {
-		return dangerousLevel(trimmed) === "block"
-			? { kind: "confirm" }
-			: { kind: "pass" };
-	}
-
 	// ① Redirect check:
-	//    - Write to a protected path (echo x > .env etc.) → block
-	//    - "> existing file" (truncate, not >> append, not a device) → confirm
+	//    - Write to a protected path (echo x > .env etc.) → block in every mode (user paths too)
+	//    - "> existing file" (truncate, not >> append, not a device) → per truncate rule
 	const redirect = extractRedirectTarget(trimmed);
 	if (redirect) {
 		const real = resolveReal(resolve(realCwd, expandHome(redirect.target)));
-		if (matchesProtectedPath(real)) {
+		if (isUserProtectedPath(real)) {
+			return {
+				kind: "block",
+				reason: `Redirect writes to user-protected path: ${trimmed}`,
+			};
+		}
+		if (!inNaked() && matchesProtectedPath(real)) {
 			return {
 				kind: "block",
 				reason: `Redirect writes to protected path: ${trimmed}`,
@@ -590,33 +903,35 @@ function classifySegment(
 			!DEVICE_TARGETS.has(redirect.target) &&
 			existsSync(real)
 		) {
-			return { kind: "confirm" };
+			return ruleVerdict("truncate", `Truncate blocked by rule: ${trimmed}`);
 		}
 	}
 
-	// ② Dangerous commands:
-	//    - Block group (format/shutdown/bulk-delete/block-device writes) → blocked in every mode
-	//    - Confirm group (sudo/ssh/chmod 777) → blocked in strict, confirmed otherwise
+	// ② Dangerous commands → per blockGroup / confirmGroup rule
 	const danger = dangerousLevel(trimmed);
 	if (danger === "block") {
-		return {
-			kind: "block",
-			reason: `System-destructive command blocked: ${trimmed}`,
-		};
+		return ruleVerdict(
+			"blockGroup",
+			`System-destructive command blocked: ${trimmed}`,
+		);
 	}
 	if (danger === "confirm") {
-		if (currentMode === "strict") {
+		const lvl = rl("confirmGroup");
+		if (lvl === "block") {
 			return {
 				kind: "block",
-				reason: `Dangerous command blocked (strict mode): ${trimmed}`,
+				reason: `Dangerous command blocked by rule: ${trimmed}`,
 			};
 		}
-		return hasUI
-			? { kind: "confirm" }
-			: {
-					kind: "block",
-					reason: `Dangerous command blocked (no interactive UI): ${trimmed}`,
-				};
+		if (lvl === "confirm") {
+			return hasUI
+				? { kind: "confirm" }
+				: {
+						kind: "block",
+						reason: `Dangerous command blocked (no interactive UI): ${trimmed}`,
+					};
+		}
+		return { kind: "pass" }; // confirmGroup = pass
 	}
 
 	const cmdInfo = parseCommand(trimmed);
@@ -632,9 +947,9 @@ function classifySegment(
 	);
 	if (wrapperVerdict.kind !== "pass") return wrapperVerdict;
 
-	// ④ source / .: runs a script file whose contents can't be statically analyzed → conservative confirm
+	// ④ source / .: runs a script file whose contents can't be statically analyzed → conservative confirm (pass in naked)
 	if (cmdInfo.command === "source" || cmdInfo.command === ".") {
-		return { kind: "confirm" };
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 
 	// ⑤-⑪ Pipeline for target-writing commands (git / dd / download / truncate / in-place edit / delete / overwrite / unzip -o)
@@ -690,9 +1005,9 @@ function judgeWriters(
 		const v = judge(trimmed, cmdInfo, realCwd);
 		if (v.kind !== "pass") return v;
 	}
-	// Forced extraction overwrite (unzip -o): archive contents unknowable → conservative confirm
+	// Forced extraction overwrite (unzip -o): archive contents unknowable → conservative confirm (pass in naked)
 	if (cmdInfo.command === "unzip" && hasShortFlag(cmdInfo.args, "o")) {
-		return { kind: "confirm" };
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 	return { kind: "pass" };
 }
@@ -728,20 +1043,30 @@ function judgeGit(
 	}
 	const sub = args[i];
 
-	if (sub === "clean" && hasForceFlag(args)) return { kind: "confirm" }; // -f/-fd/-fdx/--force
-	if (sub === "reset" && args.includes("--hard")) return { kind: "confirm" };
+	// Destructive git ops → per gitDestructive rule (block / confirm / pass)
+	if (sub === "clean" && hasForceFlag(args))
+		return ruleVerdict("gitDestructive", "git clean --force blocked by rule");
+	if (sub === "reset" && args.includes("--hard"))
+		return ruleVerdict("gitDestructive", "git reset --hard blocked by rule");
 	if (sub === "checkout" && (args.includes("--") || args.includes(".")))
-		return { kind: "confirm" };
+		return ruleVerdict(
+			"gitDestructive",
+			"git checkout destructive blocked by rule",
+		);
 	if (sub === "restore" && (args.includes(".") || args.includes("--source")))
-		return { kind: "confirm" };
+		return ruleVerdict(
+			"gitDestructive",
+			"git restore destructive blocked by rule",
+		);
 	if (sub === "branch" && args.some((a) => a === "-D"))
-		return { kind: "confirm" };
+		return ruleVerdict("gitDestructive", "git branch -D blocked by rule");
 	if (
 		sub === "push" &&
 		args.some((a) => a === "-f" || a === "--force" || a === "--force-with-lease")
 	)
-		return { kind: "confirm" };
-	if (sub === "stash" && args.includes("drop")) return { kind: "confirm" };
+		return ruleVerdict("gitDestructive", "git push --force blocked by rule");
+	if (sub === "stash" && args.includes("drop"))
+		return ruleVerdict("gitDestructive", "git stash drop blocked by rule");
 
 	return { kind: "pass" };
 }
@@ -764,9 +1089,15 @@ function judgeDelete(
 
 	const pathArgs = extractPathArgs(cmdInfo.args, realCwd);
 
-	// Protected paths first: blocked in every mode (trusted filters protected before passing outside deletes)
+	// Protected paths first: user paths block in EVERY mode (incl. naked); built-in paths block except in naked
 	for (const p of pathArgs) {
-		if (matchesProtectedPath(p.path)) {
+		if (isUserProtectedPath(p.path)) {
+			return {
+				kind: "block",
+				reason: `Delete command targets user-protected path: ${p.path}`,
+			};
+		}
+		if (!inNaked() && matchesProtectedPath(p.path)) {
 			return {
 				kind: "block",
 				reason: `Delete command targets protected path: ${p.path}`,
@@ -774,28 +1105,23 @@ function judgeDelete(
 		}
 	}
 
-	// No concrete path (rm "$HOME/.ssh", rm ./* — variable/wildcard, not statically resolvable) → conservative confirm (all modes)
+	// No concrete path (rm "$HOME/.ssh", rm ./* — variable/wildcard, not statically resolvable) → conservative confirm (pass in naked)
 	if (pathArgs.length === 0) {
-		return { kind: "confirm" };
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 
 	const externalPaths = pathArgs.filter((p) => p.isOutside);
 	if (externalPaths.length > 0) {
 		const list = externalPaths.map((p) => p.path).join(", ");
-		// trusted → pass (ordinary files, protected already filtered); loose → confirm; strict/normal → block
-		if (currentMode === "trusted") return { kind: "pass" };
-		if (currentMode === "loose") return { kind: "confirm" };
-		return {
-			kind: "block",
-			reason: `Delete command targets paths outside the project directory: ${list}`,
-		};
+		// per deleteOutside rule: strict/normal block, loose confirm, trusted/naked pass
+		return ruleVerdict(
+			"deleteOutside",
+			`Delete command targets paths outside the project directory: ${list}`,
+		);
 	}
 
-	// In-project delete: strict/normal → confirm; loose/trusted → pass
-	if (currentMode === "loose" || currentMode === "trusted") {
-		return { kind: "pass" };
-	}
-	return { kind: "confirm" };
+	// In-project delete → per deleteInProject rule (strict/normal confirm; loose/trusted/naked pass)
+	return ruleVerdict("deleteInProject", "Delete command blocked by rule");
 }
 
 /**
@@ -827,9 +1153,9 @@ function judgeOverwrite(
 	) {
 		return { kind: "pass" };
 	}
-	// rsync --delete: removes extra files in the target dir → conservative confirm
+	// rsync --delete: removes extra files in the target dir → conservative confirm (pass in naked)
 	if (cmdInfo.command === "rsync" && cmdInfo.args.includes("--delete")) {
-		return { kind: "confirm" };
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 
 	// Resolve target: -t dir src... form vs the regular form (last operand is the target)
@@ -848,14 +1174,20 @@ function judgeOverwrite(
 	}
 	if (!target || sources.length === 0) return { kind: "pass" };
 
-	// Variable/wildcard not statically resolvable → conservative confirm
+	// Variable/wildcard not statically resolvable → conservative confirm (pass in naked)
 	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
-		return { kind: "confirm" };
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 
 	const real = resolveReal(resolve(realCwd, expandHome(target)));
-	// ① Target hits a protected path → block
-	if (matchesProtectedPath(real)) {
+	// ① Target hits a protected path → block (user paths in every mode; built-in except naked)
+	if (isUserProtectedPath(real)) {
+		return {
+			kind: "block",
+			reason: `Command may overwrite user-protected path: ${cmdInfo.command} ${target}`,
+		};
+	}
+	if (!inNaked() && matchesProtectedPath(real)) {
 		return {
 			kind: "block",
 			reason: `Command may overwrite protected path: ${cmdInfo.command} ${target}`,
@@ -864,15 +1196,12 @@ function judgeOverwrite(
 
 	const outside = isOutsideCwd(real, realCwd);
 
-	// Outside overwrite of an existing target: normal/strict → block; loose → confirm; trusted → pass
-	const outsideOverwriteVerdict = (): SegmentVerdict => {
-		if (currentMode === "trusted") return { kind: "pass" };
-		if (currentMode === "loose") return { kind: "confirm" };
-		return {
-			kind: "block",
-			reason: `Command will overwrite a target outside the project directory: ${cmdInfo.command} ${target}`,
-		};
-	};
+	// Outside overwrite of an existing target → per overwriteOutsideExisting rule
+	const outsideOverwriteVerdict = (): SegmentVerdict =>
+		ruleVerdict(
+			"overwriteOutsideExisting",
+			`Command will overwrite a target outside the project directory: ${cmdInfo.command} ${target}`,
+		);
 
 	// ② Target is an existing directory: check each source basename for conflicts
 	if (existsSync(real) && isDirectory(real)) {
@@ -883,23 +1212,27 @@ function judgeOverwrite(
 			return existsSync(join(real, basename(srcReal)));
 		});
 		if (!conflict) return { kind: "pass" };
-		// Overwriting an existing target: outside per mode, in-project confirm (overwrites are never silently passed)
-		return outside ? outsideOverwriteVerdict() : { kind: "confirm" };
+		// Overwriting an existing target: outside per overwriteOutsideExisting; in-project per overwriteInProject
+		return outside
+			? outsideOverwriteVerdict()
+			: ruleVerdict("overwriteInProject", "Overwrite in project blocked by rule");
 	}
 
 	// ③ Target is an existing file: will be overwritten
 	if (existsSync(real)) {
-		return outside ? outsideOverwriteVerdict() : { kind: "confirm" };
+		return outside
+			? outsideOverwriteVerdict()
+			: ruleVerdict("overwriteInProject", "Overwrite in project blocked by rule");
 	}
 
-	// ④ Target missing: outside → normal/strict confirm, loose/trusted pass;
-	//    in-project → strict confirm, others pass (pure rename/create)
+	// ④ Target missing: outside → per overwriteOutsideNew; in-project → per writeInProject (strict confirm, others pass)
 	if (outside) {
-		return currentMode === "loose" || currentMode === "trusted"
-			? { kind: "pass" }
-			: { kind: "confirm" };
+		return ruleVerdict(
+			"overwriteOutsideNew",
+			`Write outside the project blocked by rule: ${cmdInfo.command} ${target}`,
+		);
 	}
-	return currentMode === "strict" ? { kind: "confirm" } : { kind: "pass" };
+	return ruleVerdict("writeInProject", "Write in project blocked by rule");
 }
 
 /** Unwrap a shell wrapper: bash/sh/zsh -c 'code', eval 'code' → inner code; else null */
@@ -947,10 +1280,16 @@ function judgeDd(
 		const target = a.slice(3);
 		if (!target) continue;
 		if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
-			return { kind: "confirm" };
+			return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 		}
 		const real = resolveReal(resolve(realCwd, expandHome(target)));
-		if (matchesProtectedPath(real)) {
+		if (isUserProtectedPath(real)) {
+			return {
+				kind: "block",
+				reason: `dd writes to user-protected path: ${trimmed}`,
+			};
+		}
+		if (!inNaked() && matchesProtectedPath(real)) {
 			return { kind: "block", reason: `dd writes to protected path: ${trimmed}` };
 		}
 	}
@@ -969,10 +1308,16 @@ function judgeDownload(
 	const target = downloadTarget(cmdInfo.command, cmdInfo.args);
 	if (!target) return { kind: "pass" };
 	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
-		return { kind: "confirm" };
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 	const real = resolveReal(resolve(realCwd, expandHome(target)));
-	if (matchesProtectedPath(real)) {
+	if (isUserProtectedPath(real)) {
+		return {
+			kind: "block",
+			reason: `Download writes to user-protected path: ${cmdInfo.command} ${target}`,
+		};
+	}
+	if (!inNaked() && matchesProtectedPath(real)) {
 		return {
 			kind: "block",
 			reason: `Download writes to protected path: ${cmdInfo.command} ${target}`,
@@ -1032,7 +1377,7 @@ function judgeTruncate(
 	realCwd: string,
 ): SegmentVerdict {
 	if (cmdInfo.command !== "truncate") return { kind: "pass" };
-	// Any target not statically resolvable (variable/wildcard) → conservative confirm
+	// Any target not statically resolvable (variable/wildcard) → conservative confirm (pass in naked)
 	if (
 		cmdInfo.args.some(
 			(a) =>
@@ -1040,18 +1385,24 @@ function judgeTruncate(
 				(a.startsWith("$") || a.includes("*") || a.includes("?")),
 		)
 	) {
-		return { kind: "confirm" };
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 	for (const t of extractPathArgs(cmdInfo.args, realCwd)) {
-		if (matchesProtectedPath(t.path)) {
+		if (isUserProtectedPath(t.path)) {
+			return {
+				kind: "block",
+				reason: `truncate truncates user-protected path: ${t.raw}`,
+			};
+		}
+		if (!inNaked() && matchesProtectedPath(t.path)) {
 			return {
 				kind: "block",
 				reason: `truncate truncates protected path: ${t.raw}`,
 			};
 		}
-		// Existing ordinary file truncated → confirm (prevent accidental overwrite)
+		// Existing ordinary file truncated → per truncate rule
 		if (!DEVICE_TARGETS.has(t.path) && existsSync(t.path)) {
-			return { kind: "confirm" };
+			return ruleVerdict("truncate", `Truncate blocked by rule: ${t.raw}`);
 		}
 	}
 	return { kind: "pass" };
@@ -1074,10 +1425,16 @@ function judgeInPlace(
 	const dest = lastDestArg(cmdInfo.args);
 	if (!dest) return { kind: "pass" };
 	if (dest.startsWith("$") || dest.includes("*") || dest.includes("?")) {
-		return { kind: "confirm" };
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 	const real = resolveReal(resolve(realCwd, expandHome(dest)));
-	if (matchesProtectedPath(real)) {
+	if (isUserProtectedPath(real)) {
+		return {
+			kind: "block",
+			reason: `In-place edit of user-protected path: ${cmdInfo.command} ${dest}`,
+		};
+	}
+	if (!inNaked() && matchesProtectedPath(real)) {
 		return {
 			kind: "block",
 			reason: `In-place edit of protected path: ${cmdInfo.command} ${dest}`,

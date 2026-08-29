@@ -36,7 +36,41 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive picker 非法参数 → 兜底弹出交互选择
 - The active mode persists across sessions via settings.json (`pathGuard.mode`): project `.pi/settings.json` overrides global `~/.pi/agent/settings.json`, falling back to `normal`. `/guard <mode>` writes it back (project settings in a trusted project, else global). 模式跨会话持久化到 settings.json（`pathGuard.mode`）：项目 `.pi/settings.json` 优先于全局 `~/.pi/agent/settings.json`，缺省回 `normal`；`/guard <mode>` 切换时回写（受信任项目写项目配置，否则写全局）
+- `/guard paths add|rm|list|clear <path>` — manage custom protected paths, enforced in EVERY mode (incl. naked) 管理自定义受保护路径，任何模式（含 naked）都生效
 - The active mode is shown in the footer status bar (`🛡 <mode>`, `🛡 NAKED` in warning color) 当前模式显示在底部状态栏（`🛡 <mode>`，naked 用警示色 `🛡 NAKED`）
+
+### Custom protected paths / 自定义受保护路径
+
+```text
+/guard paths list            # show configured custom protected paths 列出
+/guard paths add <path>      # add one (absolute or ~/…; symlink-resolved) 新增
+/guard paths rm <path>       # remove 移除
+/guard paths clear           # clear all 清空
+```
+
+Custom paths are checked against the resolved real path and protected in every mode — even `naked` (built-in protected paths are NOT enforced in `naked`; only yours are). They are also settable statically:
+自定义路径按解析后的真实路径匹配，且在任何模式下都被守护——包括 `naked`（内置受保护路径在 `naked` 下不生效，但你自定义的始终生效）。也可在 settings.json 静态配置：
+
+```jsonc
+"pathGuard": { "extraProtected": ["~/secrets", "/path/to/important.txt"] }
+```
+
+### Tunable rules / 可调规则
+
+Each mode's judgement is a set of 12 rules; override any per mode in settings.json (`rule = "block" | "confirm" | "pass"`; invalid values are ignored):
+每个模式的判定由 12 条规则组成；可在 settings.json 里按模式覆盖（`rule` 取 `"block"|"confirm"|"pass"`，非法值忽略）：
+
+```jsonc
+"pathGuard": {
+  "mode": "normal",
+  "rules": {
+    "normal":  { "deleteOutside": "confirm", "confirmGroup": "pass" },
+    "naked":   { "blockGroup": "block" }
+  }
+}
+```
+
+Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInProject`, `deleteOutside`, `deleteInProject`, `overwriteOutsideExisting`, `overwriteOutsideNew`, `overwriteInProject`, `truncate`, `gitDestructive`. Defaults reproduce the matrix above exactly.
 
 ### Guard mode matrix / 防护模式矩阵
 
@@ -73,13 +107,13 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 
 ## Development / 开发与测试
 
-Automated tests (104 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, and settings.json mode persistence:
+Automated tests (117 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（104 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化等流程：
+自动化测试（117 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts

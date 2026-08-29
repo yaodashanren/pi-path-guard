@@ -768,6 +768,222 @@ check(
 	"session-only",
 );
 
+// ── user-configured protected paths (guarded in EVERY mode, incl. naked) ─
+const P2 = "/tmp/pgtest/persist2";
+const P2_SETTINGS = join(P2, ".pi", "settings.json");
+const SECRET = join(P2, "secret.txt");
+mkdirSync(join(P2, ".pi"), { recursive: true });
+writeFileSync(SECRET, "x");
+writeFileSync(join(P2, "ordinary.txt"), "x");
+writeFileSync(join(P2, ".env"), "SECRET=1");
+
+// reset config from clean settings (trusted project)
+rmSync(P2_SETTINGS, { force: true });
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: P2,
+		isProjectTrusted: () => true,
+		ui: { theme: themeMock, setStatus: () => {} },
+	},
+);
+
+// /guard paths add <path>
+let pathsNotify: string[] = [];
+await commands["guard"].handler(`paths add ${SECRET}`, {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: (m: string) => pathsNotify.push(m),
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"guard paths add persists to settings",
+	(() => {
+		const p = JSON.parse(readFileSync(P2_SETTINGS, "utf8")).pathGuard
+			?.extraProtected as string[] | undefined;
+		return p?.length === 1 && (p[0]?.endsWith("secret.txt") ?? false);
+	})()
+		? "saved"
+		: "?",
+	"saved",
+);
+
+// guarded in normal mode (write / rm / redirect)
+check(
+	"write to user path blocks (normal)",
+	(await runTool("write", { path: SECRET }, { cwd: P2 })).verdict,
+	"block",
+);
+check(
+	"rm user path blocks (normal)",
+	(await runCmd(`rm ${SECRET}`, P2)).verdict,
+	"block",
+);
+check(
+	"redirect to user path blocks (normal)",
+	(await runCmd(`echo x > ${SECRET}`, P2)).verdict,
+	"block",
+);
+
+// switch to naked → user path STILL guarded, ordinary ops still pass
+await commands["guard"].handler("naked", {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		confirm: async () => true,
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"write to user path still blocks (naked)",
+	(await runTool("write", { path: SECRET }, { cwd: P2 })).verdict,
+	"block",
+);
+check(
+	"rm user path still blocks (naked)",
+	(await runCmd(`rm ${SECRET}`, P2)).verdict,
+	"block",
+);
+check(
+	"naked passes ordinary in-project delete",
+	(await runCmd(`rm ${P2}/ordinary.txt`, P2)).verdict,
+	"pass",
+);
+check(
+	"naked still passes built-in .env write (escape hatch kept)",
+	(await runTool("write", { path: join(P2, ".env") }, { cwd: P2 })).verdict,
+	"pass",
+);
+
+// remove the path → no longer guarded; list shows it
+await commands["guard"].handler(`paths rm ${SECRET}`, {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+await commands["guard"].handler("normal", {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		confirm: async () => true,
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"write to removed user path passes (normal)",
+	(await runTool("write", { path: SECRET }, { cwd: P2 })).verdict,
+	"pass",
+);
+await commands["guard"].handler(`paths add ${SECRET}`, {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+let listNotify: string[] = [];
+await commands["guard"].handler("paths list", {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: (m: string) => listNotify.push(m),
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"guard paths list shows path",
+	listNotify.join(" ").includes(SECRET) ? "shown" : "?",
+	"shown",
+);
+
+// ── tunable rule overrides (settings.json pathGuard.rules) ────────────
+const RULE_OUT = join(OUT, "rule_outside.txt");
+writeFileSync(RULE_OUT, "x");
+
+// normal.deleteOutside default=block → override to confirm
+rmSync(P2_SETTINGS, { force: true });
+writeFileSync(
+	P2_SETTINGS,
+	JSON.stringify({
+		pathGuard: { rules: { normal: { deleteOutside: "confirm" } } },
+	}),
+);
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: P2,
+		isProjectTrusted: () => true,
+		ui: { theme: themeMock, setStatus: () => {} },
+	},
+);
+check(
+	"rule override: normal deleteOutside → confirm",
+	(await runCmd(`rm ${RULE_OUT}`, P2)).verdict,
+	"confirm",
+);
+
+// normal.confirmGroup default=confirm → override to block (sudo)
+writeFileSync(
+	P2_SETTINGS,
+	JSON.stringify({
+		pathGuard: { rules: { normal: { confirmGroup: "block" } } },
+	}),
+);
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: P2,
+		isProjectTrusted: () => true,
+		ui: { theme: themeMock, setStatus: () => {} },
+	},
+);
+check(
+	"rule override: normal confirmGroup → block (sudo)",
+	(await runCmd("sudo true", P2)).verdict,
+	"block",
+);
+
+// invalid rule value ignored → falls back to default (confirm)
+writeFileSync(
+	P2_SETTINGS,
+	JSON.stringify({
+		pathGuard: { rules: { normal: { confirmGroup: "banana" } } },
+	}),
+);
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: P2,
+		isProjectTrusted: () => true,
+		ui: { theme: themeMock, setStatus: () => {} },
+	},
+);
+check(
+	"rule override: invalid value ignored (confirmGroup back to confirm)",
+	(await runCmd("sudo true", P2)).verdict,
+	"confirm",
+);
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

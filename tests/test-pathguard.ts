@@ -30,6 +30,7 @@ mod.default(fakePi);
 
 // ── test helpers ────────────────────────────────────────────
 let selectCalls = 0;
+const themeMock = { fg: (_color: string, s: string) => s };
 async function runTool(
 	toolName: string,
 	input: any,
@@ -69,6 +70,8 @@ async function setMode(mode: string) {
 		ui: {
 			notify: (m: string) => notify.push(m),
 			confirm: async () => true,
+			theme: themeMock,
+			setStatus: () => {},
 		},
 	});
 	return notify.join(" | ");
@@ -84,7 +87,10 @@ async function currentModeShown() {
 }
 
 function newSession() {
-	handlers["session_start"]({ reason: "startup" }, {});
+	handlers["session_start"](
+		{ reason: "startup" },
+		{ ui: { theme: themeMock, setStatus: () => {} } },
+	);
 }
 
 // ── prepare test dirs ───────────────────────────────────────
@@ -124,6 +130,8 @@ await commands["guard"].handler("", {
 			selectResult = options.find((o) => o.startsWith("loose")) ?? undefined;
 			return selectResult;
 		},
+		theme: themeMock,
+		setStatus: () => {},
 	},
 });
 check(
@@ -235,6 +243,8 @@ await commands["guard"].handler("", {
 			interactiveTrustedConfirm = true;
 			return true;
 		},
+		theme: themeMock,
+		setStatus: () => {},
 	},
 });
 check(
@@ -553,6 +563,37 @@ check(
 );
 
 // in naked mode everything passes, even protected paths & destructive commands
+let statusLog: { key: string; text: string | undefined }[] = [];
+async function statusOf(mode: string) {
+	statusLog = [];
+	await commands["guard"].handler(mode, {
+		hasUI: true,
+		ui: {
+			notify: () => {},
+			confirm: async () => true,
+			theme: themeMock,
+			setStatus: (k: string, t: string | undefined) =>
+				statusLog.push({ key: k, text: t }),
+		},
+	});
+	return statusLog.find((s) => s.key === "path-guard")?.text;
+}
+newSession();
+check(
+	"/guard footer shows normal",
+	(await statusOf("normal")) === "🛡 normal" ? "normal" : "?",
+	"normal",
+);
+check(
+	"/guard footer shows loose after switch",
+	(await statusOf("loose")) === "🛡 loose" ? "loose" : "?",
+	"loose",
+);
+check(
+	"/guard footer highlights NAKED",
+	(await statusOf("naked")) === "🛡 NAKED" ? "naked" : "?",
+	"naked",
+);
 check(
 	"naked write to protected .env → pass",
 	(await runTool("write", { path: join(PROJ, ".env") }, { cwd: PROJ })).verdict,

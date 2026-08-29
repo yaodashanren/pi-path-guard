@@ -36,6 +36,7 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive picker 非法参数 → 兜底弹出交互选择
 - Every new session resets to `normal` 每次新会话自动回到 `normal`
+- The active mode is shown in the footer status bar (`🛡 <mode>`, `🛡 NAKED` in warning color) 当前模式显示在底部状态栏（`🛡 <mode>`，naked 用警示色 `🛡 NAKED`）
 
 ### Guard mode matrix / 防护模式矩阵
 
@@ -72,13 +73,13 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 
 ## Development / 开发与测试
 
-Automated tests (96 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction, trusted-mode confirmation, and naked-mode double confirmation:
+Automated tests (99 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, and the footer status indicator:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（96 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认流程：
+自动化测试（99 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts

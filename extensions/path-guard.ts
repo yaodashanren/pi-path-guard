@@ -52,6 +52,7 @@ import type {
 	EditToolInput,
 	WriteToolInput,
 	ToolCallEventResult,
+	ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import {
 	resolve,
@@ -250,10 +251,27 @@ type GuardVerdict =
 
 // ─── Entry ────────────────────────────────────────────────────────────
 
+/** Set the current guard mode and mirror it into the TUI footer status bar. */
+function setMode(mode: GuardMode, ui: ExtensionUIContext) {
+	currentMode = mode;
+	refreshModeStatus(ui);
+}
+
+/**
+ * Show the active guard mode in the footer status bar (persists across renders).
+ * naked is highlighted in warning color so the "bare" state is unmissable.
+ */
+function refreshModeStatus(ui: ExtensionUIContext) {
+	const t = ui.theme;
+	const color = currentMode === "naked" ? "warning" : "accent";
+	const label = currentMode === "naked" ? "🛡 NAKED" : `🛡 ${currentMode}`;
+	ui.setStatus("path-guard", t.fg(color, label));
+}
+
 export default function (pi: ExtensionAPI) {
 	// Reset to normal on every new session (startup, /new, /resume all fire session_start)
-	pi.on("session_start", () => {
-		currentMode = "normal";
+	pi.on("session_start", (_event, ctx) => {
+		setMode("normal", ctx.ui);
 	});
 
 	// /guard slash command: view / switch guard mode
@@ -273,6 +291,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				currentMode = m;
+				refreshModeStatus(ctx.ui);
 				ctx.ui.notify(
 					`Path Guard switched to: ${m} (session-only; new sessions reset to normal)`,
 					"info",
@@ -309,6 +328,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				currentMode = picked;
+				refreshModeStatus(ctx.ui);
 				ctx.ui.notify(
 					`Path Guard switched to: ${picked} (session-only; new sessions reset to normal)`,
 					"info",

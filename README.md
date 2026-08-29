@@ -22,7 +22,7 @@ pi install /path/to/pi-path-guard
 # Try without installing (no settings change / 临时试用，不写入 settings)
 pi -e ./pi-path-guard
 
-# npm (after publishing / 发布后): scope package
+# npm: scope package
 # pi install npm:@yaosu/pi-path-guard
 ```
 

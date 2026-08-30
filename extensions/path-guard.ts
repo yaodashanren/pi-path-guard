@@ -1,61 +1,40 @@
 /**
- * Path Guard Extension v3 — protects against accidental deletes / overwrites / edits
+ * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
- * Built on path-guard-p620.ts, merging strengths from path-guard-ayydesk.ts and fixing known gaps:
+ * Version history (this project, aligned with package.json):
  *
- * v2 additions over p620:
- *   1. Prefix-command stripping (sudo/doas/pkexec/env/nohup/command/builtin/time/nice/xargs/
- *      timeout/setsid/stdbuf/ionice/chroot/watch) → analyze the real command.
- *      Fixes p620 letting "timeout 5 rm -rf /etc", "nohup rm -rf x" etc. through.
- *   2. Git destructive-command checks (clean -f / reset --hard / checkout -- . / restore . /
- *      branch -D / push --force / stash drop), honoring -C/-c global option prefixes.
- *      Fixes p620 only blocking git clean.
- *   3. Block-device redirect regex without the  boundary, fixing "echo x > /dev/sda" (spaced) misses.
- *   4. realpath resolution upgraded to "walk up to nearest existing ancestor" (ayydesk approach),
- *      fixing deep missing paths being written through symlinks to outside the project.
- *   5. mv/cp/install/tee/ln -f/rsync existing-target overwrite detection (incl. -t target form,
- *      tee -a append exemption, rsync --delete confirmation) — in-project overwrite → confirm,
- *      outside → block.
- *   6. "> existing file" truncate detection (incl. 2> / &>, excluding >> append and devices) → confirm.
- *   7. write/edit resolves the real cwd path before judging in/out, fixing false positives where
- *      an in-project write under a symlinked cwd was misjudged as outside.
- *
- * All p620 capabilities retained:
+ * v1.0.0 — initial release
  *   - Protected-path interception (.env / .ssh / keys / credentials, regardless of project)
- *   - Shell wrapper recursion (bash -c / eval, depth-limited); source / . conservative confirm
- *   - dd / curl -o / wget -O / truncate / sed -i / perl -i / ruby -i / unzip -o judgment
- *   - Dangerous command regexes (sudo / chmod 777 / ssh / find -delete / mkfs etc.)
- *   - Compound-command segmentation aggregation, fail-safe: any hard block blocks everything
- *   - Quote-aware tokenization (single/double quotes handled correctly)
+ *   - Dangerous-command judgment: Block group (mkfs / reboot / block-device writes / bulk
+ *     delete) and Confirm group (sudo / ssh / chmod 777 …); no-UI environments fall back to block
+ *   - Prefix-command stripping (sudo/doas/pkexec/env/nohup/timeout/setsid/chroot/watch …) to
+ *     analyze the real command; shell wrapper recursion (bash -c / eval, depth-limited);
+ *     quote-aware tokenization; compound-command segmentation with fail-safe aggregation
+ *   - realpath resolution (walk up to the nearest existing ancestor) so deep missing paths are
+ *     not written through symlinks to outside the project; symlinked cwd resolved before judging
+ *   - mv/cp/install/tee/ln -f/rsync existing-target overwrite detection; "> existing file" truncate
+ *     detection (excluding append and devices); dd / curl -o / wget -O / unzip -o judgment
+ *   - git destructive-command checks (clean -f / reset --hard / checkout -- . / restore . /
+ *     branch -D / push --force / stash drop), honoring -C/-c global option prefixes
+ *   - Guard modes via /guard: strict / normal / loose / trusted; footer status bar shows the
+ *     active mode
  *
- * v3 adds (upgrade from v2): guard modes (/guard command, switchable per session; new sessions
- * reset to normal)
- *   - strict   full protection: in-project writes also prompt; Confirm-group commands blocked
- *   - normal   default: Block-group commands blocked directly, Confirm group prompts
- *   - loose    relaxed: in/out-project creates and deletes pass without prompting (overwrites of
- *              existing targets still confirmed)
- *   - trusted  most permissive: overwrites and ordinary-file deletes pass too
- *   - Protected paths (credentials/config/keys) and the Block group (format/shutdown/bulk-delete/
- *     block-device writes) are blocked directly in every mode, with no confirmation opportunity
+ * v1.1.0 — adds naked mode: passes almost everything (protected paths, write/edit checks, git
+ *   destructive, truncate, outside deletes/overwrites); only system-destructive Block-group
+ *   commands (mkfs / reboot / block-device writes / bulk delete) are still confirmed. Switching
+ *   to naked requires a double confirmation (stronger than trusted's single warning).
  *
- * v3.1 adds (upgrade from v3): naked mode — passes almost everything (protected paths, write/edit
- *   checks, git destructive, truncate, outside deletes/overwrites); only system-destructive
- *   Block-group commands (mkfs/reboot/block-device writes/bulk delete) are still confirmed.
- *   Switching to naked requires a double confirmation (stronger than trusted's single warning).
+ * v1.2.0 — mode persistence across sessions. The active mode is read from settings.json on
+ *   session_start (project .pi/settings.json overrides global ~/.pi/agent/settings.json, falling
+ *   back to normal) and written back when /guard switches mode.
  *
- * v3.2 adds (upgrade from v3.1): mode persistence across sessions. The active mode is read from
- *   settings.json on session_start (project .pi/settings.json overrides the global
- *   ~/.pi/agent/settings.json, falling back to normal) and written back when /guard switches
- *   mode — project settings in a trusted project, otherwise global settings. Key: pathGuard.mode.
- *
- * v3.3 adds (upgrade from v3.2): configurable protected paths and tunable rules.
+ * v1.3.0 — configurable protected paths and tunable rules.
  *   - User-configured protected paths (pathGuard.extraProtected, or /guard paths add|rm|list|clear)
  *     are enforced in EVERY mode including naked.
  *   - The 5 modes' judgement rules are tunable per mode via pathGuard.rules.{mode}.{rule} in
  *     settings.json (rule = block|confirm|pass; valid rule IDs listed in RULE_IDS). The built-in
- *     defaults exactly reproduce v3.2 behaviour; overrides only adjust the listed rule.
+ *     defaults match the earlier hardcoded behaviour; overrides only adjust the listed rule.
  */
-
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -308,7 +287,7 @@ function isRuleLevel(v: string | undefined): v is RuleLevel {
 	return v === "block" || v === "confirm" || v === "pass";
 }
 
-/** Default rules per built-in mode — reproduces the v3.1 hardcoded behaviour exactly. */
+/** Default rules per built-in mode — reproduces the pre-config (v1.0.0) hardcoded behaviour exactly. */
 const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 	strict: {
 		blockGroup: "block",

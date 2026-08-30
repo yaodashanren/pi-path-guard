@@ -6,6 +6,17 @@
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { register } from "node:module";
+
+// The extension imports "@earendil-works/pi-tui" (value import for the scrollable
+// overview viewer), which the pi host resolves internally but a bare `node` run cannot.
+// Redirect those specifiers to the installed pi runtime via a resolution hook.
+register(new URL("./pi-modules-hook.mjs", import.meta.url).href);
+
+// The extension needs the real pi-tui classes for its scrollable overview viewer.
+// Must be a dynamic import: register() above runs before this resolves (static imports
+// are hoisted, so a static `import { ScrollView }` would resolve too early).
+const { ScrollView } = await import("@earendil-works/pi-tui");
 
 const EXT = new URL("../extensions/path-guard.ts", import.meta.url).href;
 
@@ -414,24 +425,64 @@ check(
 	"set",
 );
 
-// main → rules → overview → shows the effective matrix
+// main → rules → overview → renders the effective matrix as a widget
 const ovrQueue = ["rules", "overview", "back"];
-let ovrNotif = "";
+let ovrWidget: string[] = [];
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
-		notify: (m: string) => {
-			if (m.startsWith("Path Guard effective rules matrix")) ovrNotif = m;
-		},
+		notify: () => {},
 		select: async () => ovrQueue.shift(),
+		setWidget: (_id: string, lines: string[]) => {
+			if (lines) ovrWidget = lines;
+		},
 		theme: themeMock,
 		setStatus: () => {},
 	},
 });
 check(
-	"rules menu overview shows matrix",
-	ovrNotif.includes("strict") && ovrNotif.includes("writeHome") ? "matrix" : "?",
+	"rules menu overview renders matrix widget",
+	ovrWidget.length >= 16 &&
+		ovrWidget.some((l) => l.startsWith("writeHome")) &&
+		ovrWidget.some((l) => l.startsWith("rule"))
+		? "matrix"
+		: "?",
 	"matrix",
+);
+
+// main → rules → overview → when custom() is available, uses the scrollable viewer
+const cusQueue = ["rules", "overview", "back"];
+let customCalls = 0;
+let customComponent: unknown = null;
+let customClosed = false;
+await commands["guard"].handler("", {
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		select: async () => cusQueue.shift(),
+		custom: async (
+			factory: (t: any, th: any, k: any, done: () => void) => unknown,
+		) => {
+			customCalls++;
+			customComponent = factory({}, themeMock, {}, () => {
+				customClosed = true;
+			});
+			// press "q" (raw input) → the component's handleInput should call done()
+			(
+				customComponent as { handleInput?: (data: string) => void } | null
+			)?.handleInput?.("q");
+			return undefined;
+		},
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"rules menu overview uses scrollable custom viewer",
+	customCalls === 1 && customComponent instanceof ScrollView && customClosed
+		? "scrollable"
+		: "?",
+	"scrollable",
 );
 
 // main → rules → reset → confirm → clears all overrides

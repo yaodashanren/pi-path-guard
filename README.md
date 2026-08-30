@@ -33,7 +33,7 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 ### `/guard` command
 
 - `/guard` — interactive main menu with three actions: **Switch mode** (title shows the full decision matrix; choices are bilingual), **Customize per-mode guard rules**, and **Manage custom protected paths**. The main menu loops: a sub-menu's **back** returns to the previous menu, and eventually back to this main menu; only cancelling at the top level (no selection) exits the command. 交互式主菜单，三个动作：**切换防护模式**（标题展示完整判定矩阵，选项中英双语）、**定制每模式守护规则**、**管理自定义受保护路径**。主菜单为循环：子菜单的 **back** 逐级返回上一级，最终回到本主菜单；只有顶层取消（不选）才退出命令
-- `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 14 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 14 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
+- `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 14 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 14 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive main menu 非法参数 → 兜底弹出交互主菜单
 - The active mode persists across sessions via settings.json (`pathGuard.mode`): project `.pi/settings.json` overrides global `~/.pi/agent/settings.json`, falling back to `normal`. `/guard <mode>` writes it back (project settings in a trusted project, else global). 模式跨会话持久化到 settings.json（`pathGuard.mode`）：项目 `.pi/settings.json` 优先于全局 `~/.pi/agent/settings.json`，缺省回 `normal`；`/guard <mode>` 切换时回写（受信任项目写项目配置，否则写全局）
@@ -111,13 +111,13 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 ## Development / 开发与测试
 
-Automated tests (133 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), and per-mode rule overrides:
+Automated tests (143 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（133 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、按模式规则覆盖等流程：
+自动化测试（143 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts

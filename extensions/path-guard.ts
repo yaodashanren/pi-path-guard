@@ -59,6 +59,18 @@
  *
  * v1.4.1 — the main /guard menu now loops: a sub-menu's back returns to the previous menu
  * (and eventually to the main menu); only cancelling at the top level exits the command.
+ *
+ * v1.4.2 — fix: the rules-menu "overview" matrix was too large for a notify popup and for
+ * the string-array widget (hard-capped at 10 lines), so it got truncated. It is now shown in
+ * a full scrollable read-only viewer via ctx.ui.custom() (ScrollView + Text from pi-tui,
+ * with ↑/↓/PgUp/PgDn/Home/End scroll and q/⏎/esc to close), falling back to the widget for
+ * headless / minimal-UI environments.
+ *
+ * v1.4.3 — fix: the scrollable overview viewer could be shown but not closed. The docs
+ * pattern `component.onKey` is not a real method in current pi-tui, so keys never arrived.
+ * Reworked the viewer to receive raw input via the actual custom() component interface:
+ * `component.handleInput(data)` with `matchesKey(...)` for key detection and `done()` (the
+ * factory's 4th arg) to close. Tests exercise closing via handleInput("q").
  */
 import type {
 	ExtensionAPI,
@@ -80,6 +92,7 @@ import {
 	sep,
 } from "node:path";
 import { homedir } from "node:os";
+import { ScrollView, Text, matchesKey } from "@earendil-works/pi-tui";
 import {
 	realpathSync,
 	existsSync,
@@ -879,6 +892,61 @@ const GUARD_RULES_MENU = [
 	"back — Back to main menu (返回)",
 ];
 
+/** Widget id used to render the full effective rules matrix above the editor. */
+const OVERVIEW_WIDGET = "path-guard-overview";
+
+/**
+ * Show the full rules matrix in a scrollable viewer. Prefers ctx.ui.custom() (a proper
+ * paged/scrollable read-only component); falls back to the string-array widget, which the
+ * host caps at a few lines, for headless / minimal UI mocks.
+ */
+async function showMatrixViewer(
+	ctx: ExtensionCommandContext,
+	matrix: string,
+): Promise<void> {
+	const lines = matrix.split("\n");
+	if (typeof ctx.ui.custom === "function") {
+		await ctx.ui.custom<void>((_tui, _theme, _keybindings, done) => {
+			const view = new ScrollView(new Text(lines.join("\n"), 1, 1), {
+				scrollbar: "auto",
+				overscroll: "contain",
+			});
+			// A custom() component receives raw key input via handleInput(data);
+			// done() is the factory's 4th arg and closes the viewer. (The `onKey`
+			// property from some docs is not a real method in current pi-tui.)
+			view.handleInput = (data: string) => {
+				if (matchesKey(data, "up")) view.scrollBy(-1);
+				else if (matchesKey(data, "down")) view.scrollBy(1);
+				else if (matchesKey(data, "pageup") || matchesKey(data, "ctrl+u"))
+					view.scrollBy(-Math.max(1, view.viewportHeight));
+				else if (matchesKey(data, "pagedown") || matchesKey(data, "ctrl+d"))
+					view.scrollBy(Math.max(1, view.viewportHeight));
+				else if (matchesKey(data, "home")) view.scrollToStart();
+				else if (matchesKey(data, "end")) view.scrollToEnd();
+				else if (
+					matchesKey(data, "escape") ||
+					matchesKey(data, "q") ||
+					matchesKey(data, "return") ||
+					matchesKey(data, "enter") ||
+					matchesKey(data, "ctrl+c")
+				)
+					done();
+			};
+			return view;
+		});
+		ctx.ui.notify(
+			"Rule matrix shown — ↑/↓ scroll, q/⏎/esc to close (返回以收起)",
+			"info",
+		);
+		return;
+	}
+	ctx.ui.setWidget(OVERVIEW_WIDGET, lines);
+	ctx.ui.notify(
+		"Effective rules matrix shown above the editor (返回以收起)",
+		"info",
+	);
+}
+
 /** The effective (override-aware) rule matrix as a readable table. */
 function rulesMatrix(): string {
 	const head =
@@ -1058,17 +1126,30 @@ async function runModeSubmenu(ctx: ExtensionCommandContext): Promise<void> {
  * current overrides; overview shows the full matrix on demand.
  */
 async function runRulesMenu(ctx: ExtensionCommandContext): Promise<void> {
+	// The full matrix is far too large for a notify popup, so it is rendered as a
+	// persistent read-only widget above the editor and cleared when leaving the menu.
+	const clearOverview = () => {
+		try {
+			ctx.ui.setWidget(OVERVIEW_WIDGET, undefined);
+		} catch {
+			/* widget API unavailable (e.g. bare mock / print mode) */
+		}
+	};
 	while (true) {
 		ctx.ui.notify(rulesSummary(), "info");
 		const action = await ctx.ui.select("Choose an action:", GUARD_RULES_MENU);
 		if (!action) {
+			clearOverview();
 			ctx.ui.notify("Cancelled, rules unchanged", "info");
 			return;
 		}
 		const op = action.split(/\s+/)[0];
-		if (op === "back") return;
+		if (op === "back") {
+			clearOverview();
+			return;
+		}
 		if (op === "overview") {
-			ctx.ui.notify(rulesMatrix(), "info");
+			await showMatrixViewer(ctx, rulesMatrix());
 			continue;
 		}
 		if (op === "reset") {

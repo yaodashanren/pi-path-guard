@@ -7,15 +7,14 @@ Intercepts destructive operations in tool calls (`bash`, `write`, `edit`): prote
 
 拦截 `bash` / `write` / `edit` 等工具调用中的破坏性操作：受保护路径（`.env`、`.ssh`、密钥、凭据等）、系统级破坏命令（mkfs/reboot/写块设备/批量删除等）、项目外覆盖/删除、`>` 截断已有文件等，按防护模式决定 **阻止 / 询问 / 放行**。
 
-## Feature highlights / 项目特点
+## Feature highlights
 
-- **🛡 5 种防护模式** —— `strict`(全防护) / `normal`(默认) / `loose`(放宽) / `trusted`(最宽松) / `naked`(裸奔)：一套内置判定矩阵，随模式切换整体升降保护强度；`/guard` 或 `/guard <mode>` 一键切换，跨会话持久化。
-- **⚙️ 可逐条修改防护规则** —— 不用改代码：`/guard → rules` 按模式把全部 14 条规则（阻止/询问/放行三档）逐条定制，还可一键 reset 恢复内置默认。判定逻辑不变，只存你的覆盖。
-- **📁 可自定义防护路径** —— `/guard paths add|rm|list|clear <path>` 维护自定义受保护路径，任何模式（含 naked）都强制生效，防止自己的关键目录被误删/误覆盖。
-- **🔒 三档裁决** —— 每个受检操作都得到 **block / confirm / pass** 之一：阻止直接拒、询问弹窗由你决定、放行直接执行，拦截粒度由你的规则决定。
+- **🛡 5 protection modes** — `strict` (maximum) / `normal` (default) / `loose` (relaxed) / `trusted` (permissive) / `naked` (off). One built-in decision matrix powers all five; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`).
+- **⚙️ Tune every rule without touching code** — `/guard → rules` lets you customize all 14 guard rules per mode (each **block / confirm / pass**) and reset any rule to its built-in default; only your overrides are stored, the judgement logic is untouched.
+- **📁 Custom protected paths** — `/guard paths add|rm|list|clear <path>` maintains your own protected paths, enforced in **every** mode (including naked), so your critical directories can't be accidentally deleted or overwritten.
+- **🔒 Three-way verdict** — every intercepted operation resolves to **block / confirm / pass**: block refuses outright, confirm asks you, pass executes. How strict the guard is depends entirely on your rules.
 
-> ⚠️ **Security notice / 安全提示**: pi extensions run with full system permissions and can execute arbitrary code. Review the source before installing (this project is open source — see `extensions/path-guard.ts`).
-> pi 扩展拥有完整系统权限，可执行任意代码。安装前请审阅源码（本项目源码开源，见 `extensions/path-guard.ts`）。
+> ⚠️ **Security notice**: pi extensions run with full system permissions and can execute arbitrary code. Review the source before installing (this project is open source — see `extensions/path-guard.ts`).
 
 ## Install / 安装
 

@@ -34,6 +34,20 @@
  *   - The 5 modes' judgement rules are tunable per mode via pathGuard.rules.{mode}.{rule} in
  *     settings.json (rule = block|confirm|pass; valid rule IDs listed in RULE_IDS). The built-in
  *     defaults match the earlier hardcoded behaviour; overrides only adjust the listed rule.
+ *   - New dangerous pipe-to-shell checks: `curl … | bash` / `wget -qO- … | sh` /
+ *     `python -c '…' | sh` (output of network fetchers / inline interpreter code piped into a
+ *     shell). strict confirms at all positions; normal passes in-workspace / confirms
+ *     remote-outside sources; loose/trusted/naked pass. Tunable via pipeToShellInProject and
+ *     pipeToShellOutside rules.
+ *
+ * v1.3.1 — /guard interactive two-level menu.
+ *   - A bare /guard (has UI) now shows a main menu instead of jumping straight into the mode
+ *     picker: choose "Switch mode" (the original picker) or "Manage custom protected paths"
+ *     (shows the current list, then loops add / remove / clear / back). Future top-level
+ *     actions extend GUARD_MAIN_MENU.
+ *   - Custom-path management is now friendly in the UI: add uses ctx.ui.input to type the
+ *     path, remove picks from the current list, clear double-checks via confirm, back returns.
+ *     The /guard paths add|rm|list|clear subcommands and /guard <mode> shortcuts still work.
  */
 import type {
 	ExtensionAPI,
@@ -152,6 +166,21 @@ const SHELL_WRAPPERS = new Set([
 	"tcsh",
 ]);
 
+/**
+ * Sources whose output piped into a shell is risky (remote fetch / inline-generated
+ * code): `curl … | bash`, `wget -qO- … | sh`, `python -c '…' | sh`, etc.
+ */
+const PIPE_TO_SHELL_SOURCES = new Set([
+	"curl",
+	"wget",
+	"python",
+	"python3",
+	"perl",
+	"node",
+	"ruby",
+	"php",
+]);
+
 /** Prefix commands: strip before checking the real command */
 const PREFIX_COMMANDS = new Set([
 	"sudo",
@@ -241,6 +270,8 @@ const MODE_MATRIX = [
 	"  Outside overwrite existing             B       B       ?       .       .",
 	"  Outside delete ordinary                B       B       ?       .       .",
 	"  Truncate existing > file               ?       ?       ?       ?       .",
+	"  Pipe to shell (curl…|bash)             ?       .       .       .       .",
+	"  Pipe to shell (remote/outside)         ?       ?       .       .       .",
 	"  HOME dir write                         ?       ?       .       .       .",
 	"  No UI (headless)                       B       B       B       B       .",
 ].join("\n");
@@ -266,7 +297,9 @@ type RuleId =
 	| "overwriteOutsideNew" // mv/cp creating a target outside
 	| "overwriteInProject" // mv/cp overwrite in the project
 	| "truncate" // `> existing file` / truncate
-	| "gitDestructive"; // git clean -f / reset --hard / checkout . / push --force …
+	| "gitDestructive" // git clean -f / reset --hard / checkout . / push --force …
+	| "pipeToShellInProject" // curl/wget/interpreter output piped into a shell (in-workspace)
+	| "pipeToShellOutside"; // … with a remote/outside-workspace source
 
 const RULE_IDS: readonly RuleId[] = [
 	"blockGroup",
@@ -281,6 +314,8 @@ const RULE_IDS: readonly RuleId[] = [
 	"overwriteInProject",
 	"truncate",
 	"gitDestructive",
+	"pipeToShellInProject",
+	"pipeToShellOutside",
 ];
 
 function isRuleLevel(v: string | undefined): v is RuleLevel {
@@ -302,6 +337,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteInProject: "confirm",
 		truncate: "confirm",
 		gitDestructive: "confirm",
+		pipeToShellInProject: "confirm",
+		pipeToShellOutside: "confirm",
 	},
 	normal: {
 		blockGroup: "block",
@@ -316,6 +353,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteInProject: "confirm",
 		truncate: "confirm",
 		gitDestructive: "confirm",
+		pipeToShellInProject: "pass",
+		pipeToShellOutside: "confirm",
 	},
 	loose: {
 		blockGroup: "block",
@@ -330,6 +369,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteInProject: "confirm",
 		truncate: "confirm",
 		gitDestructive: "confirm",
+		pipeToShellInProject: "pass",
+		pipeToShellOutside: "pass",
 	},
 	trusted: {
 		blockGroup: "block",
@@ -344,6 +385,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteInProject: "confirm",
 		truncate: "confirm",
 		gitDestructive: "confirm",
+		pipeToShellInProject: "pass",
+		pipeToShellOutside: "pass",
 	},
 	naked: {
 		blockGroup: "confirm",
@@ -358,6 +401,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteInProject: "pass",
 		truncate: "pass",
 		gitDestructive: "pass",
+		pipeToShellInProject: "pass",
+		pipeToShellOutside: "pass",
 	},
 };
 
@@ -632,6 +677,154 @@ async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
 	}
 }
 
+/**
+ * Main /guard menu (shown when invoked with no/unknown args and a UI is
+ * available). Extend this array to add future top-level actions.
+ */
+const GUARD_MAIN_MENU = [
+	"switch — Switch mode (切换防护模式)",
+	"paths — Manage custom protected paths (管理自定义受保护路径)",
+];
+
+/** Sub-menu for managing custom protected paths (loops until back/cancel). */
+const GUARD_PATHS_MENU = [
+	"add — Add a custom protected path (添加自定义路径)",
+	"remove — Remove a custom protected path (删除自定义路径)",
+	"clear — Clear all custom protected paths (清空全部)",
+	"back — Back to main menu (返回)",
+];
+
+/**
+ * Interactive mode picker: decision matrix as the title, one of the 5 modes
+ * as the choice. Switches mode (with the trusted/naked warning) and persists.
+ * Returns true if a switch happened, false on cancel/invalid.
+ */
+async function runModePicker(ctx: ExtensionCommandContext): Promise<boolean> {
+	const choices = GUARD_MODES.map(
+		(mo) =>
+			`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === currentMode ? " (current)" : ""}`,
+	);
+	const chosen = await ctx.ui.select(
+		`${MODE_MATRIX}\n\nCurrent mode: ${currentMode} — choose one:`,
+		choices,
+	);
+	if (!chosen) {
+		ctx.ui.notify("Cancelled, mode unchanged", "info");
+		return false;
+	}
+	const picked = chosen.split(/\s+/)[0] as GuardMode;
+	if (!isGuardMode(picked)) return false;
+	if (!(await confirmModeSwitch(picked, ctx))) {
+		ctx.ui.notify(
+			`Cancelled: switching to ${picked} requires confirmation`,
+			"info",
+		);
+		return false;
+	}
+	config.mode = picked;
+	setMode(picked, ctx.ui);
+	const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+	ctx.ui.notify(
+		`Path Guard switched to: ${picked} (${persistNote(where)})`,
+		"info",
+	);
+	return true;
+}
+
+/**
+ * Interactive management of custom protected paths. Shows the current list,
+ * then loops add / remove / clear until the user picks back or cancels.
+ */
+async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> {
+	while (true) {
+		if (extraProtected.length > 0) {
+			ctx.ui.notify(
+				`Path Guard custom protected paths (${extraProtected.length}):\n` +
+					extraProtected.map((p) => `· ${p}`).join("\n"),
+				"info",
+			);
+		} else {
+			ctx.ui.notify("Path Guard: no custom protected paths configured", "info");
+		}
+
+		const action = await ctx.ui.select("Choose an action:", GUARD_PATHS_MENU);
+		if (!action) {
+			ctx.ui.notify("Cancelled, custom paths unchanged", "info");
+			return;
+		}
+		const op = action.split(/\s+/)[0];
+		if (op === "back") return;
+
+		if (op === "add") {
+			const input = await ctx.ui.input(
+				"Enter the path to protect (absolute, or relative to cwd):",
+				"",
+			);
+			if (input == null) {
+				ctx.ui.notify("Cancelled add", "info");
+				continue;
+			}
+			const norm = normalizeProtectedEntry(input, ctx.cwd);
+			if (extraProtected.includes(norm)) {
+				ctx.ui.notify(`Path Guard: already protected — ${norm}`, "info");
+				continue;
+			}
+			extraProtected.push(norm);
+			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			ctx.ui.notify(
+				`Path Guard: added protected path ${norm} (${persistNote(where)})`,
+				"info",
+			);
+			continue;
+		}
+
+		if (op === "remove") {
+			if (extraProtected.length === 0) {
+				ctx.ui.notify("Path Guard: no custom protected paths to remove", "info");
+				continue;
+			}
+			const target = await ctx.ui.select("Choose a path to remove:", [
+				...extraProtected,
+			]);
+			if (!target) {
+				ctx.ui.notify("Cancelled remove", "info");
+				continue;
+			}
+			const idx = extraProtected.indexOf(target);
+			if (idx === -1) continue;
+			extraProtected.splice(idx, 1);
+			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			ctx.ui.notify(
+				`Path Guard: removed protected path ${target} (${persistNote(where)})`,
+				"info",
+			);
+			continue;
+		}
+
+		if (op === "clear") {
+			if (extraProtected.length === 0) {
+				ctx.ui.notify("Path Guard: no custom protected paths to clear", "info");
+				continue;
+			}
+			const ok = await ctx.ui.confirm(
+				"Clear all custom protected paths?",
+				`Remove these ${extraProtected.length} path(s)?\n` +
+					extraProtected.map((p) => `· ${p}`).join("\n"),
+			);
+			if (!ok) {
+				ctx.ui.notify("Cancelled clear", "info");
+				continue;
+			}
+			extraProtected = [];
+			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			ctx.ui.notify(
+				`Path Guard: cleared all custom protected paths (${persistNote(where)})`,
+				"info",
+			);
+		}
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	// Restore the persisted config on every new session (startup, /new, /resume all
 	// fire session_start): active mode + user protected paths + rule overrides.
@@ -679,36 +872,19 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Interactive picker (fallback for no/invalid arg): matrix as title, mode choices
-			const choices = GUARD_MODES.map(
-				(mo) =>
-					`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === currentMode ? " (current)" : ""}`,
+			// Interactive main menu (fallback for no/invalid arg): switch mode OR
+			// manage custom protected paths. Future actions extend GUARD_MAIN_MENU.
+			const main = await ctx.ui.select(
+				`Path Guard — current mode: ${currentMode} — choose an action:`,
+				GUARD_MAIN_MENU,
 			);
-			const chosen = await ctx.ui.select(
-				`${MODE_MATRIX}\n\nCurrent mode: ${currentMode} — choose one:`,
-				choices,
-			);
-			if (!chosen) {
-				ctx.ui.notify("Cancelled, mode unchanged", "info");
+			if (!main) {
+				ctx.ui.notify("Cancelled", "info");
 				return;
 			}
-			const picked = chosen.split(/\s+/)[0] as GuardMode;
-			if (isGuardMode(picked)) {
-				if (!(await confirmModeSwitch(picked, ctx))) {
-					ctx.ui.notify(
-						`Cancelled: switching to ${picked} requires confirmation`,
-						"info",
-					);
-					return;
-				}
-				config.mode = picked;
-				setMode(picked, ctx.ui);
-				const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
-				ctx.ui.notify(
-					`Path Guard switched to: ${picked} (${persistNote(where)})`,
-					"info",
-				);
-			}
+			const option = main.split(/\s+/)[0];
+			if (option === "paths") return runPathsMenu(ctx);
+			return runModePicker(ctx);
 		},
 	});
 
@@ -811,6 +987,15 @@ function checkBashCommand(
 	// then decide once — so an early return from the first guarded segment can't skip later ones
 	const blockReasons: string[] = [];
 	const confirmNeeded: string[] = [];
+
+	// Dangerous pipe-to-shell (curl … | bash, python -c '…' | sh) — the pipe
+	// crosses segments, so scan the raw command before the per-segment loop.
+	const pipeVerdict = scanPipeToShell(command, realCwd);
+	if (pipeVerdict.kind === "block") {
+		blockReasons.push(pipeVerdict.reason);
+	} else if (pipeVerdict.kind === "confirm") {
+		confirmNeeded.push(command.trim());
+	}
 
 	for (const seg of splitSegments(command)) {
 		const trimmed = seg.trim();
@@ -945,6 +1130,17 @@ function judgeShellWrapper(
 ): SegmentVerdict {
 	const inner = unwrapShellWrapper(cmdInfo);
 	if (!inner) return { kind: "pass" };
+
+	// A pipe-to-shell inside the wrapper (bash -c 'curl … | bash') crosses the
+	// inner split segments, so scan it before recursing.
+	const pipeVerdict = scanPipeToShell(inner, realCwd);
+	if (pipeVerdict.kind === "block") {
+		return {
+			kind: "block",
+			reason: `Inner command blocked:\n${pipeVerdict.reason}`,
+		};
+	}
+	if (pipeVerdict.kind === "confirm") return { kind: "confirm" };
 
 	const blockReasons: string[] = [];
 	const confirmNeeded: string[] = [];
@@ -1479,6 +1675,93 @@ function dangerousLevel(fullCommand: string): "block" | "confirm" | null {
 		if (pattern.test(fullCommand)) return "confirm";
 	}
 	return null;
+}
+
+// ─── Dangerous pipe-to-shell ───────────────────────────────────────────
+
+/** Split on the pipe operator (|), but not the logical || ; quote-aware. */
+function pipeGroups(input: string): string[] {
+	const groups: string[] = [];
+	let current = "";
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < input.length; i++) {
+		const ch = input[i];
+		if (ch === "'" && !inDouble) {
+			inSingle = !inSingle;
+			current += ch;
+			continue;
+		}
+		if (ch === '"' && !inSingle) {
+			inDouble = !inDouble;
+			current += ch;
+			continue;
+		}
+		if (!inSingle && !inDouble && ch === "|") {
+			if (input[i + 1] === "|") {
+				// logical OR — keep the operator token together, not a pipe
+				current += "||";
+				i++;
+				continue;
+			}
+			if (current.trim()) groups.push(current.trim());
+			current = "";
+			continue;
+		}
+		current += ch;
+	}
+	if (current.trim()) groups.push(current.trim());
+	return groups;
+}
+
+/**
+ * Whether a pipe's source references an external / outside-workspace resource.
+ * Network fetchers (curl/wget) are treated as remote; interpreters are judged by
+ * whether any path arg resolves outside the project.
+ */
+function pipeSourceIsExternal(sourceText: string, realCwd: string): boolean {
+	const info = parseCommand(sourceText);
+	if (!info) return false;
+	if (info.command === "curl" || info.command === "wget") return true;
+	for (const arg of info.args) {
+		if (arg.startsWith("-")) continue;
+		if (arg.includes("*") || arg.includes("?")) continue;
+		if (arg.startsWith("$")) continue;
+		if (/^[a-z][a-z0-9+.-]*:\/\//i.test(arg)) return true; // URL scheme
+		const expanded = expandHome(arg);
+		const real = resolveReal(resolve(realCwd, expanded));
+		if (isOutsideCwd(real, realCwd)) return true;
+	}
+	return false;
+}
+
+/**
+ * Scan a command for a dangerous pipe into a shell (`curl … | bash`,
+ * `python -c '…' | sh`, …). Per the pipeToShell* rules: strict confirms at all
+ * positions, normal passes in-workspace / confirms outside, others pass.
+ */
+function scanPipeToShell(text: string, realCwd: string): SegmentVerdict {
+	const groups = pipeGroups(text);
+	const anyBlock: string[] = [];
+	let anyConfirm = false;
+	for (let i = 1; i < groups.length; i++) {
+		const right = parseCommand(groups[i]);
+		if (!right || !SHELL_WRAPPERS.has(right.command)) continue;
+		const left = parseCommand(groups[i - 1]);
+		if (!left || !PIPE_TO_SHELL_SOURCES.has(left.command)) continue;
+
+		const external = pipeSourceIsExternal(groups[i - 1], realCwd);
+		const rule: RuleId = external ? "pipeToShellOutside" : "pipeToShellInProject";
+		const reason = `Piping ${left.command} output into ${right.command} (potentially untrusted code): ${groups[i - 1]} | ${groups[i]}`;
+		const lvl = rl(rule);
+		if (lvl === "block") anyBlock.push(reason);
+		else if (lvl === "confirm") anyConfirm = true;
+	}
+	if (anyBlock.length > 0) {
+		return { kind: "block", reason: anyBlock.join("\n") };
+	}
+	if (anyConfirm) return { kind: "confirm" };
+	return { kind: "pass" };
 }
 
 // ─── Command Parsing ──────────────────────────────────────────────────

@@ -121,13 +121,16 @@ newSession(); // simulate new session → normal
 // interactive: no arg + hasUI → main menu, then switch → mode picker, pick loose
 let mainMenuShown = false;
 let modePickerShown = false;
+let switchPicked = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
 		notify: () => {},
 		select: async (title: string, options: string[]) => {
 			if (title.includes("Path Guard —")) {
-				// main menu (first select)
+				// main menu: pick switch once, then undefined to exit the loop
+				if (switchPicked) return undefined;
+				switchPicked = true;
 				mainMenuShown = true;
 				return options.find((o) => o.startsWith("switch")) ?? undefined;
 			}
@@ -201,7 +204,7 @@ await commands["guard"].handler("bogus", {
 });
 check(
 	"/guard invalid arg falls back to main menu",
-	bogusOptions.length === 2 ? "menu" : "?",
+	bogusOptions.length === 3 ? "menu" : "?",
 	"menu",
 );
 
@@ -220,6 +223,7 @@ check(
 // main → paths → add (via ctx.ui.input)
 let addedMsg = "";
 let addActions = 0;
+let addMainDone = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
@@ -227,8 +231,11 @@ await commands["guard"].handler("", {
 			if (m.startsWith("Path Guard: added")) addedMsg = m;
 		},
 		select: async (title: string, options: string[]) => {
-			if (title.includes("Path Guard —"))
+			if (title.includes("Path Guard —")) {
+				if (addMainDone) return undefined;
+				addMainDone = true;
 				return options.find((o) => o.startsWith("paths")) ?? undefined;
+			}
 			if (title.includes("Choose an action:")) {
 				addActions++;
 				return addActions === 1
@@ -254,6 +261,7 @@ await commands["guard"].handler("paths add /tmp/pgtest/menu_rm.txt", {
 });
 let rmMsg = "";
 let rmActions = 0;
+let rmMainDone = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
@@ -261,8 +269,11 @@ await commands["guard"].handler("", {
 			if (m.startsWith("Path Guard: removed")) rmMsg = m;
 		},
 		select: async (title: string, options: string[]) => {
-			if (title.includes("Path Guard —"))
+			if (title.includes("Path Guard —")) {
+				if (rmMainDone) return undefined;
+				rmMainDone = true;
 				return options.find((o) => o.startsWith("paths")) ?? undefined;
+			}
 			if (title.includes("Choose an action:")) {
 				rmActions++;
 				return rmActions === 1
@@ -292,6 +303,7 @@ await commands["guard"].handler("paths add /tmp/pgtest/c2.txt", {
 });
 let clearMsg = "";
 let clearActions = 0;
+let clearMainDone = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
@@ -299,8 +311,11 @@ await commands["guard"].handler("", {
 			if (m.startsWith("Path Guard: cleared")) clearMsg = m;
 		},
 		select: async (title: string, options: string[]) => {
-			if (title.includes("Path Guard —"))
+			if (title.includes("Path Guard —")) {
+				if (clearMainDone) return undefined;
+				clearMainDone = true;
 				return options.find((o) => o.startsWith("paths")) ?? undefined;
+			}
 			if (title.includes("Choose an action:")) {
 				clearActions++;
 				return clearActions === 1
@@ -322,12 +337,15 @@ check(
 
 // main → paths → back exits cleanly
 let backEntered = false;
+let backMainDone = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
 		notify: () => {},
 		select: async (title: string, options: string[]) => {
 			if (title.includes("Path Guard —")) {
+				if (backMainDone) return undefined;
+				backMainDone = true;
 				backEntered = true;
 				return options.find((o) => o.startsWith("paths")) ?? undefined;
 			}
@@ -340,6 +358,102 @@ await commands["guard"].handler("", {
 	},
 });
 check("paths menu back exits cleanly", backEntered ? "back" : "?", "back");
+
+// sub-menu back returns to the main menu (loop), only a main-menu cancel exits
+let mainShows = 0;
+await commands["guard"].handler("", {
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		select: async (title: string) => {
+			if (title.includes("Path Guard —")) {
+				mainShows++;
+				// first main-menu show: enter rules; second: cancel (undefined) → exit
+				return mainShows === 1 ? "rules" : undefined;
+			}
+			return "back"; // rules sub-menu → back → return to main menu
+		},
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"sub-menu back returns to main menu",
+	mainShows === 2 ? "returned" : "?",
+	"returned",
+);
+
+// ── /guard rules interactive menu ────────────────────────────
+// main → rules → mode → normal → rule editor → pick writeHome → set to block
+// (scripted select queue; each select pops the next desired token)
+const setQueue = [
+	"rules",
+	"mode",
+	"normal",
+	"writeHome",
+	"block",
+	"back",
+	"back",
+	"back",
+];
+let setNotif = "";
+await commands["guard"].handler("", {
+	hasUI: true,
+	ui: {
+		notify: (m: string) => {
+			if (m.startsWith("Path Guard: set")) setNotif = m;
+		},
+		select: async () => setQueue.shift(),
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"rules menu sets a rule via UI",
+	setNotif.includes("writeHome") && setNotif.includes("= block") ? "set" : "?",
+	"set",
+);
+
+// main → rules → overview → shows the effective matrix
+const ovrQueue = ["rules", "overview", "back"];
+let ovrNotif = "";
+await commands["guard"].handler("", {
+	hasUI: true,
+	ui: {
+		notify: (m: string) => {
+			if (m.startsWith("Path Guard effective rules matrix")) ovrNotif = m;
+		},
+		select: async () => ovrQueue.shift(),
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"rules menu overview shows matrix",
+	ovrNotif.includes("strict") && ovrNotif.includes("writeHome") ? "matrix" : "?",
+	"matrix",
+);
+
+// main → rules → reset → confirm → clears all overrides
+const resetQueue = ["rules", "reset", "back"];
+let resetNotif = "";
+await commands["guard"].handler("", {
+	hasUI: true,
+	ui: {
+		notify: (m: string) => {
+			if (m.startsWith("Path Guard: cleared all rule overrides")) resetNotif = m;
+		},
+		select: async () => resetQueue.shift(),
+		confirm: async () => true,
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"rules menu reset clears all overrides",
+	resetNotif.includes("cleared all rule overrides") ? "cleared" : "?",
+	"cleared",
+);
 
 // ── trusted switch warning confirmation ─────────────────────
 // shortcut: confirm rejects → no switch
@@ -375,13 +489,17 @@ check(
 
 // interactive trusted selection also requires confirm (via main menu → switch)
 let interactiveTrustedConfirm = false;
+let trustedMainDone = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
 		notify: () => {},
 		select: async (title: string, options: string[]) => {
-			if (title.includes("Path Guard —"))
+			if (title.includes("Path Guard —")) {
+				if (trustedMainDone) return undefined;
+				trustedMainDone = true;
 				return options.find((o) => o.startsWith("switch")) ?? undefined;
+			}
 			return options.find((o) => o.startsWith("trusted")) ?? undefined;
 		},
 		confirm: async () => {

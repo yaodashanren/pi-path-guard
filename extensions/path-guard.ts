@@ -48,6 +48,17 @@
  *   - Custom-path management is now friendly in the UI: add uses ctx.ui.input to type the
  *     path, remove picks from the current list, clear double-checks via confirm, back returns.
  *     The /guard paths add|rm|list|clear subcommands and /guard <mode> shortcuts still work.
+ *
+ * v1.4.0 — interactive per-mode guard-rule customization (/guard → rules).
+ *   - Pick a mode → the rule editor lists all 14 rules with their current levels; pick one →
+ *     set block/confirm/pass or reset to the built-in default. Stays in the editor so several
+ *     rules per mode can be set before choosing back. Also offers a read-only full overview
+ *     matrix and a reset that clears all overrides.
+ *   - Writes pathGuard.rules.{mode}.{rule} in settings.json, reusing the existing persistence
+ *     (readSavedConfig / persistConfig / rlFor); no judgement logic was touched.
+ *
+ * v1.4.1 — the main /guard menu now loops: a sub-menu's back returns to the previous menu
+ * (and eventually to the main menu); only cancelling at the top level exits the command.
  */
 import type {
 	ExtensionAPI,
@@ -318,6 +329,32 @@ const RULE_IDS: readonly RuleId[] = [
 	"pipeToShellOutside",
 ];
 
+/** Bilingual short labels for each tunable rule (used in the rule-editor menu). */
+const RULE_DESCRIPTIONS: Record<RuleId, string> = {
+	blockGroup: "system-destructive mkfs/reboot (系统级破坏)",
+	confirmGroup: "privilege/remote sudo/ssh/chmod777 (权限/远程)",
+	writeOutside: "write/edit outside project (项目外写)",
+	writeHome: "write/edit under HOME (HOME 下写)",
+	writeInProject: "write/edit in project (项目内写)",
+	deleteOutside: "delete outside project (项目外删)",
+	deleteInProject: "delete in project (项目内删)",
+	overwriteOutsideExisting: "overwrite existing outside (项目外覆盖已存在)",
+	overwriteOutsideNew: "create target outside (项目外新建)",
+	overwriteInProject: "overwrite in project (项目内覆盖)",
+	truncate: "truncate existing >file (截断已存在文件)",
+	gitDestructive: "git destructive reset --hard (Git 破坏性)",
+	pipeToShellInProject: "pipe to shell, in-project (管道进 shell·项目内)",
+	pipeToShellOutside: "pipe to shell, remote/outside (管道进 shell·远程/外)",
+};
+
+const RULE_LEVELS: readonly RuleLevel[] = ["block", "confirm", "pass"];
+
+const RULE_LEVEL_LABELS: Record<RuleLevel, string> = {
+	block: "block — Block (阻止)",
+	confirm: "confirm — Confirm (确认)",
+	pass: "pass — Pass (放行)",
+};
+
 function isRuleLevel(v: string | undefined): v is RuleLevel {
 	return v === "block" || v === "confirm" || v === "pass";
 }
@@ -409,6 +446,11 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 /** Effective rule level for the current mode (settings override ?? built-in default). */
 function rl(rule: RuleId): RuleLevel {
 	return config.rules[currentMode]?.[rule] ?? DEFAULT_MODES[currentMode][rule];
+}
+
+/** Effective rule level for a specific mode (override ?? built-in default). */
+function rlFor(mode: GuardMode, rule: RuleId): RuleLevel {
+	return config.rules[mode]?.[rule] ?? DEFAULT_MODES[mode][rule];
 }
 
 /** Map a rule to a segment verdict: block (with reason) / confirm / pass. */
@@ -683,6 +725,7 @@ async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
  */
 const GUARD_MAIN_MENU = [
 	"switch — Switch mode (切换防护模式)",
+	"rules — Customize per-mode guard rules (定制每模式守护规则)",
 	"paths — Manage custom protected paths (管理自定义受保护路径)",
 ];
 
@@ -825,6 +868,227 @@ async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> {
 	}
 }
 
+/**
+ * Sub-menu for customizing per-mode guard rules (loops until back/cancel):
+ * mode → pick a mode → rule editor; overview → read-only matrix; reset → clear ALL overrides.
+ */
+const GUARD_RULES_MENU = [
+	"mode — Pick a mode to customize (选择要定制的模式)",
+	"overview — Show the full mode×rule matrix (查看完整规则矩阵)",
+	"reset — Clear ALL rule overrides (清空全部规则覆盖)",
+	"back — Back to main menu (返回)",
+];
+
+/** The effective (override-aware) rule matrix as a readable table. */
+function rulesMatrix(): string {
+	const head =
+		"rule".padEnd(30) + GUARD_MODES.map((mo) => mo.padStart(8)).join("");
+	const rows = RULE_IDS.map((r) => {
+		const cell = (l: RuleLevel) =>
+			l === "block" ? "B" : l === "confirm" ? "?" : ".";
+		return (
+			r.padEnd(30) +
+			GUARD_MODES.map((mo) => cell(rlFor(mo, r)).padStart(8)).join("")
+		);
+	});
+	return `Path Guard effective rules matrix (B=block ?=confirm .=pass):\n${head}\n${rows.join("\n")}`;
+}
+
+/** Human-readable list of the current rule overrides (or a notice if none). */
+function rulesSummary(): string {
+	const out: string[] = [];
+	for (const mo of GUARD_MODES) {
+		const ov = config.rules[mo];
+		if (!ov) continue;
+		for (const r of RULE_IDS) {
+			if (ov[r] !== undefined) out.push(`${mo}.${r} = ${ov[r]}`);
+		}
+	}
+	return out.length
+		? `Path Guard rule overrides (${out.length}):\n` + out.join("\n")
+		: "Path Guard: no rule overrides — all modes use built-in defaults";
+}
+
+/** Persist a rules change and notify with the storage location. */
+function persistRules(ctx: ExtensionCommandContext): string {
+	return persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+}
+
+/**
+ * Level picker for a single rule in a mode. Picks block/confirm/pass, or reset
+ * (delete the override so the built-in default applies). Returns to the caller,
+ * which then re-shows the rule list — that's the "loop" letting the user set
+ * several rules in one mode without re-navigating.
+ */
+async function ruleLevelPicker(
+	mode: GuardMode,
+	rule: RuleId,
+	ctx: ExtensionCommandContext,
+): Promise<void> {
+	const dflt = DEFAULT_MODES[mode][rule];
+	const cur = rlFor(mode, rule);
+	const options = [
+		...RULE_LEVELS.map(
+			(l) =>
+				`${RULE_LEVEL_LABELS[l]}${l === cur ? " (current)" : ""}${l === dflt ? " [default]" : ""}`,
+		),
+		`reset — back to built-in default (${dflt}) (恢复该条默认)`,
+		"back — Back to rule list (返回)",
+	];
+	const picked = await ctx.ui.select(
+		`Mode: ${mode} · Rule: ${rule} — ${RULE_DESCRIPTIONS[rule]}\n` +
+			`Current: ${cur} · Built-in default: ${dflt}`,
+		options,
+	);
+	if (!picked) return;
+	const op = picked.split(/\s+/)[0];
+	if (op === "back") return;
+	if (op === "reset") {
+		if (config.rules[mode]) delete config.rules[mode]![rule];
+		const where = persistRules(ctx);
+		ctx.ui.notify(
+			`Path Guard: ${mode}.${rule} back to default ${dflt} (${persistNote(where)})`,
+			"info",
+		);
+		return;
+	}
+	if (isRuleLevel(op)) {
+		(config.rules[mode] ??= {})[rule] = op;
+		const where = persistRules(ctx);
+		ctx.ui.notify(
+			`Path Guard: set ${mode}.${rule} = ${op} (${persistNote(where)})`,
+			"info",
+		);
+	}
+}
+
+/**
+ * Rule editor for one mode: shows all 14 rules with their current levels, lets
+ * the user set several in a row (each level pick returns here), and offers
+ * reset (this mode) + back.
+ */
+async function runModeEditor(
+	mode: GuardMode,
+	ctx: ExtensionCommandContext,
+): Promise<void> {
+	while (true) {
+		const title =
+			`Mode: ${mode} — pick a rule to set (current levels shown):\n` +
+			RULE_IDS.map((r) => `  ${r} = ${rlFor(mode, r)}`).join("\n");
+		const options = [
+			...RULE_IDS.map((r) => `${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(mode, r)})`),
+			"reset — Reset this mode to built-in defaults (恢复该模式默认)",
+			"back — Back to mode list (返回)",
+		];
+		const picked = await ctx.ui.select(title, options);
+		if (!picked) {
+			ctx.ui.notify("Cancelled, rules unchanged", "info");
+			return;
+		}
+		const op = picked.split(/\s+/)[0];
+		if (op === "back") return;
+		if (op === "reset") {
+			const ok = await ctx.ui.confirm(
+				`Reset mode "${mode}" to built-in defaults?`,
+				"",
+			);
+			if (!ok) continue;
+			delete config.rules[mode];
+			const where = persistRules(ctx);
+			ctx.ui.notify(
+				`Path Guard: reset mode ${mode} to defaults (${persistNote(where)})`,
+				"info",
+			);
+			continue;
+		}
+		if ((RULE_IDS as readonly string[]).includes(op)) {
+			await ruleLevelPicker(mode, op as RuleId, ctx);
+		}
+	}
+}
+
+/**
+ * Mode sub-menu: the 5 modes (each showing override count / current), plus
+ * reset (reset a single mode) and back.
+ */
+async function runModeSubmenu(ctx: ExtensionCommandContext): Promise<void> {
+	while (true) {
+		const options = [
+			...GUARD_MODES.map((mo) => {
+				const n = Object.keys(config.rules[mo] ?? {}).length;
+				return `${mo} — ${MODE_DESCRIPTIONS[mo]}${n ? ` (${n} overrides)` : ""}${mo === currentMode ? " (current)" : ""}`;
+			}),
+			"reset — Reset a mode to built-in defaults (恢复某模式默认)",
+			"back — Back to rules menu (返回)",
+		];
+		const picked = await ctx.ui.select("Pick a mode to customize:", options);
+		if (!picked) {
+			ctx.ui.notify("Cancelled, rules unchanged", "info");
+			return;
+		}
+		const op = picked.split(/\s+/)[0];
+		if (op === "back") return;
+		if (op === "reset") {
+			const target = await ctx.ui.select(
+				"Reset which mode to its built-in defaults?",
+				GUARD_MODES.map((mo) => `${mo} — ${MODE_DESCRIPTIONS[mo]}`),
+			);
+			if (!target) continue;
+			const mo = target.split(/\s+/)[0] as GuardMode;
+			if (!isGuardMode(mo)) continue;
+			const ok = await ctx.ui.confirm(
+				`Reset mode "${mo}" to built-in defaults?`,
+				"",
+			);
+			if (!ok) continue;
+			delete config.rules[mo];
+			const where = persistRules(ctx);
+			ctx.ui.notify(
+				`Path Guard: reset mode ${mo} to defaults (${persistNote(where)})`,
+				"info",
+			);
+			continue;
+		}
+		if (isGuardMode(op)) await runModeEditor(op, ctx);
+	}
+}
+
+/**
+ * Main rules menu (loops until back/cancel). Each iteration shows a summary of
+ * current overrides; overview shows the full matrix on demand.
+ */
+async function runRulesMenu(ctx: ExtensionCommandContext): Promise<void> {
+	while (true) {
+		ctx.ui.notify(rulesSummary(), "info");
+		const action = await ctx.ui.select("Choose an action:", GUARD_RULES_MENU);
+		if (!action) {
+			ctx.ui.notify("Cancelled, rules unchanged", "info");
+			return;
+		}
+		const op = action.split(/\s+/)[0];
+		if (op === "back") return;
+		if (op === "overview") {
+			ctx.ui.notify(rulesMatrix(), "info");
+			continue;
+		}
+		if (op === "reset") {
+			const ok = await ctx.ui.confirm(
+				"Clear ALL rule overrides?",
+				"Reset every mode back to its built-in defaults?",
+			);
+			if (!ok) continue;
+			config.rules = {};
+			const where = persistRules(ctx);
+			ctx.ui.notify(
+				`Path Guard: cleared all rule overrides (${persistNote(where)})`,
+				"info",
+			);
+			continue;
+		}
+		if (op === "mode") await runModeSubmenu(ctx);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	// Restore the persisted config on every new session (startup, /new, /resume all
 	// fire session_start): active mode + user protected paths + rule overrides.
@@ -872,19 +1136,23 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Interactive main menu (fallback for no/invalid arg): switch mode OR
-			// manage custom protected paths. Future actions extend GUARD_MAIN_MENU.
-			const main = await ctx.ui.select(
-				`Path Guard — current mode: ${currentMode} — choose an action:`,
-				GUARD_MAIN_MENU,
-			);
-			if (!main) {
-				ctx.ui.notify("Cancelled", "info");
-				return;
+			// Interactive main menu loop (fallback for no/invalid arg): switch mode, manage
+			// custom protected paths, or customize per-mode guard rules. Sub-menus return
+			// here on "back"; only cancelling at this top level exits the command.
+			while (true) {
+				const main = await ctx.ui.select(
+					`Path Guard — current mode: ${currentMode} — choose an action:`,
+					GUARD_MAIN_MENU,
+				);
+				if (!main) {
+					ctx.ui.notify("Cancelled", "info");
+					return;
+				}
+				const option = main.split(/\s+/)[0];
+				if (option === "paths") await runPathsMenu(ctx);
+				else if (option === "rules") await runRulesMenu(ctx);
+				else await runModePicker(ctx);
 			}
-			const option = main.split(/\s+/)[0];
-			if (option === "paths") return runPathsMenu(ctx);
-			return runModePicker(ctx);
 		},
 	});
 

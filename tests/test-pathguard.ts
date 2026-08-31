@@ -133,6 +133,7 @@ newSession(); // simulate new session → normal
 let mainMenuShown = false;
 let modePickerShown = false;
 let switchPicked = false;
+let modePickerTitle = "";
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
@@ -147,6 +148,7 @@ await commands["guard"].handler("", {
 			}
 			if (title.includes("choose one")) {
 				modePickerShown = true;
+				modePickerTitle = title;
 				return options.find((o) => o.startsWith("loose")) ?? undefined;
 			}
 			return undefined;
@@ -157,6 +159,11 @@ await commands["guard"].handler("", {
 });
 check("/guard no-arg shows main menu", mainMenuShown ? "menu" : "?", "menu");
 check("switch → mode picker shown", modePickerShown ? "picker" : "?", "picker");
+check(
+	"switch picker title shows the effective (override-aware) matrix",
+	modePickerTitle.includes("effective rules matrix") ? "effective" : "?",
+	"effective",
+);
 check(
 	"/guard picking loose applies",
 	(await currentModeShown()).includes("loose") ? "loose" : "?",

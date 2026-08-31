@@ -71,6 +71,11 @@
  * Reworked the viewer to receive raw input via the actual custom() component interface:
  * `component.handleInput(data)` with `matchesKey(...)` for key detection and `done()` (the
  * factory's 4th arg) to close. Tests exercise closing via handleInput("q").
+ *
+ * v1.4.4 — fix: the switch-mode picker title showed the hardcoded built-in default matrix
+ * (the old MODE_MATRIX constant) instead of the current state. It now renders the
+ * effective (override-aware) matrix via rulesMatrix(), the same one the rules-menu
+ * overview shows, so the displayed levels always reflect any per-rule overrides.
  */
 import type {
 	ExtensionAPI,
@@ -279,26 +284,6 @@ const MODE_DESCRIPTIONS: Record<GuardMode, string> = {
 	naked:
 		"Naked: pass everything except system-destructive cmds (confirmed) / 裸奔：除系统级破坏命令外全部放行（破坏命令弹窗询问）",
 };
-
-/** Full decision matrix (shown as the /guard picker title, English only) */
-const MODE_MATRIX = [
-	"Path Guard Mode Matrix (B=block / ?=confirm / .=pass)",
-	"  Checkpoint                          strict  normal  loose  trusted  naked",
-	"  Protected paths .env/.ssh/keys         B       B       B       B       .",
-	"  System-destructive mkfs/reboot         B       B       B       B       ?",
-	"  Privilege/remote sudo/ssh/chmod777     B       ?       ?       ?       .",
-	"  Git destructive reset --hard           ?       ?       ?       ?       .",
-	"  In-project write/edit/new              ?       .       .       .       .",
-	"  In-project delete                      ?       ?       .       .       .",
-	"  Outside write (new file)               ?       ?       .       .       .",
-	"  Outside overwrite existing             B       B       ?       .       .",
-	"  Outside delete ordinary                B       B       ?       .       .",
-	"  Truncate existing > file               ?       ?       ?       ?       .",
-	"  Pipe to shell (curl…|bash)             ?       .       .       .       .",
-	"  Pipe to shell (remote/outside)         ?       ?       .       .       .",
-	"  HOME dir write                         ?       ?       .       .       .",
-	"  No UI (headless)                       B       B       B       B       .",
-].join("\n");
 
 // ─── Tunable rules & user-configured protected paths ──────────────────
 
@@ -761,7 +746,7 @@ async function runModePicker(ctx: ExtensionCommandContext): Promise<boolean> {
 			`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === currentMode ? " (current)" : ""}`,
 	);
 	const chosen = await ctx.ui.select(
-		`${MODE_MATRIX}\n\nCurrent mode: ${currentMode} — choose one:`,
+		`${rulesMatrix()}\n\nCurrent mode: ${currentMode} — choose one:`,
 		choices,
 	);
 	if (!chosen) {

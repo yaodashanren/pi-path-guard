@@ -1,81 +1,8 @@
 /**
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
- * Version history (this project, aligned with package.json):
- *
- * v1.0.0 — initial release
- *   - Protected-path interception (.env / .ssh / keys / credentials, regardless of project)
- *   - Dangerous-command judgment: Block group (mkfs / reboot / block-device writes / bulk
- *     delete) and Confirm group (sudo / ssh / chmod 777 …); no-UI environments fall back to block
- *   - Prefix-command stripping (sudo/doas/pkexec/env/nohup/timeout/setsid/chroot/watch …) to
- *     analyze the real command; shell wrapper recursion (bash -c / eval, depth-limited);
- *     quote-aware tokenization; compound-command segmentation with fail-safe aggregation
- *   - realpath resolution (walk up to the nearest existing ancestor) so deep missing paths are
- *     not written through symlinks to outside the project; symlinked cwd resolved before judging
- *   - mv/cp/install/tee/ln -f/rsync existing-target overwrite detection; "> existing file" truncate
- *     detection (excluding append and devices); dd / curl -o / wget -O / unzip -o judgment
- *   - git destructive-command checks (clean -f / reset --hard / checkout -- . / restore . /
- *     branch -D / push --force / stash drop), honoring -C/-c global option prefixes
- *   - Guard modes via /guard: strict / normal / loose / trusted; footer status bar shows the
- *     active mode
- *
- * v1.1.0 — adds naked mode: passes almost everything (protected paths, write/edit checks, git
- *   destructive, truncate, outside deletes/overwrites); only system-destructive Block-group
- *   commands (mkfs / reboot / block-device writes / bulk delete) are still confirmed. Switching
- *   to naked requires a double confirmation (stronger than trusted's single warning).
- *
- * v1.2.0 — mode persistence across sessions. The active mode is read from settings.json on
- *   session_start (project .pi/settings.json overrides global ~/.pi/agent/settings.json, falling
- *   back to normal) and written back when /guard switches mode.
- *
- * v1.3.0 — configurable protected paths and tunable rules.
- *   - User-configured protected paths (pathGuard.extraProtected, or /guard paths add|rm|list|clear)
- *     are enforced in EVERY mode including naked.
- *   - The 5 modes' judgement rules are tunable per mode via pathGuard.rules.{mode}.{rule} in
- *     settings.json (rule = block|confirm|pass; valid rule IDs listed in RULE_IDS). The built-in
- *     defaults match the earlier hardcoded behaviour; overrides only adjust the listed rule.
- *   - New dangerous pipe-to-shell checks: `curl … | bash` / `wget -qO- … | sh` /
- *     `python -c '…' | sh` (output of network fetchers / inline interpreter code piped into a
- *     shell). strict confirms at all positions; normal passes in-workspace / confirms
- *     remote-outside sources; loose/trusted/naked pass. Tunable via pipeToShellInProject and
- *     pipeToShellOutside rules.
- *
- * v1.3.1 — /guard interactive two-level menu.
- *   - A bare /guard (has UI) now shows a main menu instead of jumping straight into the mode
- *     picker: choose "Switch mode" (the original picker) or "Manage custom protected paths"
- *     (shows the current list, then loops add / remove / clear / back). Future top-level
- *     actions extend GUARD_MAIN_MENU.
- *   - Custom-path management is now friendly in the UI: add uses ctx.ui.input to type the
- *     path, remove picks from the current list, clear double-checks via confirm, back returns.
- *     The /guard paths add|rm|list|clear subcommands and /guard <mode> shortcuts still work.
- *
- * v1.4.0 — interactive per-mode guard-rule customization (/guard → rules).
- *   - Pick a mode → the rule editor lists all 14 rules with their current levels; pick one →
- *     set block/confirm/pass or reset to the built-in default. Stays in the editor so several
- *     rules per mode can be set before choosing back. Also offers a read-only full overview
- *     matrix and a reset that clears all overrides.
- *   - Writes pathGuard.rules.{mode}.{rule} in settings.json, reusing the existing persistence
- *     (readSavedConfig / persistConfig / rlFor); no judgement logic was touched.
- *
- * v1.4.1 — the main /guard menu now loops: a sub-menu's back returns to the previous menu
- * (and eventually to the main menu); only cancelling at the top level exits the command.
- *
- * v1.4.2 — fix: the rules-menu "overview" matrix was too large for a notify popup and for
- * the string-array widget (hard-capped at 10 lines), so it got truncated. It is now shown in
- * a full scrollable read-only viewer via ctx.ui.custom() (ScrollView + Text from pi-tui,
- * with ↑/↓/PgUp/PgDn/Home/End scroll and q/⏎/esc to close), falling back to the widget for
- * headless / minimal-UI environments.
- *
- * v1.4.3 — fix: the scrollable overview viewer could be shown but not closed. The docs
- * pattern `component.onKey` is not a real method in current pi-tui, so keys never arrived.
- * Reworked the viewer to receive raw input via the actual custom() component interface:
- * `component.handleInput(data)` with `matchesKey(...)` for key detection and `done()` (the
- * factory's 4th arg) to close. Tests exercise closing via handleInput("q").
- *
- * v1.4.4 — fix: the switch-mode picker title showed the hardcoded built-in default matrix
- * (the old MODE_MATRIX constant) instead of the current state. It now renders the
- * effective (override-aware) matrix via rulesMatrix(), the same one the rules-menu
- * overview shows, so the displayed levels always reflect any per-rule overrides.
+ * Version history lives in CHANGELOG.md (aligned with package.json); the most
+ * recent release/tag is 1.4.7.
  */
 import type {
 	ExtensionAPI,
@@ -1252,7 +1179,7 @@ function checkWriteEdit(
 	if (isUserProtectedPath(real)) {
 		return {
 			block: true,
-			reason: `Path "${real}" is user-protected; write blocked.`,
+			reason: withEscapeHints(`Path "${real}" is user-protected; write blocked.`),
 		};
 	}
 
@@ -1263,7 +1190,7 @@ function checkWriteEdit(
 	if (matchesProtectedPath(real)) {
 		return {
 			block: true,
-			reason: `Path "${real}" is protected; write blocked.`,
+			reason: withEscapeHints(`Path "${real}" is protected; write blocked.`),
 		};
 	}
 
@@ -1276,7 +1203,7 @@ function checkWriteEdit(
 		if (lvl === "block") {
 			return {
 				block: true,
-				reason: `Write blocked by rule (${rule}): ${real}`,
+				reason: withEscapeHints(`Write blocked by rule (${rule}): ${real}`),
 			};
 		}
 		if (lvl === "confirm") {
@@ -1295,7 +1222,7 @@ function checkWriteEdit(
 	if (lvl === "block") {
 		return {
 			block: true,
-			reason: `Write blocked by rule (writeInProject): ${real}`,
+			reason: withEscapeHints(`Write blocked by rule (writeInProject): ${real}`),
 		};
 	}
 	if (lvl === "confirm") {
@@ -1347,7 +1274,7 @@ function checkBashCommand(
 	if (blockReasons.length > 0) {
 		return {
 			block: true,
-			reason: `Command blocked:\n${blockReasons.join("\n")}`,
+			reason: withEscapeHints(`Command blocked:\n${blockReasons.join("\n")}`),
 		};
 	}
 	// Segments needing confirmation → one prompt, confirm together
@@ -2395,7 +2322,10 @@ async function askConfirm(
 	message: string,
 ): Promise<ToolCallEventResult | undefined> {
 	if (!ctx.hasUI) {
-		return { block: true, reason: "No interactive UI; blocked" };
+		return {
+			block: true,
+			reason: withEscapeHints("No interactive UI; blocked"),
+		};
 	}
 
 	const choice = await ctx.ui.select(message, ["✅ Allow", "❌ Deny"]);
@@ -2404,4 +2334,80 @@ async function askConfirm(
 		return { block: true, reason: "User denied the operation" };
 	}
 	return undefined; // allow
+}
+
+// ─── Block escape hints ────────────────────────────────────────────────
+// A block is opaque without guidance on how to actually run the thing. Each
+// blocked line is classified into one escape category and a short, honest
+// hint (English + brief Chinese) is appended for every category present, so
+// the advice always matches why it was blocked.
+
+type EscapeCat =
+	| "userPath" // user-configured protected path → blocked in EVERY mode (incl. naked)
+	| "protectedPath" // built-in protected path → only naked bypasses
+	| "systemDestructive" // mkfs/reboot/bulk-delete/block-device → naked still prompts
+	| "noUi" // a confirm-grade op blocked because there is no interactive UI
+	| "rule"; // some rule is set to block at the current level → loosen it
+
+const ESCAPE_HINTS: Record<EscapeCat, { en: string; zh: string }> = {
+	userPath: {
+		en: "user-configured protected path — blocked in every mode; remove it with /guard paths rm <path>",
+		zh: "自定义保护路径，所有模式强制拦截；请先用 /guard paths rm 移除",
+	},
+	protectedPath: {
+		en: "built-in protected path — only /guard naked bypasses it",
+		zh: "内置保护路径，仅 /guard naked 会放行",
+	},
+	systemDestructive: {
+		en: "system-destructive command — /guard naked still prompts once before running it",
+		zh: "系统级破坏命令，/guard naked 后仍会再向你确认一次",
+	},
+	noUi: {
+		en: "needs an interactive confirm — run it in the TUI, or loosen this rule to pass",
+		zh: "需要交互确认，请在 TUI 里运行，或把该规则调为 pass",
+	},
+	rule: {
+		en: "rule-level block — loosen the mode (/guard loose|trusted|naked) or tune just this rule (/guard rules)",
+		zh: "规则级拦截，可切换 /guard loose 或 /guard rules 调整该条规则",
+	},
+};
+
+/** Pick the single most specific category for one blocked-reason line. */
+function escapeCatOf(line: string): EscapeCat {
+	if (/user-protected/i.test(line)) return "userPath";
+	if (/system-destructive/i.test(line)) return "systemDestructive";
+	if (/protected\b/i.test(line)) return "protectedPath";
+	if (/no interactive ui/i.test(line)) return "noUi";
+	return "rule";
+}
+
+/**
+ * Append per-category "how to run this" hints to a block message.
+ * Structural header lines (ending in ':') and blanks are skipped, so nested
+ * multi-line reasons are still classified by their individual detail lines.
+ */
+function withEscapeHints(reason: string): string {
+	const cats = new Set<EscapeCat>();
+	for (const line of reason.split("\n")) {
+		const t = line.trim();
+		if (!t) continue;
+		if (t.endsWith(":")) continue; // "Command blocked:" / "Inner command blocked:"
+		cats.add(escapeCatOf(t));
+	}
+	if (cats.size === 0) return reason;
+	const order: EscapeCat[] = [
+		"systemDestructive",
+		"protectedPath",
+		"userPath",
+		"noUi",
+		"rule",
+	];
+	const hintLines: string[] = [];
+	for (const cat of order) {
+		if (cats.has(cat)) {
+			// English and Chinese on separate lines so long hints stay readable.
+			hintLines.push(`· ${ESCAPE_HINTS[cat].en}\n  ${ESCAPE_HINTS[cat].zh}`);
+		}
+	}
+	return `${reason}\n\nTo run anyway / 如需执行:\n${hintLines.join("\n")}`;
 }

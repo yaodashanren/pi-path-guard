@@ -1298,6 +1298,57 @@ check(
 	"shown",
 );
 
+// ── block escape hints (category-aware "how to run this anyway") ──
+// At this point: normal mode, SECRET is user-configured-protected.
+const hintHeader = "To run anyway / 如需执行:";
+{
+	const w = await runTool("write", { path: SECRET }, { cwd: P2 });
+	check(
+		"user-path block hints /guard paths rm",
+		(w.reason ?? "").includes(hintHeader) &&
+			(w.reason ?? "").includes("user-configured protected path") &&
+			(w.reason ?? "").includes("/guard paths rm")
+			? "hint"
+			: "?",
+		"hint",
+	);
+}
+{
+	const b = await runCmd(`echo x > ${join(P2, ".env")}`, P2);
+	check(
+		"built-in protected block hints /guard naked",
+		(b.reason ?? "").includes("built-in protected path") &&
+			(b.reason ?? "").includes("/guard naked")
+			? "hint"
+			: "?",
+		"hint",
+	);
+}
+{
+	const m = await runCmd("mkfs.ext4 /dev/sdb1", P2);
+	check(
+		"system-destructive block hints /guard naked + reconfirm",
+		(m.reason ?? "").includes("system-destructive command") &&
+			(m.reason ?? "").includes("/guard naked") &&
+			(m.reason ?? "").includes("still prompts")
+			? "hint"
+			: "?",
+		"hint",
+	);
+}
+{
+	const d = await runCmd(`rm ${join(OUT, "outside_exist.txt")}`, P2);
+	check(
+		"rule-level block hints /guard loose + rules",
+		(d.reason ?? "").includes("rule-level block") &&
+			(d.reason ?? "").includes("/guard loose") &&
+			(d.reason ?? "").includes("/guard rules")
+			? "hint"
+			: "?",
+		"hint",
+	);
+}
+
 // ── tunable rule overrides (settings.json pathGuard.rules) ────────────
 const RULE_OUT = join(OUT, "rule_outside.txt");
 writeFileSync(RULE_OUT, "x");

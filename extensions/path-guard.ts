@@ -171,10 +171,11 @@ const DEVICE_TARGETS = new Set([
 
 const HOME = homedir();
 
-/** pi project config dir name (default CONFIG_DIR_NAME is `.pi`). */
-const CONFIG_DIR = ".pi";
 /** Global settings.json path (default pi agent dir). */
 const GLOBAL_SETTINGS_PATH = join(HOME, ".pi", "agent", "settings.json");
+
+/** pi project config dir name (default CONFIG_DIR_NAME is `.pi`). */
+const CONFIG_DIR = ".pi";
 
 // ─── Guard Modes ─────────────────────────────────────────────────────
 
@@ -441,9 +442,15 @@ function refreshModeStatus(ui: ExtensionUIContext) {
 
 // ─── Settings persistence (mode survives across sessions) ─────────────
 
-/** Global settings.json path (~/.pi/agent/settings.json). */
+/** Global settings.json path (~/.pi/agent/settings.json; PI_PATH_GUARD_SETTINGS overrides, for tests). */
 function globalSettingsPath(): string {
-	return GLOBAL_SETTINGS_PATH;
+	return process.env.PI_PATH_GUARD_SETTINGS ?? GLOBAL_SETTINGS_PATH;
+}
+
+/** Whether cwd is the user's HOME (never treated as a project for settings). */
+function isHomeCwd(cwd: string | undefined): boolean {
+	if (!cwd) return false;
+	return resolveReal(cwd) === resolveReal(HOME);
 }
 
 /** Project settings.json path (cwd/.pi/settings.json), or undefined when no cwd. */
@@ -508,20 +515,24 @@ function readSettingsGuard(
 }
 
 /**
- * Effective config at session start: project settings override global, falling
- * back to normal. Project-local config is only honored for trusted projects;
- * otherwise only the global setting applies. extraProtected entries are resolved
- * against cwd (~ and relative paths expanded); project entries are appended after
- * global ones.
+ * Effective config at session start. The active mode/extraProtected/rules are
+ * persisted to the GLOBAL settings file only (~/.pi/agent/settings.json) and
+ * restored from there — see persistConfig for why project-scoped writes are
+ * avoided. A trusted project's .pi/settings.json may still OPT-IN override the
+ * global mode (read-side only, for hand-authored project config); since path-guard
+ * itself never writes that file, using /guard can no longer turn a plain project
+ * into a "trust-requiring" one (which is what made pi start asking for trust and
+ * silently drop a saved mode on untrusted launches).
  */
 function readSavedConfig(
 	cwd: string | undefined,
 	trusted: boolean,
 ): PathGuardConfig {
 	const global = readSettingsGuard(globalSettingsPath()) ?? {};
-	const project = trusted
-		? (readSettingsGuard(projectSettingsPath(cwd)) ?? {})
-		: {};
+	const project =
+		trusted && !isHomeCwd(cwd)
+			? (readSettingsGuard(projectSettingsPath(cwd)) ?? {})
+			: {};
 	const mode = project.mode ?? global.mode ?? "normal";
 	const extraProtected = [
 		...(global.extraProtected ?? []),
@@ -532,14 +543,17 @@ function readSavedConfig(
 }
 
 /**
- * Persist the whole config to settings.json. In a trusted project it writes the
- * project settings file (cwd/.pi/settings.json); otherwise the global settings
- * file. Requires a cwd; returns "project" | "global" | "none".
+ * Persist the whole config to the GLOBAL settings file (~/.pi/agent/settings.json),
+ * regardless of cwd or project trust. Project-scoped writes are deliberately avoided:
+ * writing cwd/.pi/settings.json would make that project "trust-requiring", so pi would
+ * begin asking for trust on the next launch (defaultProjectTrust=ask) and a declined/
+ * untrusted launch would silently ignore the saved mode — the flapping that made a
+ * saved mode revert to normal. Global settings are never trust-gated, so the mode the
+ * user sets always survives. Returns "global" on success, "none" when there is no cwd.
  */
-function persistConfig(cwd: string | undefined, trusted: boolean): string {
+function persistConfig(cwd: string | undefined): string {
 	if (!cwd) return "none";
-	const target = trusted ? projectSettingsPath(cwd) : globalSettingsPath();
-	if (!target) return "none";
+	const target = globalSettingsPath();
 	try {
 		let data: Record<string, unknown> = {};
 		if (existsSync(target)) {
@@ -559,7 +573,7 @@ function persistConfig(cwd: string | undefined, trusted: boolean): string {
 		}
 		data.pathGuard = guard;
 		writeFileSync(target, JSON.stringify(data, null, 2) + "\n", "utf8");
-		return trusted ? "project" : "global";
+		return "global";
 	} catch {
 		return "none";
 	}
@@ -567,8 +581,6 @@ function persistConfig(cwd: string | undefined, trusted: boolean): string {
 
 /** Human-readable persistence note for notify messages. */
 function persistNote(where: string): string {
-	if (where === "project")
-		return "saved to project settings (.pi/settings.json)";
 	if (where === "global") return "saved to global settings";
 	return "session-only (not persisted)";
 }
@@ -610,7 +622,7 @@ async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
 				return show(`Path Guard: already protected — ${norm}`);
 			}
 			extraProtected.push(norm);
-			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			const where = persistConfig(ctx.cwd);
 			return show(
 				`Path Guard: added protected path ${norm} (${persistNote(where)})`,
 			);
@@ -624,7 +636,7 @@ async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
 				return show(`Path Guard: not a custom protected path — ${norm}`);
 			}
 			extraProtected.splice(idx, 1);
-			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			const where = persistConfig(ctx.cwd);
 			return show(
 				`Path Guard: removed protected path ${norm} (${persistNote(where)})`,
 			);
@@ -634,7 +646,7 @@ async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
 				return show("Path Guard: no custom protected paths to clear");
 			}
 			extraProtected = [];
-			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			const where = persistConfig(ctx.cwd);
 			return show(
 				`Path Guard: cleared all custom protected paths (${persistNote(where)})`,
 			);
@@ -691,7 +703,7 @@ async function runModePicker(ctx: ExtensionCommandContext): Promise<boolean> {
 	}
 	config.mode = picked;
 	setMode(picked, ctx.ui);
-	const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+	const where = persistConfig(ctx.cwd);
 	ctx.ui.notify(
 		`Path Guard switched to: ${picked} (${persistNote(where)})`,
 		"info",
@@ -738,7 +750,7 @@ async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> {
 				continue;
 			}
 			extraProtected.push(norm);
-			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			const where = persistConfig(ctx.cwd);
 			ctx.ui.notify(
 				`Path Guard: added protected path ${norm} (${persistNote(where)})`,
 				"info",
@@ -761,7 +773,7 @@ async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> {
 			const idx = extraProtected.indexOf(target);
 			if (idx === -1) continue;
 			extraProtected.splice(idx, 1);
-			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			const where = persistConfig(ctx.cwd);
 			ctx.ui.notify(
 				`Path Guard: removed protected path ${target} (${persistNote(where)})`,
 				"info",
@@ -784,7 +796,7 @@ async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> {
 				continue;
 			}
 			extraProtected = [];
-			const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+			const where = persistConfig(ctx.cwd);
 			ctx.ui.notify(
 				`Path Guard: cleared all custom protected paths (${persistNote(where)})`,
 				"info",
@@ -891,7 +903,7 @@ function rulesSummary(): string {
 
 /** Persist a rules change and notify with the storage location. */
 function persistRules(ctx: ExtensionCommandContext): string {
-	return persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+	return persistConfig(ctx.cwd);
 }
 
 /**
@@ -1089,6 +1101,22 @@ export default function (pi: ExtensionAPI) {
 		config = readSavedConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
 		extraProtected = config.extraProtected;
 		setMode(config.mode, ctx.ui);
+		// A persisted loose mode survives into every new session; surface it so the
+		// user never runs unprotected without noticing (naked in particular).
+		if (config.mode === "naked") {
+			ctx.ui.notify(
+				"⚠️ Path Guard restored in NAKED mode — nearly all protection is OFF " +
+					"(persisted from a previous session). Use /guard normal to re-enable.",
+				"warning",
+			);
+		} else if (config.mode === "trusted") {
+			ctx.ui.notify(
+				"⚠️ Path Guard restored in trusted mode (persisted from a previous session): " +
+					"in-project deletes and outside overwrites are no longer prompted. " +
+					"Use /guard normal to re-enable prompts.",
+				"warning",
+			);
+		}
 	});
 
 	// /guard slash command: view / switch mode, and manage custom protected paths
@@ -1115,7 +1143,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				config.mode = m;
 				setMode(m, ctx.ui);
-				const where = persistConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+				const where = persistConfig(ctx.cwd);
 				ctx.ui.notify(
 					`Path Guard switched to: ${m} (${persistNote(where)})`,
 					"info",

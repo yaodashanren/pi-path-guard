@@ -3,7 +3,13 @@
  * Loads the real extension with a mocked pi API and verifies judgment per mode.
  * Verdict recognition: returns {block:true} → block; calls ui.select → confirm; otherwise → pass
  */
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import {
+	mkdirSync,
+	writeFileSync,
+	readFileSync,
+	rmSync,
+	existsSync,
+} from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { register } from "node:module";
@@ -126,6 +132,12 @@ function check(name: string, actual: string, expected: string) {
 }
 
 // ── cases ───────────────────────────────────────────────────
+/** Fake global settings file for the whole suite — persistence now targets GLOBAL
+ * settings, so route every /guard write/read here instead of the real one. */
+const FAKE_GLOBAL = "/tmp/pgtest/global-settings.json";
+rmSync(FAKE_GLOBAL, { force: true });
+process.env.PI_PATH_GUARD_SETTINGS = FAKE_GLOBAL;
+
 newSession(); // simulate new session → normal
 
 // ── /guard command ──────────────────────────────────────────
@@ -1064,51 +1076,27 @@ check(
 );
 
 // ── mode persistence via settings.json ─────────────────────
+// Persistence now targets GLOBAL settings (writing project .pi/settings.json made the
+// project "trust-requiring", so pi began asking for trust and silently dropped the saved
+// mode on untrusted launches). Whole-suite fake global is set near the top of this file.
 const PERSIST = "/tmp/pgtest/persist";
 const PERSIST_SETTINGS = join(PERSIST, ".pi", "settings.json");
 mkdirSync(join(PERSIST, ".pi"), { recursive: true });
-
-// A. session_start restores a saved project mode (trusted project)
 rmSync(PERSIST_SETTINGS, { force: true });
-writeFileSync(
-	PERSIST_SETTINGS,
-	JSON.stringify({ pathGuard: { mode: "loose" } }),
-);
-handlers["session_start"](
-	{ reason: "startup" },
-	{
-		cwd: PERSIST,
-		isProjectTrusted: () => true,
-		ui: { theme: themeMock, setStatus: () => {} },
-	},
-);
-check(
-	"session_start restores saved project mode",
-	(await currentModeShown()).includes("loose") ? "loose" : "?",
-	"loose",
-);
 
-// B. project mode ignored when project is untrusted → falls back to global/normal
-writeFileSync(
-	PERSIST_SETTINGS,
-	JSON.stringify({ pathGuard: { mode: "naked" } }),
-);
-handlers["session_start"](
-	{ reason: "startup" },
-	{
-		cwd: PERSIST,
-		isProjectTrusted: () => false,
-		ui: { theme: themeMock, setStatus: () => {} },
-	},
-);
-check(
-	"project mode ignored when project untrusted",
-	(await currentModeShown()).includes("normal") ? "normal" : "?",
-	"normal",
-);
+// Write pathGuard into the fake global then fire session_start (no cwd → reads global).
+function setGlobalMode(mode: string) {
+	rmSync(PERSIST_SETTINGS, { force: true }); // no project override
+	rmSync(FAKE_GLOBAL, { force: true });
+	writeFileSync(FAKE_GLOBAL, JSON.stringify({ pathGuard: { mode } }));
+	handlers["session_start"](
+		{ reason: "startup" },
+		{ ui: { theme: themeMock, setStatus: () => {}, notify: () => {} } },
+	);
+}
 
-// C. /guard switch in a trusted project persists the mode to project settings
-rmSync(PERSIST_SETTINGS, { force: true });
+// A. /guard switch persists mode to GLOBAL settings (not project), wherever cwd/trust is
+rmSync(FAKE_GLOBAL, { force: true });
 const persistNotify: string[] = [];
 await commands["guard"].handler("trusted", {
 	cwd: PERSIST,
@@ -1121,19 +1109,27 @@ await commands["guard"].handler("trusted", {
 		setStatus: () => {},
 	},
 });
-const persisted = JSON.parse(readFileSync(PERSIST_SETTINGS, "utf8"));
+const persisted = existsSync(FAKE_GLOBAL)
+	? JSON.parse(readFileSync(FAKE_GLOBAL, "utf8"))
+	: {};
 check(
-	"guard switch persists mode to project settings",
-	persisted.pathGuard?.mode === "trusted" ? "trusted" : "?",
-	"trusted",
+	"guard switch persists mode to global settings",
+	persisted.pathGuard?.mode === "trusted" ? "global" : "?",
+	"global",
 );
 check(
-	"guard persist notify mentions project settings",
-	persistNotify.join(" ").includes("project settings") ? "project" : "?",
-	"project",
+	"guard persist notify says global settings",
+	persistNotify.join(" ").includes("global settings") ? "global" : "?",
+	"global",
+);
+// no .pi/settings.json written for the project → no trust-requiring resource created
+check(
+	"guard switch does not create project settings",
+	existsSync(PERSIST_SETTINGS) ? "written" : "not-written",
+	"not-written",
 );
 
-// D. no cwd → session-only, not persisted
+// B. no cwd → session-only, not persisted
 const noCwdNotify: string[] = [];
 await commands["guard"].handler("loose", {
 	hasUI: true,
@@ -1148,6 +1144,147 @@ check(
 	"guard switch without cwd is session-only",
 	noCwdNotify.join(" ").includes("session-only") ? "session-only" : "?",
 	"session-only",
+);
+check(
+	"session-only switch did not persist",
+	existsSync(FAKE_GLOBAL) &&
+		JSON.parse(readFileSync(FAKE_GLOBAL, "utf8")).pathGuard?.mode === "trusted"
+		? "still-trusted"
+		: "?",
+	"still-trusted",
+);
+
+// C. session_start restores the saved global mode (independent of project trust)
+setGlobalMode("loose");
+check(
+	"session_start restores saved global mode",
+	(await currentModeShown()).includes("loose") ? "loose" : "?",
+	"loose",
+);
+
+// D. persisted naked/trusted mode warns on session_start (no silent unprotected session)
+setGlobalMode("naked");
+const restoreWarn: string[] = [];
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: PERSIST,
+		isProjectTrusted: () => true,
+		ui: {
+			theme: themeMock,
+			setStatus: () => {},
+			notify: (m: string) => restoreWarn.push(m),
+		},
+	},
+);
+check(
+	"session_start warns when restoring persisted naked",
+	restoreWarn.join(" ").includes("NAKED mode") ? "warned" : "?",
+	"warned",
+);
+setGlobalMode("trusted");
+restoreWarn.length = 0;
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: PERSIST,
+		isProjectTrusted: () => true,
+		ui: {
+			theme: themeMock,
+			setStatus: () => {},
+			notify: (m: string) => restoreWarn.push(m),
+		},
+	},
+);
+check(
+	"session_start warns when restoring persisted trusted",
+	restoreWarn.join(" ").includes("trusted mode") ? "warned" : "?",
+	"warned",
+);
+setGlobalMode("normal");
+restoreWarn.length = 0;
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: PERSIST,
+		isProjectTrusted: () => true,
+		ui: {
+			theme: themeMock,
+			setStatus: () => {},
+			notify: (m: string) => restoreWarn.push(m),
+		},
+	},
+);
+check(
+	"session_start stays silent when restoring normal",
+	restoreWarn.length === 0 ? "silent" : "?",
+	"silent",
+);
+
+// E. cwd === HOME: HOME's ~/.pi/settings.json is NOT read as a project (trust flaps);
+//    mode still comes from global. (/guard never writes ~/.pi/settings.json either.)
+rmSync(FAKE_GLOBAL, { force: true });
+writeFileSync(FAKE_GLOBAL, JSON.stringify({ pathGuard: { mode: "loose" } }));
+const homeWarn: string[] = [];
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: homedir(),
+		isProjectTrusted: () => true,
+		ui: {
+			theme: themeMock,
+			setStatus: () => {},
+			notify: (m) => homeWarn.push(m),
+		},
+	},
+);
+check(
+	"session_start at cwd=HOME uses global mode (not ~/.pi/settings.json)",
+	(await currentModeShown()).includes("loose") ? "loose" : "?",
+	"loose",
+);
+
+// F. a trusted non-HOME project's hand-authored .pi/settings.json may still override global
+rmSync(FAKE_GLOBAL, { force: true });
+writeFileSync(FAKE_GLOBAL, JSON.stringify({ pathGuard: { mode: "normal" } }));
+rmSync(PERSIST_SETTINGS, { force: true });
+writeFileSync(
+	PERSIST_SETTINGS,
+	JSON.stringify({ pathGuard: { mode: "strict" } }),
+);
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: PERSIST,
+		isProjectTrusted: () => true,
+		ui: { theme: themeMock, setStatus: () => {}, notify: () => {} },
+	},
+);
+check(
+	"trusted project settings override global (opt-in read)",
+	(await currentModeShown()).includes("strict") ? "strict" : "?",
+	"strict",
+);
+// untrusted → project ignored → global
+handlers["session_start"](
+	{ reason: "startup" },
+	{
+		cwd: PERSIST,
+		isProjectTrusted: () => false,
+		ui: { theme: themeMock, setStatus: () => {}, notify: () => {} },
+	},
+);
+check(
+	"untrusted project settings ignored → global/normal",
+	(await currentModeShown()).includes("normal") ? "normal" : "?",
+	"normal",
+);
+
+// back to a clean global for the protected-paths suite below
+rmSync(FAKE_GLOBAL, { force: true });
+handlers["session_start"](
+	{ reason: "startup" },
+	{ ui: { theme: themeMock, setStatus: () => {}, notify: () => {} } },
 );
 
 // ── user-configured protected paths (guarded in EVERY mode, incl. naked) ─
@@ -1185,7 +1322,7 @@ await commands["guard"].handler(`paths add ${SECRET}`, {
 check(
 	"guard paths add persists to settings",
 	(() => {
-		const p = JSON.parse(readFileSync(P2_SETTINGS, "utf8")).pathGuard
+		const p = JSON.parse(readFileSync(FAKE_GLOBAL, "utf8")).pathGuard
 			?.extraProtected as string[] | undefined;
 		return p?.length === 1 && (p[0]?.endsWith("secret.txt") ?? false);
 	})()
@@ -1466,6 +1603,8 @@ check(
 	"block",
 );
 
+// clean up the fake global so it never lingers for real runs
+rmSync(FAKE_GLOBAL, { force: true });
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

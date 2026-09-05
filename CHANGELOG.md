@@ -6,6 +6,26 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [1.4.8] — fix mode persistence silently reverting to normal
+
+- Root cause: `/guard` persisted the mode to the project `.pi/settings.json` in a
+  trusted project. Writing that file made the project "trust-requiring", so on the
+  next launch pi began asking for project trust (`defaultProjectTrust=ask`); if the
+  project came up untrusted, path-guard ignored the project file and reverted to
+  normal.
+- Fix: `/guard` (and custom paths / rule overrides) now persist to the **global**
+  settings file `~/.pi/agent/settings.json` only, never the project file — global
+  settings are not trust-gated, so the chosen mode always survives a restart.
+  A trusted project's hand-authored `.pi/settings.json` is still honored on the
+  read side as an opt-in override, but path-guard no longer creates it, so it can no
+  longer flip a plain project into a trust-requiring one.
+- Also: `cwd === HOME` is never treated as a project (its `~/.pi/settings.json`
+  trust state flaps between sessions); HOME always reads/writes global.
+- Also: a restored `naked`/`trusted` mode now raises a warning notification on
+  `session_start`, so an unprotected session is never silent.
+- Tests: persistence suite rewritten against a fake global settings file
+  (`PI_PATH_GUARD_SETTINGS` override); 155 passing.
+
 ## [1.4.7] — category-aware block escape hints
 
 - Every block message now appends a short, category-aware hint under a

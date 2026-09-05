@@ -42,7 +42,7 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 - `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 14 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 14 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive main menu 非法参数 → 兜底弹出交互主菜单
-- The active mode persists across sessions via settings.json (`pathGuard.mode`): project `.pi/settings.json` overrides global `~/.pi/agent/settings.json`, falling back to `normal`. `/guard <mode>` writes it back (project settings in a trusted project, else global). 模式跨会话持久化到 settings.json（`pathGuard.mode`）：项目 `.pi/settings.json` 优先于全局 `~/.pi/agent/settings.json`，缺省回 `normal`；`/guard <mode>` 切换时回写（受信任项目写项目配置，否则写全局）
+- The active mode persists across sessions via **global** settings.json (`pathGuard.mode` in `~/.pi/agent/settings.json`), falling back to `normal`. `/guard <mode>` writes it back there. Persistence is intentionally **global-only**, never project-scoped: writing a project `.pi/settings.json` would make the project "trust-requiring", so pi would start asking for trust on the next launch (`defaultProjectTrust=ask`) and a declined/untrusted launch would silently ignore the saved mode — the old behavior that made a saved mode revert to normal. Global settings are never trust-gated, so the mode always survives. 模式跨会话持久化到**全局** settings.json（`~/.pi/agent/settings.json` 的 `pathGuard.mode`），缺省回 `normal`；`/guard <mode>` 切换时回写到该文件。持久化刻意只写**全局**、不写项目：写入项目 `.pi/settings.json` 会让项目变为需信任项目，导致下次启动 pi 弹出信任询问，若项目被拒/未信任则保存的模式会被静默忽略（这正是旧版模式重置为 normal 的根因）。全局设置不受信任判定门控，模式必然保留
 - `/guard paths add|rm|list|clear <path>` — manage custom protected paths, enforced in EVERY mode (incl. naked) 管理自定义受保护路径，任何模式（含 naked）都生效
 - The active mode is shown in the footer status bar (`🛡 <mode>`, `🛡 NAKED` in warning color) 当前模式显示在底部状态栏（`🛡 <mode>`，naked 用警示色 `🛡 NAKED`）
 
@@ -118,13 +118,13 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 ## Development / 开发与测试
 
-Automated tests (148 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), and per-mode rule overrides:
+Automated tests (155 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（148 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、按模式规则覆盖等流程：
+自动化测试（155 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts

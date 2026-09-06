@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.4.7.
+ * recent release/tag is 1.4.8.
  */
 import type {
 	ExtensionAPI,

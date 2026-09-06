@@ -254,6 +254,7 @@ check(
 let addedMsg = "";
 let addActions = 0;
 let addMainDone = false;
+let addCat = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
@@ -261,6 +262,11 @@ await commands["guard"].handler("", {
 			if (m.startsWith("Path Guard: added")) addedMsg = m;
 		},
 		select: async (title: string, options: string[]) => {
+			if (title.includes("choose a path category")) {
+				if (addCat) return undefined;
+				addCat = true;
+				return options.find((o) => o.startsWith("protected")) ?? undefined;
+			}
 			if (title.includes("Path Guard —")) {
 				if (addMainDone) return undefined;
 				addMainDone = true;
@@ -285,6 +291,54 @@ check(
 	"added",
 );
 
+// interactive: main → paths → category trusted → add (via input + confirm)
+const TMENU = join(OUT, "trust_menu");
+mkdirSync(TMENU, { recursive: true });
+let taddedMsg = "";
+let tActions = 0;
+let tMainDone = false;
+let tCat = false;
+await commands["guard"].handler("", {
+	hasUI: true,
+	ui: {
+		notify: (m: string) => {
+			if (m.startsWith("Path Guard: added")) taddedMsg = m;
+		},
+		select: async (title: string, options: string[]) => {
+			if (title.includes("choose a path category")) {
+				if (tCat) return undefined;
+				tCat = true;
+				return options.find((o) => o.startsWith("trusted")) ?? undefined;
+			}
+			if (title.includes("Path Guard —")) {
+				if (tMainDone) return undefined;
+				tMainDone = true;
+				return options.find((o) => o.startsWith("paths")) ?? undefined;
+			}
+			if (title.includes("Choose an action:")) {
+				tActions++;
+				return tActions === 1
+					? (options.find((o) => o.startsWith("add")) ?? undefined)
+					: undefined;
+			}
+			return undefined;
+		},
+		input: async () => TMENU,
+		confirm: async () => true,
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"paths trusted interactive add works",
+	taddedMsg.includes("trusted path") ? "added" : "?",
+	"added",
+);
+// remove it again so it does not linger into later suites
+await commands["guard"].handler(`paths trusted rm ${TMENU}`, {
+	ui: { notify: () => {} },
+});
+
 // main → paths → remove (pick the path from the list)
 await commands["guard"].handler("paths add /tmp/pgtest/menu_rm.txt", {
 	ui: { notify: () => {} },
@@ -292,6 +346,7 @@ await commands["guard"].handler("paths add /tmp/pgtest/menu_rm.txt", {
 let rmMsg = "";
 let rmActions = 0;
 let rmMainDone = false;
+let rmCat = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
@@ -299,6 +354,11 @@ await commands["guard"].handler("", {
 			if (m.startsWith("Path Guard: removed")) rmMsg = m;
 		},
 		select: async (title: string, options: string[]) => {
+			if (title.includes("choose a path category")) {
+				if (rmCat) return undefined;
+				rmCat = true;
+				return options.find((o) => o.startsWith("protected")) ?? undefined;
+			}
 			if (title.includes("Path Guard —")) {
 				if (rmMainDone) return undefined;
 				rmMainDone = true;
@@ -334,6 +394,7 @@ await commands["guard"].handler("paths add /tmp/pgtest/c2.txt", {
 let clearMsg = "";
 let clearActions = 0;
 let clearMainDone = false;
+let clearCat = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
@@ -341,6 +402,11 @@ await commands["guard"].handler("", {
 			if (m.startsWith("Path Guard: cleared")) clearMsg = m;
 		},
 		select: async (title: string, options: string[]) => {
+			if (title.includes("choose a path category")) {
+				if (clearCat) return undefined;
+				clearCat = true;
+				return options.find((o) => o.startsWith("protected")) ?? undefined;
+			}
 			if (title.includes("Path Guard —")) {
 				if (clearMainDone) return undefined;
 				clearMainDone = true;
@@ -373,6 +439,8 @@ await commands["guard"].handler("", {
 	ui: {
 		notify: () => {},
 		select: async (title: string, options: string[]) => {
+			if (title.includes("choose a path category"))
+				return options.find((o) => o.startsWith("back")) ?? undefined;
 			if (title.includes("Path Guard —")) {
 				if (backMainDone) return undefined;
 				backMainDone = true;
@@ -1605,6 +1673,188 @@ check(
 
 // clean up the fake global so it never lingers for real runs
 rmSync(FAKE_GLOBAL, { force: true });
+
+// ── trusted paths (always allowed; protection always outranks trust) ──
+// In strict mode an in-project write/delete/truncate would confirm; a trusted
+// path makes them pass. But a protected path (even inside a trusted subtree)
+// still blocks, and protected/system paths can never be added as trusted.
+const TIN = join(P2, "trustin");
+const TFILE = join(TIN, "f.txt");
+mkdirSync(TIN, { recursive: true });
+writeFileSync(TFILE, "keep");
+writeFileSync(join(TIN, ".env"), "x");
+const TOUT = join(OUT, "trustout");
+const OFILE = join(TOUT, "of.txt");
+mkdirSync(TOUT, { recursive: true });
+writeFileSync(OFILE, "x");
+
+await setMode("strict");
+// Add an in-project trusted path (confirm allowed).
+{
+	const tn: string[] = [];
+	await commands["guard"].handler(`paths trusted add ${TIN}`, {
+		cwd: P2,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: (m: string) => tn.push(m),
+			confirm: async () => true,
+			theme: themeMock,
+			setStatus: () => {},
+		},
+	});
+	check(
+		"trusted add persists trustedPaths",
+		tn.join(" ").includes("trusted path") ? "saved" : "?",
+		"saved",
+	);
+}
+
+// strict write to a trusted path → pass (would otherwise confirm)
+check(
+	"strict write into trusted path → pass",
+	(await runTool("write", { path: TFILE }, { cwd: P2 })).verdict,
+	"pass",
+);
+// strict redirect-truncate of a trusted file → pass (truncate rule would confirm)
+check(
+	"strict echo > trusted file → pass",
+	(await runCmd(`echo y > ${TFILE}`, P2)).verdict,
+	"pass",
+);
+// strict in-place edit (sed -i) of a trusted file → pass
+check(
+	"strict sed -i on trusted file → pass",
+	(await runCmd(`sed -i 's/keep/x/' ${TFILE}`, P2)).verdict,
+	"pass",
+);
+// strict delete of a trusted in-project file → pass (deleteInProject would confirm)
+check(
+	"strict rm trusted file → pass",
+	(await runCmd(`rm ${TFILE}`, P2)).verdict,
+	"pass",
+);
+
+// protection outranks trust: a protected file inside a trusted subtree still blocks
+check(
+	"write .env inside trusted subtree still blocks",
+	(await runTool("write", { path: join(TIN, ".env") }, { cwd: P2 })).verdict,
+	"block",
+);
+check(
+	"echo > .env inside trusted subtree still blocks",
+	(await runCmd(`echo x > ${join(TIN, ".env")}`, P2)).verdict,
+	"block",
+);
+
+// trusted outside path: strict rm outside would block (deleteOutside) → but trusted passes
+await commands["guard"].handler(`paths trusted add ${TOUT}`, {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		confirm: async () => true,
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"strict rm outside trusted path → pass (deleteOutside would block)",
+	(await runCmd(`rm ${OFILE}`, P2)).verdict,
+	"pass",
+);
+
+// protected / system paths cannot be trusted
+{
+	const deny1: string[] = [];
+	await commands["guard"].handler(`paths trusted add ${join(P2, ".env")}`, {
+		cwd: P2,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: (m: string) => deny1.push(m),
+			confirm: async () => true,
+			theme: themeMock,
+			setStatus: () => {},
+		},
+	});
+	check(
+		"cannot trust a system-important path (.env)",
+		deny1.join(" ").includes("cannot trust") ? "denied" : "?",
+		"denied",
+	);
+}
+{
+	const deny2: string[] = [];
+	await commands["guard"].handler(`paths trusted add ${SECRET}`, {
+		cwd: P2,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: (m: string) => deny2.push(m),
+			confirm: async () => true,
+			theme: themeMock,
+			setStatus: () => {},
+		},
+	});
+	check(
+		"cannot trust a user-protected path (secret.txt)",
+		deny2.join(" ").includes("cannot trust") ? "denied" : "?",
+		"denied",
+	);
+}
+
+// trusted paths list
+{
+	const tlist: string[] = [];
+	await commands["guard"].handler("paths trusted list", {
+		cwd: P2,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: (m: string) => tlist.push(m),
+			theme: themeMock,
+			setStatus: () => {},
+		},
+	});
+	check(
+		"guard paths trusted list shows trusted paths",
+		tlist.join(" ").includes("trustin") ? "shown" : "?",
+		"shown",
+	);
+}
+
+// removing the trusted path restores guarding (strict in-project write → confirm again)
+writeFileSync(TFILE, "keep");
+await commands["guard"].handler(`paths trusted rm ${TIN}`, {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+await commands["guard"].handler(`paths trusted rm ${TOUT}`, {
+	cwd: P2,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: () => {},
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+check(
+	"strict write after removing trusted → confirm again",
+	(await runTool("write", { path: TFILE }, { cwd: P2 })).verdict,
+	"confirm",
+);
+
+// back to normal for tidiness
+await setMode("normal");
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

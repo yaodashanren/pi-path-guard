@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.4.8.
+ * recent release/tag is 1.5.0.
  */
 import type {
 	ExtensionAPI,
@@ -406,13 +406,66 @@ function isUserProtectedPath(absolutePath: string): boolean {
 	return false;
 }
 
-/** Expand ~, resolve relative entries against cwd, and resolve symlinks (so the stored path matches the real path used in checks). */
+/** Expand ~ and resolve relative entries against cwd into a canonical absolute path.
+ * Deliberately does NOT resolve symlinks: protection/trust is anchored to the literal
+ * path the user configured, so it keeps guarding that location even when a symlink in
+ * it is created/removed/retargeted later (across sessions or during builds). At match
+ * time (isUserProtectedPath / isTrustedPath) the entry's CURRENT real path is resolved,
+ * so writes through a symlink to the same real target are still caught — but a write to
+ * the literal path is never missed because the stored entry drifted to an old target. */
 function normalizeProtectedEntry(
 	entry: string,
 	cwd: string | undefined,
 ): string {
 	const expanded = expandHome(entry.trim());
-	return resolveReal(resolve(cwd ?? HOME, expanded));
+	// resolve() normalizes (absolute, dot-segment-free) but does NOT follow symlinks.
+	return resolve(cwd ?? HOME, expanded);
+}
+
+/**
+ * User-configured trusted paths (pathGuard.trustedPaths). Operations whose target
+ * lies inside a trusted path are always allowed — path-guard treats them as if the
+ * active mode were "trusted" for just that path, regardless of the current mode:
+ * writes/edits/deletes/overwrites/truncates/in-place edits inside it pass without
+ * prompting. Protection always outranks trust: a trusted path can never be a
+ * protected path (built-in system path or user-protected path), so those stay blocked.
+ */
+let trustedPaths: string[] = [];
+
+/** Path category selector used by both the CLI and interactive /guard paths UIs. */
+type PathKind = "protected" | "trusted";
+
+/** The live entry list for a path category. */
+function pathList(kind: PathKind): string[] {
+	return kind === "trusted" ? trustedPaths : extraProtected;
+}
+
+/** Whether a path is a user-configured trusted entry (or under one). */
+function isTrustedPath(absolutePath: string): boolean {
+	for (const entry of trustedPaths) {
+		const e = normalize(resolveReal(entry));
+		if (absolutePath === e) return true;
+		if (absolutePath.startsWith(e + sep)) return true;
+	}
+	return false;
+}
+
+/**
+ * Why a path cannot be added as a trusted entry, or null if it can be trusted.
+ * Trusting never overrides protection, so built-in system paths and user-protected
+ * paths (or anything under them) are refused.
+ */
+function untrustableReason(absolutePath: string): string | null {
+	// Compare on the REAL path so a literal entry that goes through a symlink into a
+	// protected location is still refused as trusted.
+	const real = resolveReal(absolutePath);
+	if (isUserProtectedPath(real)) {
+		return "it is a user-protected path — remove it from protected paths first";
+	}
+	if (matchesProtectedPath(real)) {
+		return "it is a system-important protected path (.env/.ssh/keys/credentials/node_modules/build-output) and cannot be trusted";
+	}
+	return null;
 }
 
 /** Guard verdict: { block, reason } to block / undefined to allow (askConfirm returns a Promise) */
@@ -465,10 +518,16 @@ function projectSettingsPath(cwd: string | undefined): string | undefined {
 interface PathGuardConfig {
 	mode: GuardMode;
 	extraProtected: string[];
+	trustedPaths: string[];
 	rules: Partial<Record<GuardMode, Partial<Record<RuleId, RuleLevel>>>>;
 }
 
-let config: PathGuardConfig = { mode: "normal", extraProtected: [], rules: {} };
+let config: PathGuardConfig = {
+	mode: "normal",
+	extraProtected: [],
+	trustedPaths: [],
+	rules: {},
+};
 
 /** Read and validate the raw pathGuard block from a settings.json file, or undefined. */
 function readSettingsGuard(
@@ -481,6 +540,7 @@ function readSettingsGuard(
 			pathGuard?: {
 				mode?: string;
 				extraProtected?: string[];
+				trustedPaths?: string[];
 				rules?: Record<string, Record<string, string>>;
 			};
 		};
@@ -490,6 +550,11 @@ function readSettingsGuard(
 		if (typeof g.mode === "string" && isGuardMode(g.mode)) out.mode = g.mode;
 		if (Array.isArray(g.extraProtected)) {
 			out.extraProtected = g.extraProtected.filter(
+				(p): p is string => typeof p === "string",
+			);
+		}
+		if (Array.isArray(g.trustedPaths)) {
+			out.trustedPaths = g.trustedPaths.filter(
 				(p): p is string => typeof p === "string",
 			);
 		}
@@ -538,8 +603,12 @@ function readSavedConfig(
 		...(global.extraProtected ?? []),
 		...(project.extraProtected ?? []),
 	].map((e) => normalizeProtectedEntry(e, cwd));
+	const trustedPaths = [
+		...(global.trustedPaths ?? []),
+		...(project.trustedPaths ?? []),
+	].map((e) => normalizeProtectedEntry(e, cwd));
 	const rules = { ...global.rules, ...project.rules };
-	return { mode, extraProtected, rules };
+	return { mode, extraProtected, trustedPaths, rules };
 }
 
 /**
@@ -566,6 +635,11 @@ function persistConfig(cwd: string | undefined): string {
 		} else {
 			delete guard.extraProtected;
 		}
+		if (trustedPaths.length > 0) {
+			guard.trustedPaths = trustedPaths;
+		} else {
+			delete guard.trustedPaths;
+		}
 		if (Object.keys(config.rules).length > 0) {
 			guard.rules = config.rules;
 		} else {
@@ -588,68 +662,86 @@ function persistNote(where: string): string {
 /** Path Guard paths usage message. */
 const PATHS_USAGE =
 	"Path Guard paths usage:\n" +
-	"  /guard paths list\n" +
-	"  /guard paths add <path>\n" +
-	"  /guard paths rm <path>\n" +
-	"  /guard paths clear\n\n" +
-	"Custom protected paths are guarded in EVERY mode (including naked).";
+	"  /guard paths list | add <path> | rm <path> | clear\n" +
+	"  /guard paths protected …   (same, explicit — this is the default)\n" +
+	"  /guard paths trusted …     manage trusted (always-allowed) paths\n\n" +
+	"Protected paths are guarded in EVERY mode (including naked).\n" +
+	"Trusted paths are ALWAYS allowed (trusted-mode protection for that path);\n" +
+	"system-important protected paths (.env/.ssh/keys/…) cannot be trusted.";
 
 /**
- * /guard paths … subcommand handler: list / add / rm / clear user-configured
- * protected paths. Updates the in-memory config and persists to settings.json.
+ * /guard paths … subcommand handler. The optional leading category token
+ * (protected | trusted) picks the list; it defaults to "protected" for backward
+ * compatibility. list / add / rm / clear then operate on that category.
  */
 async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
-	const rest = raw.replace(/^paths\s*/i, "").trim();
+	let rest = raw.replace(/^paths\s*/i, "").trim();
+	let kind: PathKind = "protected";
+	const cat = rest.match(/^(protected|trusted)\b/i);
+	if (cat) {
+		kind = cat[1].toLowerCase() as PathKind;
+		rest = rest.slice(cat[0].length).trim();
+	}
 	const spaceIdx = rest.indexOf(" ");
 	const sub = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).toLowerCase();
 	const arg = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).trim();
 	const show = (msg: string) => ctx.ui.notify(msg, "info");
+	const list = pathList(kind);
 
 	switch (sub) {
 		case "list":
 		case "show":
-			if (extraProtected.length === 0) {
-				return show("Path Guard: no custom protected paths configured");
+			if (list.length === 0) {
+				return show(`Path Guard: no ${kind} paths configured`);
 			}
 			return show(
-				`Path Guard custom protected paths (${extraProtected.length}):\n` +
-					extraProtected.map((p) => `· ${p}`).join("\n"),
+				`Path Guard ${kind} paths (${list.length}):\n` +
+					list.map((p) => `· ${p}`).join("\n"),
 			);
 		case "add": {
-			if (!arg) return show("Usage: /guard paths add <path>");
+			if (!arg) return show(`Usage: /guard paths ${kind} add <path>`);
 			const norm = normalizeProtectedEntry(arg, ctx.cwd);
-			if (extraProtected.includes(norm)) {
-				return show(`Path Guard: already protected — ${norm}`);
+			if (kind === "trusted") {
+				const denied = untrustableReason(norm);
+				if (denied) {
+					return show(`Path Guard: cannot trust ${norm} — ${denied}`);
+				}
+				if (!(await confirmTrustPath(ctx))) {
+					return show(
+						`Path Guard: not added — trusting ${norm} requires confirmation`,
+					);
+				}
 			}
-			extraProtected.push(norm);
+			if (list.includes(norm)) {
+				return show(`Path Guard: already ${kind} — ${norm}`);
+			}
+			list.push(norm);
 			const where = persistConfig(ctx.cwd);
 			return show(
-				`Path Guard: added protected path ${norm} (${persistNote(where)})`,
+				`Path Guard: added ${kind} path ${norm} (${persistNote(where)})`,
 			);
 		}
 		case "rm":
 		case "remove": {
-			if (!arg) return show("Usage: /guard paths rm <path>");
+			if (!arg) return show(`Usage: /guard paths ${kind} rm <path>`);
 			const norm = normalizeProtectedEntry(arg, ctx.cwd);
-			const idx = extraProtected.indexOf(norm);
+			const idx = list.indexOf(norm);
 			if (idx === -1) {
-				return show(`Path Guard: not a custom protected path — ${norm}`);
+				return show(`Path Guard: not a ${kind} path — ${norm}`);
 			}
-			extraProtected.splice(idx, 1);
+			list.splice(idx, 1);
 			const where = persistConfig(ctx.cwd);
 			return show(
-				`Path Guard: removed protected path ${norm} (${persistNote(where)})`,
+				`Path Guard: removed ${kind} path ${norm} (${persistNote(where)})`,
 			);
 		}
 		case "clear": {
-			if (extraProtected.length === 0) {
-				return show("Path Guard: no custom protected paths to clear");
+			if (list.length === 0) {
+				return show(`Path Guard: no ${kind} paths to clear`);
 			}
-			extraProtected = [];
+			list.length = 0;
 			const where = persistConfig(ctx.cwd);
-			return show(
-				`Path Guard: cleared all custom protected paths (${persistNote(where)})`,
-			);
+			return show(`Path Guard: cleared all ${kind} paths (${persistNote(where)})`);
 		}
 		default:
 			return show(PATHS_USAGE);
@@ -663,16 +755,29 @@ async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
 const GUARD_MAIN_MENU = [
 	"switch — Switch mode (切换防护模式)",
 	"rules — Customize per-mode guard rules (定制每模式守护规则)",
-	"paths — Manage custom protected paths (管理自定义受保护路径)",
+	"paths — Manage protected & trusted paths (管理保护/信任路径)",
 ];
 
-/** Sub-menu for managing custom protected paths (loops until back/cancel). */
-const GUARD_PATHS_MENU = [
-	"add — Add a custom protected path (添加自定义路径)",
-	"remove — Remove a custom protected path (删除自定义路径)",
-	"clear — Clear all custom protected paths (清空全部)",
+/** First step inside /guard paths: pick a category (loops until back/cancel). */
+const GUARD_PATHS_CATEGORY_MENU = [
+	"protected — Custom protected paths (自定义受保护路径)",
+	"trusted — Trusted paths, always allowed (信任路径，始终放行)",
 	"back — Back to main menu (返回)",
 ];
+
+/** Second step: per-category actions (loops until back to the category chooser). */
+function pathsActionsMenu(kind: PathKind): string[] {
+	return [
+		kind === "trusted"
+			? "add — Add a trusted path (添加信任路径)"
+			: "add — Add a protected path (添加受保护路径)",
+		kind === "trusted"
+			? "remove — Remove a trusted path (删除信任路径)"
+			: "remove — Remove a protected path (删除受保护路径)",
+		`clear — Clear all ${kind} paths (清空全部${kind === "trusted" ? "信任" : "受保护"}路径)`,
+		"back — Back to path categories (返回分类)",
+	];
+}
 
 /**
  * Interactive mode picker: decision matrix as the title, one of the 5 modes
@@ -712,24 +817,50 @@ async function runModePicker(ctx: ExtensionCommandContext): Promise<boolean> {
 }
 
 /**
- * Interactive management of custom protected paths. Shows the current list,
- * then loops add / remove / clear until the user picks back or cancels.
+ * Interactive management of paths. First picks a category (protected | trusted),
+ * then loops add / remove / clear for that category until back returns here / exits.
  */
 async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> {
 	while (true) {
-		if (extraProtected.length > 0) {
+		const category = await ctx.ui.select(
+			"Path Guard — choose a path category:",
+			GUARD_PATHS_CATEGORY_MENU,
+		);
+		if (!category) {
+			ctx.ui.notify("Cancelled, paths unchanged", "info");
+			return;
+		}
+		const kind = category.split(/\s+/)[0];
+		if (kind === "back") return;
+		if (kind === "protected" || kind === "trusted") {
+			await runPathCategoryMenu(kind, ctx);
+		}
+	}
+}
+
+/** Add/remove/clear loop for one path category; "back" returns to the category chooser. */
+async function runPathCategoryMenu(
+	kind: PathKind,
+	ctx: ExtensionCommandContext,
+): Promise<void> {
+	const list = pathList(kind);
+	while (true) {
+		if (list.length > 0) {
 			ctx.ui.notify(
-				`Path Guard custom protected paths (${extraProtected.length}):\n` +
-					extraProtected.map((p) => `· ${p}`).join("\n"),
+				`Path Guard ${kind} paths (${list.length}):\n` +
+					list.map((p) => `· ${p}`).join("\n"),
 				"info",
 			);
 		} else {
-			ctx.ui.notify("Path Guard: no custom protected paths configured", "info");
+			ctx.ui.notify(`Path Guard: no ${kind} paths configured`, "info");
 		}
 
-		const action = await ctx.ui.select("Choose an action:", GUARD_PATHS_MENU);
+		const action = await ctx.ui.select(
+			"Choose an action:",
+			pathsActionsMenu(kind),
+		);
 		if (!action) {
-			ctx.ui.notify("Cancelled, custom paths unchanged", "info");
+			ctx.ui.notify(`Cancelled, ${kind} paths unchanged`, "info");
 			return;
 		}
 		const op = action.split(/\s+/)[0];
@@ -737,7 +868,9 @@ async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> {
 
 		if (op === "add") {
 			const input = await ctx.ui.input(
-				"Enter the path to protect (absolute, or relative to cwd):",
+				kind === "trusted"
+					? "Enter the path to ALWAYS trust (absolute, or relative to cwd):"
+					: "Enter the path to protect (absolute, or relative to cwd):",
 				"",
 			);
 			if (input == null) {
@@ -745,60 +878,72 @@ async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> {
 				continue;
 			}
 			const norm = normalizeProtectedEntry(input, ctx.cwd);
-			if (extraProtected.includes(norm)) {
-				ctx.ui.notify(`Path Guard: already protected — ${norm}`, "info");
+			if (kind === "trusted") {
+				const denied = untrustableReason(norm);
+				if (denied) {
+					ctx.ui.notify(`Path Guard: cannot trust ${norm} — ${denied}`, "warning");
+					continue;
+				}
+				if (!(await confirmTrustPath(ctx))) {
+					ctx.ui.notify(
+						`Path Guard: not added — trusting ${norm} requires confirmation`,
+						"info",
+					);
+					continue;
+				}
+			}
+			if (list.includes(norm)) {
+				ctx.ui.notify(`Path Guard: already ${kind} — ${norm}`, "info");
 				continue;
 			}
-			extraProtected.push(norm);
+			list.push(norm);
 			const where = persistConfig(ctx.cwd);
 			ctx.ui.notify(
-				`Path Guard: added protected path ${norm} (${persistNote(where)})`,
+				`Path Guard: added ${kind} path ${norm} (${persistNote(where)})`,
 				"info",
 			);
 			continue;
 		}
 
 		if (op === "remove") {
-			if (extraProtected.length === 0) {
-				ctx.ui.notify("Path Guard: no custom protected paths to remove", "info");
+			if (list.length === 0) {
+				ctx.ui.notify(`Path Guard: no ${kind} paths to remove`, "info");
 				continue;
 			}
-			const target = await ctx.ui.select("Choose a path to remove:", [
-				...extraProtected,
-			]);
+			const target = await ctx.ui.select("Choose a path to remove:", [...list]);
 			if (!target) {
 				ctx.ui.notify("Cancelled remove", "info");
 				continue;
 			}
-			const idx = extraProtected.indexOf(target);
+			const idx = list.indexOf(target);
 			if (idx === -1) continue;
-			extraProtected.splice(idx, 1);
+			list.splice(idx, 1);
 			const where = persistConfig(ctx.cwd);
 			ctx.ui.notify(
-				`Path Guard: removed protected path ${target} (${persistNote(where)})`,
+				`Path Guard: removed ${kind} path ${target} (${persistNote(where)})`,
 				"info",
 			);
 			continue;
 		}
 
 		if (op === "clear") {
-			if (extraProtected.length === 0) {
-				ctx.ui.notify("Path Guard: no custom protected paths to clear", "info");
+			if (list.length === 0) {
+				ctx.ui.notify(`Path Guard: no ${kind} paths to clear`, "info");
 				continue;
 			}
 			const ok = await ctx.ui.confirm(
-				"Clear all custom protected paths?",
-				`Remove these ${extraProtected.length} path(s)?\n` +
-					extraProtected.map((p) => `· ${p}`).join("\n"),
+				`Clear all ${kind} paths?`,
+				`Remove these ${list.length} path(s)?\n` +
+					list.map((p) => `· ${p}`).join("\n"),
 			);
 			if (!ok) {
 				ctx.ui.notify("Cancelled clear", "info");
 				continue;
 			}
-			extraProtected = [];
+			list.length = 0;
 			const where = persistConfig(ctx.cwd);
 			ctx.ui.notify(
-				`Path Guard: cleared all custom protected paths (${persistNote(where)})`,
+				`Path Guard: cleared all ${kind} paths (${persistNote(where)})`,
 				"info",
 			);
 		}
@@ -1100,6 +1245,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		config = readSavedConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
 		extraProtected = config.extraProtected;
+		trustedPaths = config.trustedPaths;
 		setMode(config.mode, ctx.ui);
 		// A persisted loose mode survives into every new session; surface it so the
 		// user never runs unprotected without noticing (naked in particular).
@@ -1122,7 +1268,7 @@ export default function (pi: ExtensionAPI) {
 	// /guard slash command: view / switch mode, and manage custom protected paths
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths add|rm|list|clear <path> manages custom protected paths",
+			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> add|rm|list|clear <path> manages paths",
 		handler: async (args, ctx) => {
 			const raw = args?.trim() ?? "";
 			const m = raw.toLowerCase();
@@ -1221,6 +1367,10 @@ function checkWriteEdit(
 			reason: withEscapeHints(`Path "${real}" is protected; write blocked.`),
 		};
 	}
+
+	// ③b A trusted path is always allowed — protection outranks trust (a trusted
+	// entry is never a protected path), so skip the outside/HOME/in-project rules.
+	if (isTrustedPath(real)) return;
 
 	const outside = isOutsideCwd(real, realCwd);
 
@@ -1351,6 +1501,8 @@ function classifySegment(
 				reason: `Redirect writes to protected path: ${trimmed}`,
 			};
 		}
+		// Redirect into a trusted path (incl. truncating it) → pass in every mode.
+		if (isTrustedPath(real)) return { kind: "pass" };
 		if (
 			isTruncatingOp(redirect.op) &&
 			!DEVICE_TARGETS.has(redirect.target) &&
@@ -1574,6 +1726,11 @@ function judgeDelete(
 		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 
+	// All concrete targets are trusted → pass in every mode (trusted-mode protection for those paths)
+	if (pathArgs.every((p) => isTrustedPath(p.path))) {
+		return { kind: "pass" };
+	}
+
 	const externalPaths = pathArgs.filter((p) => p.isOutside);
 	if (externalPaths.length > 0) {
 		const list = externalPaths.map((p) => p.path).join(", ");
@@ -1657,6 +1814,9 @@ function judgeOverwrite(
 			reason: `Command may overwrite protected path: ${cmdInfo.command} ${target}`,
 		};
 	}
+
+	// Overwrite/rename target is inside a trusted path → pass (no prompt in any mode).
+	if (isTrustedPath(real)) return { kind: "pass" };
 
 	const outside = isOutsideCwd(real, realCwd);
 
@@ -1864,6 +2024,8 @@ function judgeTruncate(
 				reason: `truncate truncates protected path: ${t.raw}`,
 			};
 		}
+		// Trusted target truncate → pass in every mode.
+		if (isTrustedPath(t.path)) continue;
 		// Existing ordinary file truncated → per truncate rule
 		if (!DEVICE_TARGETS.has(t.path) && existsSync(t.path)) {
 			return ruleVerdict("truncate", `Truncate blocked by rule: ${t.raw}`);
@@ -1904,6 +2066,8 @@ function judgeInPlace(
 			reason: `In-place edit of protected path: ${cmdInfo.command} ${dest}`,
 		};
 	}
+	// In-place edit of a trusted path → pass in every mode.
+	if (isTrustedPath(real)) return { kind: "pass" };
 	return { kind: "pass" };
 }
 
@@ -2304,6 +2468,18 @@ function resolveReal(p: string): string {
 }
 
 // ─── UI Interaction ───────────────────────────────────────────────────
+
+/** Warning confirmation before adding a trusted path: that path bypasses all path-guard prompts in every mode */
+async function confirmTrustPath(
+	ctx: ExtensionCommandContext,
+): Promise<boolean> {
+	// No UI (headless) cannot confirm → conservatively refuse the trust
+	if (!ctx.hasUI) return false;
+	return ctx.ui.confirm(
+		"⚠️ Trust this path?",
+		"A trusted path is ALWAYS allowed: path-guard will not block or prompt for writes/edits/deletes/overwrites/truncates inside it, in ANY mode (like trusted mode for just that path).\n\nOnly protected paths (which can never be trusted) still apply. Confirm trusting it?",
+	);
+}
 
 /** Warning confirmation before switching to trusted: behavior boundary is very loose; requires explicit user confirmation */
 async function confirmTrustedSwitch(

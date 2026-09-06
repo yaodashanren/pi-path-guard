@@ -6,6 +6,31 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [1.5.0] — trusted paths (always allowed) next to protected paths
+
+- New **trusted paths** concept (`pathGuard.trustedPaths`, or `/guard → paths →
+  trusted` / `/guard paths trusted list|add|rm|clear <path>`), the inverse of
+  protected paths: any operation whose target lies inside a trusted path is
+  always allowed — writes/edits/deletes/overwrites/truncates/in-place edits
+  there pass without prompting, in every mode (like `trusted` mode for just that
+  path).
+- `/guard → paths` now presents two categories: **protected** (the existing
+  custom protected paths, and the default category for `/guard paths …` so the
+  old syntax keeps working) and **trusted**.
+- Protection always outranks trust: a trusted path can never be a protected path.
+  Adding a built-in system path (`.env`/`.ssh`/keys/`node_modules`/build output)
+  or an existing user-protected path is refused, and a protected file inside a
+  trusted subtree (e.g. a `.env` under a trusted dir) still blocks. Adding a
+  trusted path requires an interactive warning confirm (refused without a UI).
+- Trusted-path exemption is applied centrally at every concrete target path: the
+  write/edit tool, bash redirect (incl. truncate), delete, overwrite/rename,
+  truncate, and in-place edit (sed -i / perl -i / ruby -i). Protected-path
+  checks still run first, so a trusted entry never re-enables a protected path.
+- Tests: 13 new assertions (interactive trusted category add, add/list/remove,
+  refusal of system & user-protected paths, pass in strict for write/delete/
+  truncate/in-place/outside-rm, protected file inside a trusted subtree still
+  blocks, removal restores guarding); 168 passing.
+
 ## [1.4.8] — fix mode persistence silently reverting to normal
 
 - Root cause: `/guard` persisted the mode to the project `.pi/settings.json` in a

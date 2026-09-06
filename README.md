@@ -9,9 +9,8 @@ Intercepts destructive operations in tool calls (`bash`, `write`, `edit`): prote
 
 ## Feature highlights
 
-- **🛡 5 protection modes** — `strict` (maximum) / `normal` (default) / `loose` (relaxed) / `trusted` (permissive) / `naked` (off). One built-in decision matrix powers all five; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`).
-- **⚙️ Tune every rule without touching code** — `/guard → rules` lets you customize all 14 guard rules per mode (each **block / confirm / pass**) and reset any rule to its built-in default; only your overrides are stored, the judgement logic is untouched.
-- **📁 Custom protected paths** — `/guard paths add|rm|list|clear <path>` maintains your own protected paths, enforced in **every** mode (including naked), so your critical directories can't be accidentally deleted or overwritten.
+- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 14 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 14 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 14 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，14 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
+- **📁 Protected & trusted paths** — `/guard → paths` splits into two categories: **protected paths** (`/guard paths protected …`, the default) are guarded in **every** mode (incl. naked); **trusted paths** (`/guard paths trusted …`) are **always allowed** — operations on them pass like trusted mode, in any mode. System-important paths can never be trusted (see below). 管理**受保护路径**与**信任路径**两类路径。
 - **🔒 Three-way verdict** — every intercepted operation resolves to **block / confirm / pass**: block refuses outright, confirm asks you, pass executes. How strict the guard is depends entirely on your rules.
 
 > ⚠️ **Security notice**: pi extensions run with full system permissions and can execute arbitrary code. Review the source before installing (this project is open source — see `extensions/path-guard.ts`).
@@ -43,23 +42,45 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive main menu 非法参数 → 兜底弹出交互主菜单
 - The active mode persists across sessions via **global** settings.json (`pathGuard.mode` in `~/.pi/agent/settings.json`), falling back to `normal`. `/guard <mode>` writes it back there. Persistence is intentionally **global-only**, never project-scoped: writing a project `.pi/settings.json` would make the project "trust-requiring", so pi would start asking for trust on the next launch (`defaultProjectTrust=ask`) and a declined/untrusted launch would silently ignore the saved mode — the old behavior that made a saved mode revert to normal. Global settings are never trust-gated, so the mode always survives. 模式跨会话持久化到**全局** settings.json（`~/.pi/agent/settings.json` 的 `pathGuard.mode`），缺省回 `normal`；`/guard <mode>` 切换时回写到该文件。持久化刻意只写**全局**、不写项目：写入项目 `.pi/settings.json` 会让项目变为需信任项目，导致下次启动 pi 弹出信任询问，若项目被拒/未信任则保存的模式会被静默忽略（这正是旧版模式重置为 normal 的根因）。全局设置不受信任判定门控，模式必然保留
-- `/guard paths add|rm|list|clear <path>` — manage custom protected paths, enforced in EVERY mode (incl. naked) 管理自定义受保护路径，任何模式（含 naked）都生效
+- `/guard paths protected add|rm|list|clear <path>` (alias: omit `protected`) — manage custom **protected paths**, enforced in EVERY mode (incl. naked); `/guard paths trusted add|rm|list|clear <path>` — manage **trusted paths** (always allowed, trusted-mode protection; adding one requires a warning confirm; protected/system paths are refused) 管理自定义受保护/信任路径
 - The active mode is shown in the footer status bar (`🛡 <mode>`, `🛡 NAKED` in warning color) 当前模式显示在底部状态栏（`🛡 <mode>`，naked 用警示色 `🛡 NAKED`）
 
-### Custom protected paths / 自定义受保护路径
+### Protected & trusted paths / 受保护路径与信任路径
+
+`/guard → paths` (or `/guard paths`) presents two categories:
+`/guard → paths`（或 `/guard paths`）提供两个分类：
 
 ```text
-/guard paths list            # show configured custom protected paths 列出
-/guard paths add <path>      # add one (absolute or ~/…; symlink-resolved) 新增
-/guard paths rm <path>       # remove 移除
-/guard paths clear           # clear all 清空
+# Protected paths (default category) — guarded in EVERY mode incl. naked 受保护路径
+/guard paths protected list | add <path> | rm <path> | clear
+/guard paths list | add <path> | rm <path> | clear   # same, category defaults to protected
+
+# Trusted paths — always allowed (trusted-mode protection) 信任路径——始终放行
+/guard paths trusted list | add <path> | rm <path> | clear
 ```
 
-Custom paths are checked against the resolved real path and protected in every mode — even `naked` (built-in protected paths are NOT enforced in `naked`; only yours are). They are also settable statically:
-自定义路径按解析后的真实路径匹配，且在任何模式下都被守护——包括 `naked`（内置受保护路径在 `naked` 下不生效，但你自定义的始终生效）。也可在 settings.json 静态配置：
+**Protected paths** are checked against the resolved real path and protected in every mode — even `naked` (built-in protected paths are NOT enforced in `naked`; only yours are). They are also settable statically:
+**受保护路径**按解析后的真实路径匹配，且在任何模式下都被守护——包括 `naked`（内置受保护路径在 `naked` 下不生效，但你自定义的始终生效）。也可在 settings.json 静态配置：
 
 ```jsonc
 "pathGuard": { "extraProtected": ["~/secrets", "/path/to/important.txt"] }
+```
+
+**Trusted paths** are the inverse: path-guard treats every operation whose target lies inside one as if the active mode were `trusted` for just that path — writes/edits/deletes/overwrites/truncates/in-place edits there pass without any prompt, **in every mode** (even `strict`). Protection always outranks trust:
+**信任路径**则相反：落在信任路径内的所有操作都被视为“对该路径采用 trusted 模式的保护”——写入/编辑/删除/覆盖/截断/就地修改一律不弹窗、直接放行，**在任何模式下都生效**（包括 `strict`）。但保护始终优先于信任：
+
+- A trusted path can **never** be a protected path — adding `.env`/`.ssh`/keys/`node_modules`/… (built-in system paths) or an existing user-protected path is **refused**. 信任路径**绝不**可是受保护路径——添加 `.env`/`.ssh`/密钥/`node_modules` 等内置系统路径或已被你设为受保护的路径会被**拒绝**。
+- A protected file **inside** a trusted subtree is still blocked (e.g. a `.env` under a trusted dir stays protected). 即便信任目录里出现受保护文件也仍会被拦截（如信任目录下的 `.env` 依旧受保护）。
+- Adding a trusted path requires an interactive **warning confirm** (refused without a UI). 添加信任路径需要**警告确认**（无 UI 下拒绝）。
+
+Also settable statically:
+也可在 settings.json 静态配置：
+
+```jsonc
+"pathGuard": {
+  "extraProtected": ["~/secrets"],
+  "trustedPaths":   ["/path/to/scratch-or-build-dir"]
+}
 ```
 
 ### Tunable rules / 可调规则
@@ -118,13 +139,13 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 ## Development / 开发与测试
 
-Automated tests (155 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), and per-mode rule overrides:
+Automated tests (168 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（155 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、按模式规则覆盖等流程：
+自动化测试（168 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
@@ -132,7 +153,7 @@ cd tests && node --experimental-strip-types test-pathguard.ts
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.4.8**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.5.0**.
 
 ## License
 

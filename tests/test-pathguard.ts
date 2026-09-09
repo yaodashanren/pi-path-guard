@@ -1853,6 +1853,173 @@ check(
 	"confirm",
 );
 
+// ── runScript rules: source / . / <shell> script.sh (path-aware + tunable) ──
+const SCRIPT_IN = join(P2, "runin.sh");
+const SCRIPT_OUT = join(OUT, "runout.sh");
+writeFileSync(SCRIPT_IN, "echo hi\n");
+writeFileSync(SCRIPT_OUT, "echo hi\n");
+const TRUST_SCRIPT_DIR = join(OUT, "trustscript");
+const TRUST_SCRIPT = join(TRUST_SCRIPT_DIR, "t.sh");
+mkdirSync(TRUST_SCRIPT_DIR, { recursive: true });
+writeFileSync(TRUST_SCRIPT, "echo hi\n");
+
+// normal: in→confirm, out→confirm, built-in protected→confirm, user-protected→block
+await setMode("normal");
+check(
+	"source in-project script (normal) → confirm",
+	(await runCmd(`source ${SCRIPT_IN}`, P2)).verdict,
+	"confirm",
+);
+check(
+	"source outside script (normal) → confirm",
+	(await runCmd(`source ${SCRIPT_OUT}`, P2)).verdict,
+	"confirm",
+);
+check(
+	"bash in-project script (normal) → confirm",
+	(await runCmd(`bash ${SCRIPT_IN}`, P2)).verdict,
+	"confirm",
+);
+check(
+	"bash outside script (normal) → confirm",
+	(await runCmd(`bash ${SCRIPT_OUT}`, P2)).verdict,
+	"confirm",
+);
+check(
+	"source built-in protected .env (normal) → confirm",
+	(await runCmd(`source ${P2}/.env`, P2)).verdict,
+	"confirm",
+);
+check(
+	"source user-protected secret (normal) → block",
+	(await runCmd(`source ${SECRET}`, P2)).verdict,
+	"block",
+);
+check(
+	"source $HOME variable (normal) → confirm",
+	(await runCmd('source "$HOME/.bashrc"', P2)).verdict,
+	"confirm",
+);
+
+// strict: in→confirm, out→block, built-in protected→block, user-protected→block
+await setMode("strict");
+check(
+	"source in-project script (strict) → confirm",
+	(await runCmd(`source ${SCRIPT_IN}`, P2)).verdict,
+	"confirm",
+);
+check(
+	"source outside script (strict) → block",
+	(await runCmd(`source ${SCRIPT_OUT}`, P2)).verdict,
+	"block",
+);
+check(
+	"bash outside script (strict) → block",
+	(await runCmd(`bash ${SCRIPT_OUT}`, P2)).verdict,
+	"block",
+);
+check(
+	"source built-in protected .env (strict) → block",
+	(await runCmd(`source ${P2}/.env`, P2)).verdict,
+	"block",
+);
+check(
+	"source user-protected secret (strict) → block",
+	(await runCmd(`source ${SECRET}`, P2)).verdict,
+	"block",
+);
+
+// loose: in→pass, out→confirm, built-in protected→confirm, user-protected→block
+await setMode("loose");
+check(
+	"source in-project script (loose) → pass",
+	(await runCmd(`source ${SCRIPT_IN}`, P2)).verdict,
+	"pass",
+);
+check(
+	"source outside script (loose) → confirm",
+	(await runCmd(`source ${SCRIPT_OUT}`, P2)).verdict,
+	"confirm",
+);
+check(
+	"source built-in protected .env (loose) → confirm",
+	(await runCmd(`source ${P2}/.env`, P2)).verdict,
+	"confirm",
+);
+check(
+	"source user-protected secret (loose) → block",
+	(await runCmd(`source ${SECRET}`, P2)).verdict,
+	"block",
+);
+
+// trusted: in/out/built-in→pass, user-protected→block
+await setMode("trusted");
+check(
+	"source outside script (trusted) → pass",
+	(await runCmd(`source ${SCRIPT_OUT}`, P2)).verdict,
+	"pass",
+);
+check(
+	"source built-in protected .env (trusted) → pass",
+	(await runCmd(`source ${P2}/.env`, P2)).verdict,
+	"pass",
+);
+check(
+	"source user-protected secret (trusted) → block",
+	(await runCmd(`source ${SECRET}`, P2)).verdict,
+	"block",
+);
+
+// naked: in/out/built-in→pass, user-protected→block (hard block in every mode)
+await setMode("naked");
+check(
+	"source outside script (naked) → pass",
+	(await runCmd(`source ${SCRIPT_OUT}`, P2)).verdict,
+	"pass",
+);
+check(
+	"source built-in protected .env (naked) → pass",
+	(await runCmd(`source ${P2}/.env`, P2)).verdict,
+	"pass",
+);
+check(
+	"source user-protected secret (naked) → block",
+	(await runCmd(`source ${SECRET}`, P2)).verdict,
+	"block",
+);
+
+// trusted path source → pass in strict (trust outranks runScriptOutside)
+await setMode("strict");
+{
+	await commands["guard"].handler(`paths trusted add ${TRUST_SCRIPT_DIR}`, {
+		cwd: P2,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: () => {},
+			confirm: async () => true,
+			theme: themeMock,
+			setStatus: () => {},
+		},
+	});
+	check(
+		"source inside a trusted path (strict) → pass",
+		(await runCmd(`source ${TRUST_SCRIPT}`, P2)).verdict,
+		"pass",
+	);
+	check(
+		"bash inside a trusted path (strict) → pass",
+		(await runCmd(`bash ${TRUST_SCRIPT}`, P2)).verdict,
+		"pass",
+	);
+	await commands["guard"].handler(`paths trusted rm ${TRUST_SCRIPT_DIR}`, {
+		cwd: P2,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: { notify: () => {}, theme: themeMock, setStatus: () => {} },
+	});
+}
+
 // back to normal for tidiness
 await setMode("normal");
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

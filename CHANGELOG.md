@@ -6,6 +6,25 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [1.5.1] — run-script guard: path-aware, tunable `source` / `.` / `bash script.sh`
+
+- New tunable rules **runScriptInProject / runScriptOutside / runScriptProtected**
+  (14 → 17 rules): `source file` / `. file` and shell-interpreter execution
+  (`bash|sh|zsh|dash|ksh [flags] script`) are now judged by **target path**
+  instead of an unconditional confirm.
+- Path-aware: in-project → `runScriptInProject`, outside/HOME →
+  `runScriptOutside`, a built-in protected target (`.env`/`.ssh`/…) →
+  `runScriptProtected`. Defaults: strict = confirm/block/block, normal =
+  confirm/confirm/confirm, loose = pass/confirm/confirm, trusted & naked = pass.
+- User-configured protected paths remain a **hard block in every mode (incl
+  naked)** for script execution — protection outranks the new ladder; a trusted
+  path is always allowed.
+- Interpreter detection requires an existing script file and skips inline code
+  (`bash -c '…'`, handled by the shell-wrapper check); variable/wildcard targets
+  stay conservative (confirm, pass in naked).
+- Tests: 24 new assertions across the 5 modes (`source`/`.`/`bash` ×
+  in/out/built-in-protected/user-protected/trusted/variable); 192 passing.
+
 ## [1.5.0] — trusted paths (always allowed) next to protected paths
 
 - New **trusted paths** concept (`pathGuard.trustedPaths`, or `/guard → paths →

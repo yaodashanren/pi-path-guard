@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.5.0.
+ * recent release/tag is 1.5.1.
  */
 import type {
 	ExtensionAPI,
@@ -236,7 +236,10 @@ type RuleId =
 	| "truncate" // `> existing file` / truncate
 	| "gitDestructive" // git clean -f / reset --hard / checkout . / push --force …
 	| "pipeToShellInProject" // curl/wget/interpreter output piped into a shell (in-workspace)
-	| "pipeToShellOutside"; // … with a remote/outside-workspace source
+	| "pipeToShellOutside" // … with a remote/outside-workspace source
+	| "runScriptInProject" // source/./bash script.sh inside the project
+	| "runScriptOutside" // … outside the project / under HOME
+	| "runScriptProtected"; // … targeting a built-in protected path
 
 const RULE_IDS: readonly RuleId[] = [
 	"blockGroup",
@@ -253,6 +256,9 @@ const RULE_IDS: readonly RuleId[] = [
 	"gitDestructive",
 	"pipeToShellInProject",
 	"pipeToShellOutside",
+	"runScriptInProject",
+	"runScriptOutside",
+	"runScriptProtected",
 ];
 
 /** Bilingual short labels for each tunable rule (used in the rule-editor menu). */
@@ -271,6 +277,10 @@ const RULE_DESCRIPTIONS: Record<RuleId, string> = {
 	gitDestructive: "git destructive reset --hard (Git 破坏性)",
 	pipeToShellInProject: "pipe to shell, in-project (管道进 shell·项目内)",
 	pipeToShellOutside: "pipe to shell, remote/outside (管道进 shell·远程/外)",
+	runScriptInProject: "source/./bash script, in-project (运行脚本·项目内)",
+	runScriptOutside: "source/./bash script, outside/HOME (运行脚本·项目外/HOME)",
+	runScriptProtected:
+		"source/./bash script of a built-in protected path (运行脚本·内置保护)",
 };
 
 const RULE_LEVELS: readonly RuleLevel[] = ["block", "confirm", "pass"];
@@ -302,6 +312,9 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		gitDestructive: "confirm",
 		pipeToShellInProject: "confirm",
 		pipeToShellOutside: "confirm",
+		runScriptInProject: "confirm",
+		runScriptOutside: "block",
+		runScriptProtected: "block",
 	},
 	normal: {
 		blockGroup: "block",
@@ -318,6 +331,9 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		gitDestructive: "confirm",
 		pipeToShellInProject: "pass",
 		pipeToShellOutside: "confirm",
+		runScriptInProject: "confirm",
+		runScriptOutside: "confirm",
+		runScriptProtected: "confirm",
 	},
 	loose: {
 		blockGroup: "block",
@@ -334,6 +350,9 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		gitDestructive: "confirm",
 		pipeToShellInProject: "pass",
 		pipeToShellOutside: "pass",
+		runScriptInProject: "pass",
+		runScriptOutside: "confirm",
+		runScriptProtected: "confirm",
 	},
 	trusted: {
 		blockGroup: "block",
@@ -350,6 +369,9 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		gitDestructive: "confirm",
 		pipeToShellInProject: "pass",
 		pipeToShellOutside: "pass",
+		runScriptInProject: "pass",
+		runScriptOutside: "pass",
+		runScriptProtected: "pass",
 	},
 	naked: {
 		blockGroup: "confirm",
@@ -366,6 +388,9 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		gitDestructive: "pass",
 		pipeToShellInProject: "pass",
 		pipeToShellOutside: "pass",
+		runScriptInProject: "pass",
+		runScriptOutside: "pass",
+		runScriptProtected: "pass",
 	},
 };
 
@@ -1100,7 +1125,7 @@ async function ruleLevelPicker(
 }
 
 /**
- * Rule editor for one mode: shows all 14 rules with their current levels, lets
+ * Rule editor for one mode: shows all 17 rules with their current levels, lets
  * the user set several in a row (each level pick returns here), and offers
  * reset (this mode) + back.
  */
@@ -1474,6 +1499,91 @@ type SegmentVerdict =
 	| { kind: "pass" };
 
 /** Per-segment check: protected redirect → block; dangerous commands → confirm/block; the rest to sub-judges / wrapper recursion */
+/** Shell interpreters whose `<interp> [flags] script.sh` form executes a script file. */
+const SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+
+/**
+ * The script-file target of a `source`/`.` or `<shell-interpreter> script` command,
+ * or null if the command is neither. For interpreters, inline-code forms (`-c`) are
+ * excluded and only an argument that resolves to an existing file counts.
+ */
+function scriptTargetOf(cmdInfo: CmdInfo, realCwd: string): string | null {
+	const cmd = cmdInfo.command;
+	if (cmd === "source" || cmd === ".") {
+		return cmdInfo.args.find((a) => !a.startsWith("-")) ?? null;
+	}
+	if (SHELL_INTERPRETERS.has(cmd)) {
+		if (hasShortFlag(cmdInfo.args, "c") || hasLongFlag(cmdInfo.args, "command")) {
+			return null; // inline code (bash -c '…') — handled by the shell-wrapper check
+		}
+		for (const a of cmdInfo.args) {
+			if (a.startsWith("-")) continue;
+			if (existsSync(resolveReal(resolve(realCwd, expandHome(a))))) return a;
+		}
+		return null;
+	}
+	return null;
+}
+
+/**
+ * `source`/`.` or shell-interpreter script execution verdict — path-aware + tunable:
+ *   - user-protected target → hard block in EVERY mode (incl naked)
+ *   - built-in protected target → runScriptProtected rule (strict block / normal,loose confirm / trusted,naked pass)
+ *   - trusted target → always pass
+ *   - otherwise in-project → runScriptInProject, outside/HOME → runScriptOutside
+ */
+function judgeScript(
+	_trimmed: string,
+	cmdInfo: CmdInfo,
+	realCwd: string,
+): SegmentVerdict {
+	const cmd = cmdInfo.command;
+	const isSource = cmd === "source" || cmd === ".";
+	if (!isSource && !SHELL_INTERPRETERS.has(cmd)) return { kind: "pass" };
+	if (
+		!isSource &&
+		(hasShortFlag(cmdInfo.args, "c") || hasLongFlag(cmdInfo.args, "command"))
+	) {
+		return { kind: "pass" }; // interpreter inline code — not a script file
+	}
+	const target = scriptTargetOf(cmdInfo, realCwd);
+	if (!target) {
+		// `source` with no statically resolvable file → conservative; interpreter with
+		// no existing script file → nothing to run → pass.
+		return isSource && !inNaked() ? { kind: "confirm" } : { kind: "pass" };
+	}
+	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+	}
+	const real = resolveReal(resolve(realCwd, expandHome(target)));
+
+	// User-configured protected paths stay a hard block in every mode (incl naked).
+	if (isUserProtectedPath(real)) {
+		return {
+			kind: "block",
+			reason: `Script execution of user-protected path: ${target}`,
+		};
+	}
+	// Built-in protected paths → per-mode ladder (runScriptProtected).
+	if (matchesProtectedPath(real)) {
+		return ruleVerdict(
+			"runScriptProtected",
+			`Script execution blocked by rule (runScriptProtected): ${target}`,
+		);
+	}
+	// Trusted path → always allowed.
+	if (isTrustedPath(real)) return { kind: "pass" };
+
+	const rule =
+		isOutsideCwd(real, realCwd) || realCwd === HOME
+			? "runScriptOutside"
+			: "runScriptInProject";
+	return ruleVerdict(
+		rule,
+		`Script execution blocked by rule (${rule}): ${target}`,
+	);
+}
+
 function classifySegment(
 	trimmed: string,
 	realCwd: string,
@@ -1552,10 +1662,9 @@ function classifySegment(
 	);
 	if (wrapperVerdict.kind !== "pass") return wrapperVerdict;
 
-	// ④ source / .: runs a script file whose contents can't be statically analyzed → conservative confirm (pass in naked)
-	if (cmdInfo.command === "source" || cmdInfo.command === ".") {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
-	}
+	// ④ source / . / <shell> script.sh: runs a script file → path-aware + tunable
+	const scriptVerdict = judgeScript(trimmed, cmdInfo, realCwd);
+	if (scriptVerdict.kind !== "pass") return scriptVerdict;
 
 	// ⑤-⑪ Pipeline for target-writing commands (git / dd / download / truncate / in-place edit / delete / overwrite / unzip -o)
 	return judgeWriters(trimmed, cmdInfo, realCwd);

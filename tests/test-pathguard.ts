@@ -47,24 +47,32 @@ mod.default(fakePi);
 
 // ── test helpers ────────────────────────────────────────────
 let selectCalls = 0;
+const selectOptions: string[][] = [];
 const themeMock = { fg: (_color: string, s: string) => s };
 async function runTool(
 	toolName: string,
 	input: any,
-	opts: { cwd: string; hasUI?: boolean },
+	opts: {
+		cwd: string;
+		hasUI?: boolean;
+		pick?: (choices: string[]) => string | undefined;
+	},
 ): Promise<{
 	verdict: "block" | "confirm" | "pass";
 	reason?: string;
 	selectCalls: number;
 }> {
 	selectCalls = 0;
+	selectOptions.length = 0;
 	const ctx = {
 		cwd: opts.cwd,
 		hasUI: opts.hasUI ?? true,
 		ui: {
+			notify: () => {},
 			select: async (_msg: string, choices: string[]) => {
 				selectCalls++;
-				return choices[0]; // user picks "Allow"
+				selectOptions.push([...choices]);
+				return opts.pick ? opts.pick(choices) : choices[0]; // default: user picks "Allow"
 			},
 		},
 	};
@@ -1077,6 +1085,58 @@ for (const mode of ["strict", "normal", "loose", "trusted"]) {
 		`${mode} git reset --hard → confirm`,
 		(await runCmd("git reset --hard HEAD", PROJ)).verdict,
 		"confirm",
+	);
+}
+
+// ── #6 git: added destructive forms & narrowed restore ──────
+{
+	await setMode("normal");
+	for (const cmd of [
+		"git checkout -f main",
+		"git checkout --force main",
+		"git worktree remove --force ../wt",
+		"git tag -d v1.0",
+		"git restore .",
+	] as const) {
+		check(
+			`normal ${cmd} → confirm (#6)`,
+			(await runCmd(cmd, PROJ)).verdict,
+			"confirm",
+		);
+	}
+	for (const cmd of [
+		"git restore --source=HEAD~1 -- file.txt",
+		"git restore --source HEAD~1 -- file.txt",
+		"git restore --staged .",
+		"git checkout -b newbranch",
+	] as const) {
+		check(`normal ${cmd} → pass (#6)`, (await runCmd(cmd, PROJ)).verdict, "pass");
+	}
+}
+
+// ── #4 rsync remote target ──────────────────────────────────
+{
+	await setMode("normal");
+	check(
+		"normal rsync user@host:/etc/ → confirm (#4)",
+		(await runCmd("rsync -a dir/ user@host:/etc/", PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"normal rsync host:/backup/ → confirm (#4)",
+		(await runCmd("rsync -a dir/ host:/backup/", PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"normal rsync local new target → pass (#4)",
+		(await runCmd("rsync -a dir/ ./backup_local/", PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"naked rsync user@host:/etc/ → pass (#4)",
+		(await runCmd("rsync -a dir/ user@host:/etc/", PROJ)).verdict,
+		"pass",
 	);
 }
 
@@ -2250,6 +2310,110 @@ await setMode("strict");
 		hasUI: true,
 		ui: { notify: () => {}, theme: themeMock, setStatus: () => {} },
 	});
+}
+
+// ── #10 confirm dialog: session pass (third option) ─────────
+{
+	await setMode("normal");
+	const pickSessionPass = (choices: string[]) =>
+		choices.find((c) => c.includes("pass (session)"));
+
+	const globalBefore = existsSync(FAKE_GLOBAL)
+		? readFileSync(FAKE_GLOBAL, "utf8")
+		: "";
+	// gitDestructive is confirm in normal → the dialog offers the third option
+	const r1 = await runTool(
+		"bash",
+		{ command: "git reset --hard HEAD" },
+		{ cwd: PROJ, pick: pickSessionPass },
+	);
+	check(
+		"third option offered & allows (gitDestructive)",
+		r1.verdict === "block" ? "block" : "allowed",
+		"allowed",
+	);
+	check(
+		"third option present for gitDestructive",
+		selectOptions[0]?.some((o) => o.includes("pass (session)")) ? "yes" : "no",
+		"yes",
+	);
+	const globalAfter = existsSync(FAKE_GLOBAL)
+		? readFileSync(FAKE_GLOBAL, "utf8")
+		: "";
+	check(
+		"session pass not persisted to global settings",
+		globalAfter === globalBefore ? "clean" : "changed",
+		"clean",
+	);
+
+	// Second identical command → no prompt at all (rule now session-pass)
+	check(
+		"session-pass suppresses next prompt",
+		(await runCmd("git reset --hard HEAD", PROJ)).verdict,
+		"pass",
+	);
+
+	// A new session clears session passes → prompts again
+	setGlobalMode("normal");
+	check(
+		"new session re-prompts (session pass cleared)",
+		(await runCmd("git reset --hard HEAD", PROJ)).verdict,
+		"confirm",
+	);
+
+	// confirmGroup (sudo/ssh) is never offered the session pass
+	const r4 = await runTool(
+		"bash",
+		{ command: "sudo ls" },
+		{ cwd: PROJ, pick: pickSessionPass },
+	);
+	check(
+		"confirmGroup has no third option",
+		selectOptions[0]?.some((o) => o.includes("pass (session)")) ? "yes" : "no",
+		"no",
+	);
+	check("confirmGroup missing option → denied", r4.verdict, "block");
+
+	// naked → no third option (only truly dangerous ops confirm there)
+	await setMode("naked");
+	await runTool(
+		"bash",
+		{ command: "mkfs.ext4 /dev/sdb1" },
+		{ cwd: PROJ, pick: pickSessionPass },
+	);
+	check(
+		"naked has no third option",
+		selectOptions[0]?.some((o) => o.includes("pass (session)")) ? "yes" : "no",
+		"no",
+	);
+	await setMode("normal");
+
+	// Multiple rules in one command → a single "N rules" option
+	writeFileSync(join(PROJ, "trunc10.txt"), "data");
+	const multi = `git reset --hard HEAD && echo x > ${PROJ}/trunc10.txt`;
+	const r5 = await runTool(
+		"bash",
+		{ command: multi },
+		{
+			cwd: PROJ,
+			pick: pickSessionPass,
+		},
+	);
+	check(
+		"multi-rule third option label",
+		selectOptions[0]?.some((o) => o.includes("2 rules")) ? "yes" : "no",
+		"yes",
+	);
+	check(
+		"multi-rule pick allows",
+		r5.verdict === "block" ? "block" : "allowed",
+		"allowed",
+	);
+	check(
+		"multi-rule session pass suppresses prompt",
+		(await runCmd(multi, PROJ)).verdict,
+		"pass",
+	);
 }
 
 // back to normal for tidiness

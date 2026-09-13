@@ -132,15 +132,17 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 - **Protected-path interception / 受保护路径拦截**: `.env` / `.envrc` / `.ssh` / `.secrets` / `.aws` / `.kube` / private keys (`*.pem`/`*.key`/`*.p12`/`*.pfx`, `id_rsa`/`id_ed25519`) / credentials / shell configs (`.bashrc` …) / `node_modules` / `dist` / `build` … blocked hard in every mode (except naked) — 任何模式下硬性阻止（naked 除外）
 - **Block group / Block 组危险命令**: `mkfs.*` / `mkswap` / `poweroff` / `reboot` / `shutdown` / `dd` to block devices / `> /dev/sdX` / `find -delete` / `find -exec rm` / `xargs rm`
 - **Confirm group / Confirm 组**: `sudo` / `doas` / `pkexec` / `chmod 777` / `ssh` / `scp` / `sftp` / `rsh` / `telnet` / `wget -O /dev/null`
-- **Overwrite detection / 覆盖检测**: `mv` / `cp` / `install` / `tee` / `ln -f` / `rsync --delete` on existing targets, classified by in/out project — 目标已存在时按内外策略处理
+- **Overwrite detection / 覆盖检测**: `mv` / `cp` / `install` / `tee` / `ln -f` / `rsync --delete` on existing targets, classified by in/out project; rsync/scp **remote** targets (`user@host:/path`, `host:/path`) are never resolved as local paths — 目标已存在时按内外策略处理；rsync/scp 远程目标不会被当成本地路径解析
 - **Redirect truncation / 重定向截断**: `> existing file` (incl. `2>` / `&>` / `>|`, excluding `>>` and devices) → confirm — `> existing file` 截断已有文件需确认（含 `>|`）
 - **Redirect / download / dd target location / 重定向·下载·dd 目标位置**: a redirect (`>`, `>>` …), `dd of=`, `curl -o|-O` or `wget -O` target that lies **outside** the project (or a HOME write) is judged like an overwrite (`writeOutside` / `writeHome` / `overwriteOutsideExisting` / `overwriteOutsideNew`); devices (`/dev/null` …) and trusted paths are exempt — 重定向 / `dd of=` / `curl -o` / `wget -O` 的目标在项目外（或 HOME 下写入）时按覆盖规则判定；设备与信任路径放行
 - **Shell wrapper recursion / shell 包装器递归**: strips `sudo`/`nohup`/`timeout`/`env` … prefixes, recurses into `bash -c` / `eval`; quote-aware tokenization — 前缀剥除后分析真实命令；引号感知分词
-- **git destructive commands / git 破坏性命令**: `clean -f` / `reset --hard` / `checkout -- .` / `branch -D` / `push --force` / `stash drop`
+- **git destructive commands / git 破坏性命令**: `clean -f` / `reset --hard` / `checkout -- .` / `checkout|switch -f|--force` / `restore .` / `worktree remove --force` / `tag -d` / `branch -D` / `push --force` / `stash drop` (a narrow `restore --source=<ref> -- <path>` is not treated as destructive) — `restore --source` 带路径的常规用法不再弹窗
 - **Dangerous pipe-to-shell / 危险管道到 shell**: `curl … \| bash` / `wget -qO- … \| sh` / `python -c '…' \| sh` — strict confirms at all positions; normal passes in-workspace and confirms remote/outside sources; other modes pass (per `pipeToShell*` rules) — 判定 `curl/wget` 等下载或解释器内联代码的输出被管道进 shell 执行
 - **Run-script guard / 运行脚本守护**: `source file` / `. file` / `bash|sh|zsh|dash|ksh [flags] script` are judged by **target path** instead of a blanket confirm — in-project (`runScriptInProject`), outside/HOME (`runScriptOutside`), built-in protected (`runScriptProtected`), each tunable per mode; user-protected targets stay **hard-blocked in every mode (incl naked)** and trusted targets always pass — 按目标路径判定并可按模式调整：项目内 / 项目外 / 内置保护各一条规则；用户自定义保护路径硬拦、信任路径放行
 - **Bypass resistance / 防绕过**: variable/wildcard paths that can't be statically resolved always confirm; command substitutions (`$(...)` / backticks) are recursively judged; any hard block in a compound command blocks the whole thing — 变量/通配符路径一律 confirm；命令替换（`$(...)` / 反引号）递归判定；复合命令任一段硬性阻止则整体阻止
 - **Block escape hints / 拦截提示**: every block message appends a short, category-aware "To run anyway / 如需执行:" hint — an English hint followed by the Chinese note on its own indented line — user-configured protected paths suggest `/guard paths rm`, built-in protected paths & system-destructive commands point to `/guard naked`, rule-level blocks suggest `/guard loose` or `/guard rules` — 每次拦截都会附一条按类别给出的解除建议：英文提示一行、中文注释另起一行缩进（头部 `To run anyway / 如需执行:`）
+
+- **Session pass from the confirm dialog / 弹窗内会话级放行**: every confirm prompt offers a third option `🔓 Allow & set <rule> = pass (session)` (multiple rules → `N rules`), so a repeated prompt can be answered in place without opening `/guard rules`; the pass is in-memory only (never persisted, cleared on a new session) and is not offered for `confirmGroup` (sudo/ssh/chmod 777), system-destructive commands, or in naked mode — 确认弹窗提供会话级放行第三选项，仅内存生效（不落盘、新会话清除）；`confirmGroup`、系统级破坏命令与 naked 模式不提供
 
 ### Known limitations / 已知边界
 
@@ -152,13 +154,13 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 ## Development / 开发与测试
 
-Automated tests (230 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
+Automated tests (254 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（230 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
+自动化测试（254 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
@@ -166,7 +168,7 @@ cd tests && node --experimental-strip-types test-pathguard.ts
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.5.4**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.5.5**.
 
 ## License
 

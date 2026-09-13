@@ -4,7 +4,27 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.5.5] — confirm-dialog session pass & remote/git coverage
+
+### Confirm dialog — session pass (10)
+
+- The confirm prompt now offers a third option, `🔓 Allow & set <rule> = pass
+  (session)` (multiple rules → `N rules`), so a repeated prompt can be answered
+  in place instead of opening `/guard rules`. The pass is **in-memory only** —
+  never persisted, and cleared on a new session. It is never offered for
+  `confirmGroup` (sudo/ssh/chmod 777), system-destructive commands, or in naked
+  mode; the rules matrix (`/guard rules` → overview) lists session-only passes.
+- Tests: 11 new assertions; 254 passing.
+
+### rsync/scp remote targets (4) & git coverage (6)
+
+- rsync/scp remote targets (`user@host:/path`, `host:/path`, `user@host::module`,
+  `rsync://host/path`) are no longer resolved as local in-project paths — a write
+  to a remote host now confirms (passes in naked) instead of silently passing.
+- git: added `checkout|switch -f/--force`, `worktree remove --force` and
+  `tag -d`; narrowed `restore` — only a whole-tree restore (`.`) is destructive,
+  `--source=<ref> -- <path>` no longer fires, and `--staged`-only restores pass.
+- Tests: 13 new assertions; 243 passing.
 
 ## [1.5.4] — redirect/path edge cases (`~user`, `>|`, persist failure notice)
 

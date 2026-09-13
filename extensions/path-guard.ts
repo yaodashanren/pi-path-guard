@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.5.4.
+ * recent release/tag is 1.5.5.
  */
 import type {
 	ExtensionAPI,
@@ -430,6 +430,9 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 
 /** Effective rule level for the current mode (settings override ?? built-in default). */
 function rl(rule: RuleId): RuleLevel {
+	// A confirm dialog's "Allow & set … = pass (session)" outranks config/defaults
+	// for the rest of this session (never persisted).
+	if (isSessionPassed(currentMode, rule)) return "pass";
 	return config.rules[currentMode]?.[rule] ?? DEFAULT_MODES[currentMode][rule];
 }
 
@@ -442,7 +445,7 @@ function rlFor(mode: GuardMode, rule: RuleId): RuleLevel {
 function ruleVerdict(rule: RuleId, blockReason: string): SegmentVerdict {
 	const lvl = rl(rule);
 	if (lvl === "block") return { kind: "block", reason: blockReason };
-	if (lvl === "confirm") return { kind: "confirm" };
+	if (lvl === "confirm") return { kind: "confirm", rule };
 	return { kind: "pass" };
 }
 
@@ -587,6 +590,33 @@ let config: PathGuardConfig = {
 	trustedPaths: [],
 	rules: {},
 };
+
+/**
+ * Session-only rule passes set from a confirm dialog's "Allow & set … = pass
+ * (session)" option. Kept separate from `config.rules` so that a later
+ * persistConfig (e.g. /guard rules) can never write them to disk — a new session
+ * reverts to the configured / built-in levels.
+ */
+const sessionPass: Partial<Record<GuardMode, Set<RuleId>>> = {};
+
+/** Whether a rule was session-passed from a confirm dialog. */
+function isSessionPassed(mode: GuardMode, rule: RuleId): boolean {
+	return sessionPass[mode]?.has(rule) ?? false;
+}
+
+/** Session-pass one or more rules for a mode (in-memory only, never persisted). */
+function sessionPassRule(mode: GuardMode, rule: RuleId): void {
+	(sessionPass[mode] ??= new Set()).add(rule);
+}
+
+/** Drop session-pass overrides (one mode, or all) — used when rules are edited. */
+function clearSessionPass(mode?: GuardMode): void {
+	if (mode) {
+		delete sessionPass[mode];
+		return;
+	}
+	for (const m of GUARD_MODES) delete sessionPass[m];
+}
 
 /** Read and validate the raw pathGuard block from a settings.json file, or undefined. */
 function readSettingsGuard(
@@ -1094,7 +1124,15 @@ function rulesMatrix(): string {
 			GUARD_MODES.map((mo) => cell(rlFor(mo, r)).padStart(8)).join("")
 		);
 	});
-	return `Path Guard effective rules matrix (B=block ?=confirm .=pass):\n${head}\n${rows.join("\n")}`;
+	// Surface confirm-dialog session passes — they are not in `config.rules`.
+	const session: string[] = [];
+	for (const mo of GUARD_MODES) {
+		for (const r of sessionPass[mo] ?? []) session.push(`${mo}.${r}`);
+	}
+	const note = session.length
+		? `\n\nSession-only pass (not persisted): ${session.sort().join(", ")}`
+		: "";
+	return `Path Guard effective rules matrix (B=block ?=confirm .=pass):\n${head}\n${rows.join("\n")}${note}`;
 }
 
 /** Human-readable list of the current rule overrides (or a notice if none). */
@@ -1148,6 +1186,7 @@ async function ruleLevelPicker(
 	if (op === "back") return;
 	if (op === "reset") {
 		if (config.rules[mode]) delete config.rules[mode]![rule];
+		clearSessionPass(mode);
 		const where = persistRules(ctx);
 		ctx.ui.notify(
 			`Path Guard: ${mode}.${rule} back to default ${dflt} (${persistNote(where)})`,
@@ -1157,6 +1196,7 @@ async function ruleLevelPicker(
 	}
 	if (isRuleLevel(op)) {
 		(config.rules[mode] ??= {})[rule] = op;
+		clearSessionPass(mode);
 		const where = persistRules(ctx);
 		ctx.ui.notify(
 			`Path Guard: set ${mode}.${rule} = ${op} (${persistNote(where)})`,
@@ -1197,6 +1237,7 @@ async function runModeEditor(
 			);
 			if (!ok) continue;
 			delete config.rules[mode];
+			clearSessionPass(mode);
 			const where = persistRules(ctx);
 			ctx.ui.notify(
 				`Path Guard: reset mode ${mode} to defaults (${persistNote(where)})`,
@@ -1245,6 +1286,7 @@ async function runModeSubmenu(ctx: ExtensionCommandContext): Promise<void> {
 			);
 			if (!ok) continue;
 			delete config.rules[mo];
+			clearSessionPass(mo);
 			const where = persistRules(ctx);
 			ctx.ui.notify(
 				`Path Guard: reset mode ${mo} to defaults (${persistNote(where)})`,
@@ -1294,6 +1336,7 @@ async function runRulesMenu(ctx: ExtensionCommandContext): Promise<void> {
 			);
 			if (!ok) continue;
 			config.rules = {};
+			clearSessionPass();
 			const where = persistRules(ctx);
 			ctx.ui.notify(
 				`Path Guard: cleared all rule overrides (${persistNote(where)})`,
@@ -1310,6 +1353,7 @@ export default function (pi: ExtensionAPI) {
 	// fire session_start): active mode + user protected paths + rule overrides.
 	pi.on("session_start", (_event, ctx) => {
 		config = readSavedConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+		clearSessionPass();
 		extraProtected = config.extraProtected;
 		trustedPaths = config.trustedPaths;
 		setMode(config.mode, ctx.ui);
@@ -1456,6 +1500,7 @@ function checkWriteEdit(
 				outside
 					? `⚠️ File path is outside the project directory\n\nPath: ${real}\nProject: ${realCwd}`
 					: `⚠️ Write operation in HOME directory\n\nPath: ${real}\nHOME: ${HOME}\n\nConfirm write?`,
+				[rule],
 			);
 		}
 		return; // pass
@@ -1473,6 +1518,7 @@ function checkWriteEdit(
 		return askConfirm(
 			ctx,
 			`⚠️ strict mode: in-project write operation\n\nPath: ${real}\n\nConfirm write?`,
+			["writeInProject"],
 		);
 	}
 	return; // In-project and safe: allow
@@ -1492,6 +1538,7 @@ function checkBashCommand(
 	// then decide once — so an early return from the first guarded segment can't skip later ones
 	const blockReasons: string[] = [];
 	const confirmNeeded: string[] = [];
+	const confirmRules = new Set<RuleId>();
 
 	// Dangerous pipe-to-shell (curl … | bash, python -c '…' | sh) — the pipe
 	// crosses segments, so scan the raw command before the per-segment loop.
@@ -1500,6 +1547,7 @@ function checkBashCommand(
 		blockReasons.push(pipeVerdict.reason);
 	} else if (pipeVerdict.kind === "confirm") {
 		confirmNeeded.push(command.trim());
+		if (pipeVerdict.rule) confirmRules.add(pipeVerdict.rule);
 	}
 
 	for (const seg of splitSegments(command)) {
@@ -1511,6 +1559,7 @@ function checkBashCommand(
 			blockReasons.push(verdict.reason);
 		} else if (verdict.kind === "confirm") {
 			confirmNeeded.push(trimmed);
+			if (verdict.rule) confirmRules.add(verdict.rule);
 		}
 	}
 
@@ -1528,6 +1577,7 @@ function checkBashCommand(
 			`⚠️ Commands requiring confirmation\n\n${confirmNeeded
 				.map((s) => `· ${s}`)
 				.join("\n")}\n\nConfirm execution?`,
+			[...confirmRules],
 		);
 	}
 	return; // Safe command: allow
@@ -1536,7 +1586,7 @@ function checkBashCommand(
 /** Verdict for a single segment */
 type SegmentVerdict =
 	| { kind: "block"; reason: string }
-	| { kind: "confirm" }
+	| { kind: "confirm"; rule?: RuleId }
 	| { kind: "pass" };
 
 /** Per-segment check: protected redirect → block; dangerous commands → confirm/block; the rest to sub-judges / wrapper recursion */
@@ -1770,7 +1820,14 @@ function classifySegment(
 
 	const outer = classifySegmentOuter(trimmed, realCwd, hasUI, depth);
 	if (outer.kind === "block") return outer;
-	if (outer.kind === "confirm" || subConfirm) return { kind: "confirm" };
+	if (outer.kind === "confirm" || subConfirm) {
+		// Preserve the rule id when the outer verdict is rule-driven (enables the
+		// confirm dialog's session-pass option); a substitution-only confirm has none.
+		return {
+			kind: "confirm",
+			rule: outer.kind === "confirm" ? outer.rule : undefined,
+		};
+	}
 	return { kind: "pass" };
 }
 
@@ -1976,18 +2033,37 @@ function judgeGit(
 		return ruleVerdict("gitDestructive", "git clean --force blocked by rule");
 	if (sub === "reset" && args.includes("--hard"))
 		return ruleVerdict("gitDestructive", "git reset --hard blocked by rule");
-	if (sub === "checkout" && (args.includes("--") || args.includes(".")))
+	if (
+		(sub === "checkout" || sub === "switch") &&
+		(args.includes("--") || args.includes(".") || hasForceFlag(args))
+	)
 		return ruleVerdict(
 			"gitDestructive",
 			"git checkout destructive blocked by rule",
 		);
-	if (sub === "restore" && (args.includes(".") || args.includes("--source")))
-		return ruleVerdict(
-			"gitDestructive",
-			"git restore destructive blocked by rule",
-		);
+	// `git restore` writes the working tree. Only a whole-tree restore (`.`) counts
+	// as destructive; `--source=<ref> -- <path>` is a routine operation and must
+	// not trigger on its own. `--staged`-only restores touch the index, not files.
+	if (sub === "restore") {
+		const stagedOnly =
+			(args.includes("--staged") || args.includes("-S")) &&
+			!args.includes("--worktree") &&
+			!args.includes("-W");
+		if (!stagedOnly && args.includes("."))
+			return ruleVerdict(
+				"gitDestructive",
+				"git restore destructive blocked by rule",
+			);
+	}
 	if (sub === "branch" && args.some((a) => a === "-D"))
 		return ruleVerdict("gitDestructive", "git branch -D blocked by rule");
+	if (sub === "worktree" && args.includes("remove") && hasForceFlag(args))
+		return ruleVerdict(
+			"gitDestructive",
+			"git worktree remove --force blocked by rule",
+		);
+	if (sub === "tag" && (args.includes("-d") || args.includes("--delete")))
+		return ruleVerdict("gitDestructive", "git tag -d blocked by rule");
 	if (
 		sub === "push" &&
 		args.some((a) => a === "-f" || a === "--force" || a === "--force-with-lease")
@@ -2109,6 +2185,11 @@ function judgeOverwrite(
 
 	// Variable/wildcard not statically resolvable → conservative confirm (pass in naked)
 	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+	}
+	// rsync/scp remote target (user@host:/path) is not a local path — resolving it
+	// would fake an in-project path. Writing to a remote host → conservative confirm.
+	if (isRemoteTarget(target)) {
 		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 
@@ -2537,7 +2618,7 @@ function pipeSourceIsExternal(sourceText: string, realCwd: string): boolean {
 function scanPipeToShell(text: string, realCwd: string): SegmentVerdict {
 	const groups = pipeGroups(text);
 	const anyBlock: string[] = [];
-	let anyConfirm = false;
+	let confirmRule: RuleId | undefined;
 	for (let i = 1; i < groups.length; i++) {
 		const right = parseCommand(groups[i]);
 		if (!right || !SHELL_WRAPPERS.has(right.command)) continue;
@@ -2549,12 +2630,12 @@ function scanPipeToShell(text: string, realCwd: string): SegmentVerdict {
 		const reason = `Piping ${left.command} output into ${right.command} (potentially untrusted code): ${groups[i - 1]} | ${groups[i]}`;
 		const lvl = rl(rule);
 		if (lvl === "block") anyBlock.push(reason);
-		else if (lvl === "confirm") anyConfirm = true;
+		else if (lvl === "confirm") confirmRule = rule;
 	}
 	if (anyBlock.length > 0) {
 		return { kind: "block", reason: anyBlock.join("\n") };
 	}
-	if (anyConfirm) return { kind: "confirm" };
+	if (confirmRule) return { kind: "confirm", rule: confirmRule };
 	return { kind: "pass" };
 }
 
@@ -2682,6 +2763,20 @@ function expandHome(p: string): string {
 /** Whether a path token carries shell variable/glob syntax that can't be statically resolved */
 function isUnresolvedTarget(p: string): boolean {
 	return p.includes("$") || p.includes("*") || p.includes("?");
+}
+
+/**
+ * Whether a command operand is an rsync/scp-style remote target
+ * (`user@host:/path`, `host:/path`, `user@host::module`, `rsync://host/path`).
+ * Remote targets must never be resolved as local (in-project) paths.
+ */
+function isRemoteTarget(p: string): boolean {
+	if (p.startsWith("rsync://")) return true;
+	// user@host:path (also git@github.com:owner/repo)
+	if (/^[^/@:\s]+@[^/:\s]+:/.test(p)) return true;
+	// host:path (no user, and not a local path like /foo or ./bar)
+	if (/^[^/@:\s]+:/.test(p)) return true;
+	return false;
 }
 
 /** Redirect target: { op, target }; null if none */
@@ -2876,9 +2971,16 @@ async function confirmModeSwitch(
 	return true;
 }
 
+/**
+ * Tunable rules never offered the confirm dialog's session-pass shortcut:
+ * `confirmGroup` (sudo/ssh/chmod 777) and `blockGroup` (system-destructive).
+ */
+const SESSION_PASS_EXCLUDED = new Set<RuleId>(["confirmGroup", "blockGroup"]);
+
 async function askConfirm(
 	ctx: ExtensionContext,
 	message: string,
+	confirmRules: RuleId[] = [],
 ): Promise<ToolCallEventResult | undefined> {
 	if (!ctx.hasUI) {
 		return {
@@ -2887,8 +2989,32 @@ async function askConfirm(
 		};
 	}
 
-	const choice = await ctx.ui.select(message, ["✅ Allow", "❌ Deny"]);
+	// Third option: allow this once and session-pass the triggering rule(s). Shown
+	// only outside naked (where a confirm already means "very dangerous") and never
+	// for an excluded rule.
+	const eligible =
+		currentMode === "naked"
+			? []
+			: [...new Set(confirmRules)].filter((r) => !SESSION_PASS_EXCLUDED.has(r));
+	const options = ["✅ Allow", "❌ Deny"];
+	let passChoice: string | null = null;
+	if (eligible.length === 1) {
+		passChoice = `🔓 Allow & set ${eligible[0]} = pass (session)`;
+	} else if (eligible.length > 1) {
+		passChoice = `🔓 Allow & set ${eligible.length} rules = pass (session)`;
+	}
+	if (passChoice) options.push(passChoice);
 
+	const choice = await ctx.ui.select(message, options);
+
+	if (passChoice && choice === passChoice) {
+		for (const r of eligible) sessionPassRule(currentMode, r);
+		ctx.ui.notify(
+			`Path Guard: ${eligible.join(", ")} = pass for this session (not persisted)`,
+			"info",
+		);
+		return undefined; // allow this operation
+	}
 	if (choice !== "✅ Allow") {
 		return { block: true, reason: "User denied the operation" };
 	}

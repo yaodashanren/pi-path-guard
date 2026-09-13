@@ -6,6 +6,21 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [1.5.4] — redirect/path edge cases (`~user`, `>|`, persist failure notice)
+
+### Redirect / path edge cases (12)
+
+- `~user` (another user's home) is no longer silently treated as an in-project
+  relative path: it is anchored outside the project so the outside-project rules
+  apply (conservative confirm instead of a silent pass).
+- `>|` / `2>|` (the noclobber override) is now recognized as a truncating
+  clobber instead of being split off as a pipe — `>| existing-file` confirms.
+- Persist failures are no longer silent: the session-only notice now includes
+  the reason global settings could not be written.
+- README known-limitations section: `~user` wording updated (not expanded, but
+  treated as outside the project).
+- Tests: 5 new assertions; 230 passing.
+
 ## [1.5.3] — expanded protected paths & known-limitations docs
 
 ### Protected paths — expanded list & fewer `credentials.*` false positives

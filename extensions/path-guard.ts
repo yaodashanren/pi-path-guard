@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.5.3.
+ * recent release/tag is 1.5.4.
  */
 import type {
 	ExtensionAPI,
@@ -679,6 +679,9 @@ function readSavedConfig(
  * saved mode revert to normal. Global settings are never trust-gated, so the mode the
  * user sets always survives. Returns "global" on success, "none" when there is no cwd.
  */
+/** Reason the last persistConfig call fell back to session-only (empty on success). */
+let lastPersistError = "";
+
 function persistConfig(cwd: string | undefined): string {
 	if (!cwd) return "none";
 	const target = globalSettingsPath();
@@ -706,8 +709,10 @@ function persistConfig(cwd: string | undefined): string {
 		}
 		data.pathGuard = guard;
 		writeFileSync(target, JSON.stringify(data, null, 2) + "\n", "utf8");
+		lastPersistError = "";
 		return "global";
-	} catch {
+	} catch (e) {
+		lastPersistError = e instanceof Error ? e.message : String(e);
 		return "none";
 	}
 }
@@ -715,7 +720,9 @@ function persistConfig(cwd: string | undefined): string {
 /** Human-readable persistence note for notify messages. */
 function persistNote(where: string): string {
 	if (where === "global") return "saved to global settings";
-	return "session-only (not persisted)";
+	return lastPersistError
+		? `session-only — could not write global settings: ${lastPersistError}`
+		: "session-only (not persisted)";
 }
 
 /** Path Guard paths usage message. */
@@ -2664,6 +2671,11 @@ function extractPathArgs(
 function expandHome(p: string): string {
 	if (p === "~") return HOME;
 	if (p.startsWith("~/")) return join(HOME, p.slice(2));
+	// Foreign home (~user/...) can't be resolved statically and must never be
+	// mistaken for an in-project relative path. Anchor it at the filesystem root
+	// so the outside-project rules apply (conservative confirm / block instead
+	// of a silent in-project pass).
+	if (p.startsWith("~")) return "/" + p;
 	return p;
 }
 
@@ -2681,7 +2693,7 @@ interface RedirectTarget {
 /** Extract the redirect write target (> file, 2>>file, &> file, ...); null if none */
 function extractRedirectTarget(fullCommand: string): RedirectTarget | null {
 	const tokens = splitShellTokens(fullCommand);
-	const REDIR = /^([0-9]*&?>+)(.*)$/;
+	const REDIR = /^([0-9]*&?>>?\|?)(.*)$/;
 	for (let i = 0; i < tokens.length; i++) {
 		const m = REDIR.exec(tokens[i]);
 		if (!m) continue;
@@ -2698,8 +2710,10 @@ function extractRedirectTarget(fullCommand: string): RedirectTarget | null {
 	return null;
 }
 
-/** Whether the operator is truncating (single >, not >> append) */
+/** Whether the operator is truncating (single >, or the >| noclobber override — not >> append) */
 function isTruncatingOp(op: string): boolean {
+	// `>|` / `2>|` explicitly clobber a file even under noclobber → truncating
+	if (op.endsWith("|")) return true;
 	return op.endsWith(">") && !op.endsWith(">>");
 }
 
@@ -2751,8 +2765,10 @@ function splitSegments(input: string): string[] {
 			continue;
 		}
 		if (!inSingle && !inDouble) {
+			// `>|` / `>>|` is the noclobber redirect override, not a pipe separator
+			const noclobber = ch === "|" && input[i - 1] === ">";
 			const isSep =
-				ch === "|" ||
+				(ch === "|" && !noclobber) ||
 				ch === ";" ||
 				ch === "\n" ||
 				(ch === "&" && input[i + 1] === "&");

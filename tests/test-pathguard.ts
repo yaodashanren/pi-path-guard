@@ -950,6 +950,35 @@ writeFileSync(join(PROJ, "redir_in.txt"), "data");
 	);
 }
 
+// ── #12a foreign home / #12b >| noclobber override ──────────
+{
+	await setMode("normal");
+	// ~user can't be resolved statically → must not be mistaken for in-project
+	check(
+		"normal redirect to ~user → confirm (#12a)",
+		(await runCmd("echo x > ~otheruser/secret.txt", PROJ)).verdict,
+		"confirm",
+	);
+	// >| is an explicit clobber → truncating, confirm on the existing file
+	writeFileSync(join(PROJ, "noclob.txt"), "data");
+	check(
+		"normal >| existing file → confirm (#12b)",
+		(await runCmd(`echo x >| ${PROJ}/noclob.txt`, PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"normal >| new in-project file → pass (#12b)",
+		(await runCmd(`echo x >| ${PROJ}/noclob_new.txt`, PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"naked redirect to ~user → pass (#12a)",
+		(await runCmd("echo x > ~otheruser/secret.txt", PROJ)).verdict,
+		"pass",
+	);
+}
+
 // ── #2 dd / curl / wget: outside target ─────────────────────
 {
 	await setMode("normal");
@@ -1406,6 +1435,31 @@ check(
 	"session_start restores saved global mode",
 	(await currentModeShown()).includes("loose") ? "loose" : "?",
 	"loose",
+);
+
+// E. persist write failure → notify includes the reason (#12c)
+const persistFailNotify: string[] = [];
+const prevSettingsPath = process.env.PI_PATH_GUARD_SETTINGS;
+process.env.PI_PATH_GUARD_SETTINGS =
+	"/tmp/pgtest/missing-dir-xyz/settings.json";
+await commands["guard"].handler("loose", {
+	cwd: PERSIST,
+	isProjectTrusted: () => true,
+	hasUI: true,
+	ui: {
+		notify: (m: string) => persistFailNotify.push(m),
+		confirm: async () => true,
+		theme: themeMock,
+		setStatus: () => {},
+	},
+});
+process.env.PI_PATH_GUARD_SETTINGS = prevSettingsPath;
+check(
+	"persist failure reports reason (#12c)",
+	persistFailNotify.join(" ").includes("could not write global settings")
+		? "reason"
+		: "?",
+	"reason",
 );
 
 // D. persisted naked/trusted mode warns on session_start (no silent unprotected session)

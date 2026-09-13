@@ -863,6 +863,146 @@ for (const mode of ["strict", "normal", "loose", "trusted"]) {
 	);
 }
 
+// ── #1 redirect: variable / wildcard / outside target ───────
+writeFileSync(join(PROJ, "redir_in.txt"), "data");
+{
+	await setMode("normal");
+	check(
+		"normal redirect to variable → confirm",
+		(await runCmd("echo x > $F", PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"normal redirect to wildcard → confirm",
+		(await runCmd(`echo x > ${PROJ}/redir_*.txt`, PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"normal redirect to outside new file → confirm",
+		(await runCmd(`echo x > ${OUT}/redir_new.txt`, PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"normal redirect in-project new file → pass",
+		(await runCmd(`echo x > ${PROJ}/redir_in_new.txt`, PROJ)).verdict,
+		"pass",
+	);
+	await setMode("strict");
+	check(
+		"strict redirect to outside new file → confirm",
+		(await runCmd(`echo x > ${OUT}/redir_new3.txt`, PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("loose");
+	check(
+		"loose redirect to outside new file → pass",
+		(await runCmd(`echo x > ${OUT}/redir_new2.txt`, PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"naked redirect to variable → pass",
+		(await runCmd("echo x > $F", PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"naked redirect to outside new file → pass",
+		(await runCmd(`echo x > ${OUT}/redir_new4.txt`, PROJ)).verdict,
+		"pass",
+	);
+}
+
+// ── #2 dd / curl / wget: outside target ─────────────────────
+{
+	await setMode("normal");
+	check(
+		"normal curl -o outside new → confirm",
+		(await runCmd(`curl https://example.com/x -o ${OUT}/dl_new.txt`, PROJ))
+			.verdict,
+		"confirm",
+	);
+	check(
+		"normal wget -O outside new → confirm",
+		(await runCmd(`wget -O ${OUT}/dl_new2.txt https://example.com/x`, PROJ))
+			.verdict,
+		"confirm",
+	);
+	check(
+		"normal curl -o in-project → pass",
+		(await runCmd(`curl https://example.com/x -o ${PROJ}/dl_in.txt`, PROJ))
+			.verdict,
+		"pass",
+	);
+	check(
+		"normal dd of= outside new → confirm",
+		(await runCmd(`dd if=/dev/zero of=${OUT}/dd_new.bin count=1`, PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"normal dd of=/dev/null → pass",
+		(await runCmd("dd if=/dev/zero of=/dev/null count=1", PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"normal curl -o /dev/null → pass",
+		(await runCmd("curl https://example.com/x -o /dev/null", PROJ)).verdict,
+		"pass",
+	);
+	await setMode("loose");
+	check(
+		"loose curl -o outside new → pass",
+		(await runCmd(`curl https://example.com/x -o ${OUT}/dl_new3.txt`, PROJ))
+			.verdict,
+		"pass",
+	);
+}
+
+// ── #3 command substitution $(...) / backticks ──────────────
+{
+	await setMode("normal");
+	check(
+		"normal $() rm outside → block",
+		(await runCmd(`echo "$(rm -rf ${OUT}/sub1.txt)"`, PROJ)).verdict,
+		"block",
+	);
+	check(
+		"normal $() rm in-project → confirm",
+		(await runCmd(`echo "$(rm ${PROJ}/inside.txt)"`, PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"normal backtick rm outside → block",
+		(await runCmd("echo `rm -rf " + OUT + "/sub2.txt`", PROJ)).verdict,
+		"block",
+	);
+	check(
+		"normal nested $() rm outside → block",
+		(await runCmd(`echo "$(echo "$(rm -rf ${OUT}/sub3.txt)")"`, PROJ)).verdict,
+		"block",
+	);
+	check(
+		"normal var-assign $() rm outside → block",
+		(await runCmd(`X=$(rm -rf ${OUT}/sub4.txt)`, PROJ)).verdict,
+		"block",
+	);
+	check(
+		"normal benign $() → pass",
+		(await runCmd('echo "$(date)"', PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"normal single-quoted $() is literal → pass",
+		(await runCmd(`echo '$(rm -rf ${OUT}/sub5.txt)'`, PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"naked $() rm outside → pass",
+		(await runCmd(`echo "$(rm -rf ${OUT}/sub6.txt)"`, PROJ)).verdict,
+		"pass",
+	);
+}
+
 // ── git destructive: confirm in every mode ──────────────────
 for (const mode of ["strict", "normal", "loose", "trusted"]) {
 	await setMode(mode);

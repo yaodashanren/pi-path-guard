@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.5.1.
+ * recent release/tag is 1.5.2.
  */
 import type {
 	ExtensionAPI,
@@ -1584,20 +1584,171 @@ function judgeScript(
 	);
 }
 
+/**
+ * Extract command substitutions (`$(...)` and backticks) from a command segment.
+ * Substitutions inside single quotes are literal, so they are skipped. Nested
+ * `$()` bodies are returned whole and handled by the recursive call.
+ */
+function extractCommandSubstitutions(input: string): string[] {
+	const results: string[] = [];
+	let i = 0;
+	let inSingle = false;
+	let inDouble = false;
+	while (i < input.length) {
+		const ch = input[i];
+		if (ch === "\\") {
+			i += 2;
+			continue;
+		}
+		if (ch === "'" && !inDouble) {
+			inSingle = !inSingle;
+			i++;
+			continue;
+		}
+		if (ch === '"' && !inSingle) {
+			inDouble = !inDouble;
+			i++;
+			continue;
+		}
+		if (inSingle) {
+			i++;
+			continue;
+		}
+		// Backtick substitution
+		if (ch === "`") {
+			const end = input.indexOf("`", i + 1);
+			if (end < 0) {
+				results.push(input.slice(i + 1));
+				break;
+			}
+			results.push(input.slice(i + 1, end));
+			i = end + 1;
+			continue;
+		}
+		// $( ... ) — balanced, quote-aware; `$((` arithmetic is left to the parser
+		if (ch === "$" && input[i + 1] === "(" && input[i + 2] !== "(") {
+			let depth = 0;
+			let j = i + 1; // points at the opening "("
+			let sq = false;
+			let dq = false;
+			for (; j < input.length; j++) {
+				const c = input[j];
+				if (c === "\\") {
+					j++;
+					continue;
+				}
+				if (c === "'" && !dq) {
+					sq = !sq;
+					continue;
+				}
+				if (c === '"' && !sq) {
+					dq = !dq;
+					continue;
+				}
+				if (sq) continue;
+				if (c === "(") depth++;
+				else if (c === ")") {
+					depth--;
+					if (depth === 0) break;
+				}
+			}
+			if (depth !== 0) {
+				results.push(input.slice(i + 2));
+				break;
+			}
+			results.push(input.slice(i + 2, j));
+			i = j + 1;
+			continue;
+		}
+		i++;
+	}
+	return results;
+}
+
+/**
+ * Judge the inner command(s) of command substitutions. Each body may itself be a
+ * compound command, so split it and aggregate (block > confirm > pass).
+ */
+function classifySubstitutions(
+	substitutions: string[],
+	realCwd: string,
+	hasUI: boolean,
+	depth: number,
+): SegmentVerdict {
+	const blockReasons: string[] = [];
+	let confirm = false;
+	for (const body of substitutions) {
+		for (const seg of splitSegments(body)) {
+			const s = seg.trim();
+			if (!s) continue;
+			const v = classifySegment(s, realCwd, hasUI, depth);
+			if (v.kind === "block") blockReasons.push(v.reason);
+			else if (v.kind === "confirm") confirm = true;
+		}
+	}
+	if (blockReasons.length > 0) {
+		return { kind: "block", reason: blockReasons.join("\n") };
+	}
+	if (confirm) return { kind: "confirm" };
+	return { kind: "pass" };
+}
+
+/**
+ * A command segment: recurse into any `$()` / backtick substitutions, then judge
+ * the outer command. A hard block in a substitution wins; a confirm is deferred
+ * until the outer verdict is known (block > confirm).
+ */
 function classifySegment(
 	trimmed: string,
 	realCwd: string,
 	hasUI: boolean,
 	depth = 0,
 ): SegmentVerdict {
-	// Recursion depth guard (bash -c / eval nested too deep to statically check → conservative confirm)
+	// Recursion depth guard (nested bash -c / eval / $() too deep to statically check → conservative confirm)
 	if (depth > 4) return { kind: "confirm" };
 
+	// ⓪ Command substitutions run before the outer command, so judge their content
+	//    too — `echo "$(rm -rf x)"` must not slip through.
+	const substitutions = extractCommandSubstitutions(trimmed);
+	let subConfirm = false;
+	if (substitutions.length > 0) {
+		const subVerdict = classifySubstitutions(
+			substitutions,
+			realCwd,
+			hasUI,
+			depth + 1,
+		);
+		if (subVerdict.kind === "block") {
+			return {
+				kind: "block",
+				reason: `Command substitution blocked:\n${subVerdict.reason}`,
+			};
+		}
+		if (subVerdict.kind === "confirm") subConfirm = true;
+	}
+
+	const outer = classifySegmentOuter(trimmed, realCwd, hasUI, depth);
+	if (outer.kind === "block") return outer;
+	if (outer.kind === "confirm" || subConfirm) return { kind: "confirm" };
+	return { kind: "pass" };
+}
+
+/** Judge one command segment (redirect / danger / wrapper / script / writers). */
+function classifySegmentOuter(
+	trimmed: string,
+	realCwd: string,
+	hasUI: boolean,
+	depth = 0,
+): SegmentVerdict {
 	// ① Redirect check:
 	//    - Write to a protected path (echo x > .env etc.) → block in every mode (user paths too)
 	//    - "> existing file" (truncate, not >> append, not a device) → per truncate rule
 	const redirect = extractRedirectTarget(trimmed);
 	if (redirect) {
+		// Variable/glob target can't be statically resolved (echo x > $F) → conservative confirm (pass in naked)
+		if (isUnresolvedTarget(redirect.target)) {
+			return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+		}
 		const real = resolveReal(resolve(realCwd, expandHome(redirect.target)));
 		if (isUserProtectedPath(real)) {
 			return {
@@ -1619,6 +1770,17 @@ function classifySegment(
 			existsSync(real)
 		) {
 			return ruleVerdict("truncate", `Truncate blocked by rule: ${trimmed}`);
+		}
+		// New/append target outside the project (or cwd is HOME) → per writeOutside / writeHome
+		if (!DEVICE_TARGETS.has(redirect.target)) {
+			const outside = isOutsideCwd(real, realCwd);
+			if (outside || realCwd === HOME) {
+				const rule = outside ? "writeOutside" : "writeHome";
+				return ruleVerdict(
+					rule,
+					`Redirect writes outside the project blocked by rule: ${trimmed}`,
+				);
+			}
 		}
 	}
 
@@ -2025,6 +2187,17 @@ function judgeDd(
 		if (!inNaked() && matchesProtectedPath(real)) {
 			return { kind: "block", reason: `dd writes to protected path: ${trimmed}` };
 		}
+		if (isTrustedPath(real)) continue;
+		// Outside target → same outside logic as overwrite commands (existing vs new)
+		if (!DEVICE_TARGETS.has(target) && isOutsideCwd(real, realCwd)) {
+			const rule = existsSync(real)
+				? "overwriteOutsideExisting"
+				: "overwriteOutsideNew";
+			return ruleVerdict(
+				rule,
+				`dd writes outside the project blocked by rule: ${trimmed}`,
+			);
+		}
 	}
 	return { kind: "pass" };
 }
@@ -2055,6 +2228,17 @@ function judgeDownload(
 			kind: "block",
 			reason: `Download writes to protected path: ${cmdInfo.command} ${target}`,
 		};
+	}
+	if (isTrustedPath(real)) return { kind: "pass" };
+	// Outside target → same outside logic as overwrite commands (existing vs new)
+	if (!DEVICE_TARGETS.has(target) && isOutsideCwd(real, realCwd)) {
+		const rule = existsSync(real)
+			? "overwriteOutsideExisting"
+			: "overwriteOutsideNew";
+		return ruleVerdict(
+			rule,
+			`Download writes outside the project blocked by rule: ${cmdInfo.command} ${target}`,
+		);
 	}
 	return { kind: "pass" };
 }
@@ -2440,6 +2624,11 @@ function expandHome(p: string): string {
 	if (p === "~") return HOME;
 	if (p.startsWith("~/")) return join(HOME, p.slice(2));
 	return p;
+}
+
+/** Whether a path token carries shell variable/glob syntax that can't be statically resolved */
+function isUnresolvedTarget(p: string): boolean {
+	return p.includes("$") || p.includes("*") || p.includes("?");
 }
 
 /** Redirect target: { op, target }; null if none */

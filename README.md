@@ -129,7 +129,7 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 ### Core capabilities / 核心能力
 
-- **Protected-path interception / 受保护路径拦截**: `.env` / `.ssh` / `.aws` / `.kube` / private keys (`*.pem`/`*.key`) / credentials / shell configs (`.bashrc` …) / `node_modules` / `dist` / `build` … blocked hard in every mode (except naked) — 任何模式下硬性阻止（naked 除外）
+- **Protected-path interception / 受保护路径拦截**: `.env` / `.envrc` / `.ssh` / `.secrets` / `.aws` / `.kube` / private keys (`*.pem`/`*.key`/`*.p12`/`*.pfx`, `id_rsa`/`id_ed25519`) / credentials / shell configs (`.bashrc` …) / `node_modules` / `dist` / `build` … blocked hard in every mode (except naked) — 任何模式下硬性阻止（naked 除外）
 - **Block group / Block 组危险命令**: `mkfs.*` / `mkswap` / `poweroff` / `reboot` / `shutdown` / `dd` to block devices / `> /dev/sdX` / `find -delete` / `find -exec rm` / `xargs rm`
 - **Confirm group / Confirm 组**: `sudo` / `doas` / `pkexec` / `chmod 777` / `ssh` / `scp` / `sftp` / `rsh` / `telnet` / `wget -O /dev/null`
 - **Overwrite detection / 覆盖检测**: `mv` / `cp` / `install` / `tee` / `ln -f` / `rsync --delete` on existing targets, classified by in/out project — 目标已存在时按内外策略处理
@@ -142,15 +142,23 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 - **Bypass resistance / 防绕过**: variable/wildcard paths that can't be statically resolved always confirm; command substitutions (`$(...)` / backticks) are recursively judged; any hard block in a compound command blocks the whole thing — 变量/通配符路径一律 confirm；命令替换（`$(...)` / 反引号）递归判定；复合命令任一段硬性阻止则整体阻止
 - **Block escape hints / 拦截提示**: every block message appends a short, category-aware "To run anyway / 如需执行:" hint — an English hint followed by the Chinese note on its own indented line — user-configured protected paths suggest `/guard paths rm`, built-in protected paths & system-destructive commands point to `/guard naked`, rule-level blocks suggest `/guard loose` or `/guard rules` — 每次拦截都会附一条按类别给出的解除建议：英文提示一行、中文注释另起一行缩进（头部 `To run anyway / 如需执行:`）
 
+### Known limitations / 已知边界
+
+- **Static heuristics, not a sandbox / 静态启发式，不是沙箱**: the guard inspects the `bash` command text and the `write`/`edit` target paths; it is meant to catch **accidental** destructive operations, not to defeat a determined adversary or prompt injection. Run untrusted code in a real sandbox / VM / container under a least-privilege account — 本扩展只检查 `bash` 命令文本与 `write`/`edit` 目标路径，用于拦截**误操作**，并非对抗恶意输入或 prompt injection 的完整沙箱；不可信代码请放到真正的沙箱/容器/虚拟机里运行。
+- **POSIX-oriented / 面向 POSIX**: path handling assumes POSIX separators and `/dev`-style device names; Windows is not a supported target — 路径判定基于 POSIX 分隔符与 `/dev` 设备名，不支持 Windows。
+- **What is not statically expanded / 不做静态展开**: variable/glob targets (`$F`, `*.log`) cannot be resolved, so they trigger a **conservative confirm** instead of being followed; `~user` is not expanded; aliases, shell functions, `eval` of dynamically built strings, and `bash -c` / `$(...)` nesting beyond depth 4 are not resolved (too deep → confirm) — 变量/通配符目标（`$F`、`*.log`）无法静态解析，一律**保守 confirm**而不展开；不展开 `~user`；别名、shell 函数、动态拼接后 `eval`、以及超过 4 层的 `bash -c` / `$()` 嵌套不会被解析（过深 → confirm）。
+- **Conservative by design / 宁可误报**: unresolvable targets confirm; in a no-UI environment, confirm-grade operations are **blocked** instead of prompted — expect the occasional false positive and tune it with `/guard rules` or trusted paths — 无法解析的目标会 confirm；无 UI 时需确认项直接**阻止**；可能出现误报，可用 `/guard rules` 或信任路径调整。
+- **Scope / 范围**: only the `bash` tool and the `write`/`edit` tools are guarded; network access, MCP servers, other tools and extensions are out of scope — 仅守护 `bash` 工具与 `write`/`edit` 工具；网络、MCP、其它工具与扩展不在范围内。
+
 ## Development / 开发与测试
 
-Automated tests (215 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
+Automated tests (225 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（215 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
+自动化测试（225 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
@@ -158,7 +166,7 @@ cd tests && node --experimental-strip-types test-pathguard.ts
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.5.2**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.5.3**.
 
 ## License
 

@@ -682,6 +682,44 @@ for (const mode of ["strict", "normal", "loose", "trusted"]) {
 	);
 }
 
+// ── #7 expanded protected list / #8 credentials false-positive ──
+{
+	await setMode("normal");
+	for (const [name, path] of [
+		[".envrc", join(PROJ, ".envrc")],
+		["id_rsa", join(PROJ, "id_rsa")],
+		["id_ed25519", join(PROJ, "id_ed25519")],
+		["cert.p12", join(PROJ, "cert.p12")],
+		["keystore.pfx", join(PROJ, "keystore.pfx")],
+		[".secrets dir", join(PROJ, ".secrets", "creds")],
+		["credentials exact", join(PROJ, "credentials")],
+		["credentials.json", join(PROJ, "credentials.json")],
+	] as const) {
+		check(
+			`protected ${name} → block`,
+			(await runTool("write", { path }, { cwd: PROJ })).verdict,
+			"block",
+		);
+	}
+	check(
+		"credentials.example → pass (#8)",
+		(
+			await runTool(
+				"write",
+				{ path: join(PROJ, "credentials.example") },
+				{ cwd: PROJ },
+			)
+		).verdict,
+		"pass",
+	);
+	check(
+		"id_rsa.pub → pass (#7 exact-only)",
+		(await runTool("write", { path: join(PROJ, "id_rsa.pub") }, { cwd: PROJ }))
+			.verdict,
+		"pass",
+	);
+}
+
 // ── system-destructive (block in every mode) ────────────────
 for (const mode of ["strict", "normal", "loose", "trusted"]) {
 	await setMode(mode);

@@ -6,6 +6,29 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [1.5.3] — expanded protected paths & known-limitations docs
+
+### Protected paths — expanded list & fewer `credentials.*` false positives
+
+- New built-in protected paths: `.envrc` (direnv), `.secrets/`, and the private
+  key files `id_rsa` / `id_ed25519` / `id_ecdsa` / `id_dsa` — matched by exact
+  name only, so `id_rsa.pub` (the public key) is no longer blocked. Added the
+  keystore suffixes `*.p12` / `*.pfx`.
+- `credentials` now blocks the exact name and sensitive variants
+  (`credentials.json` …), but no longer fires on clearly non-secret
+  template/example files (`credentials.example` / `.sample` / `.template` /
+  `.tmpl` / `.dist` / `.md` / `.txt`).
+- Tests: 10 new assertions; 225 passing.
+
+### Docs — known-limitations section
+
+- README: new **Known limitations / 已知边界** section stating the guard is a
+  static heuristic against accidental mistakes, **not** a prompt-injection-proof
+  sandbox; POSIX-only; variable/glob targets confirm rather than expand (no
+  `~user`, no aliases/functions/dynamic `eval`, `bash -c`/`$()` nesting capped at
+  depth 4); conservative-by-design false positives; scope limited to the `bash`
+  and `write`/`edit` tools.
+
 ## [1.5.2] — close redirect/download/dd & command-substitution bypasses
 
 ### Security — close two redirect / download / dd bypasses

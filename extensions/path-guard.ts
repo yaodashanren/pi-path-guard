@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.5.2.
+ * recent release/tag is 1.5.3.
  */
 import type {
 	ExtensionAPI,
@@ -38,6 +38,7 @@ import {
 /** Protected path fragments — matching paths block writes/edits */
 const PROTECTED_PATH_PATTERNS = [
 	".env",
+	".envrc", // direnv config (can load arbitrary commands / credentials)
 	".git/",
 	".ssh/", // SSH config & keys
 	// HOME-level credentials/config (intercepted for bash redirects, overwrites, and the write tool)
@@ -53,9 +54,16 @@ const PROTECTED_PATH_PATTERNS = [
 	".zshrc",
 	".profile",
 	".bash_profile",
+	".secrets/", // secrets dir (also covers a bare `.secrets` file)
 	"credentials", // in-project credential files
+	"id_rsa", // private keys that may live outside .ssh/
+	"id_ed25519",
+	"id_ecdsa",
+	"id_dsa",
 	"*.pem", // private keys (suffix match)
 	"*.key", // private keys (suffix match)
+	"*.p12", // PKCS#12 keystores
+	"*.pfx", // PKCS#12 keystores (Windows)
 	"node_modules/",
 	".next/",
 	".nuxt/",
@@ -68,6 +76,32 @@ const PROTECTED_PATH_PATTERNS = [
 	"target/",
 	"vendor/", // Go vendor / PHP composer
 ];
+
+/**
+ * File patterns that must match the last path segment exactly and never a
+ * `<name>.<suffix>` variant — `id_rsa.pub` is the public key, not the private one.
+ */
+const EXACT_ONLY_PATTERNS = new Set([
+	"id_rsa",
+	"id_ed25519",
+	"id_ecdsa",
+	"id_dsa",
+]);
+
+/**
+ * `credentials.<ext>` extensions that clearly mark a non-secret template/example.
+ * The bare `credentials` pattern blocks the exact name and sensitive variants
+ * (`credentials.json`), but must not fire on these (issue: false positives).
+ */
+const SAFE_CREDENTIAL_SUFFIXES = new Set([
+	".example",
+	".sample",
+	".template",
+	".tmpl",
+	".dist",
+	".md",
+	".txt",
+]);
 
 /** Block group — system-destructive; blocked in every mode (no confirmation opportunity) */
 const BLOCK_DANGEROUS_PATTERNS: RegExp[] = [
@@ -2400,6 +2434,13 @@ function matchesProtectedPath(absolutePath: string): boolean {
 			}
 			// File-pattern variants (.env.local / .env.production, last segment)
 			if (!isDir && i === segments.length - 1 && seg.startsWith(core + ".")) {
+				// key files: exact name only, never a `.pub`/backup variant
+				if (EXACT_ONLY_PATTERNS.has(core)) continue;
+				// credentials: allow clearly non-secret template/example variants
+				if (core === "credentials") {
+					const ext = seg.slice(core.length);
+					if (SAFE_CREDENTIAL_SUFFIXES.has(ext)) continue;
+				}
 				return true;
 			}
 		}

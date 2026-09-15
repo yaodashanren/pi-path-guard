@@ -4,6 +4,22 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.5.6] — tunable unresolvable run-script targets
+
+### Unresolvable run-script targets (13)
+
+- `source` / `.` / `<interp> script` targets that cannot be resolved statically (a `$VAR`
+  prefix such as `source "$HEADAS/headas-init.sh"`, or a glob) were a hard-coded confirm
+  in every mode except naked, so `trusted` could not pass them. They now follow a new
+  tunable rule `scriptUnresolved` (strict block / normal·loose confirm / trusted·naked pass).
+- The **literal tail** after the variable is inspected before that ladder, so the
+  relaxation cannot hide a protected target: a tail matching a user-protected entry stays
+  **hard-blocked in every mode** (incl. naked); a built-in protected tail (`$D/id_rsa`,
+  `$D/.ssh/config`, `*.key`) uses `runScriptProtected`.
+- A **bare** `$VAR` (no literal tail — nothing to inspect) stays a conservative confirm in
+  every mode except naked.
+- Tests: 7 new assertions; 266 passing.
+
 ## [1.5.5] — confirm-dialog session pass & remote/git coverage
 
 ### Confirm dialog — session pass (10)

@@ -2312,6 +2312,109 @@ await setMode("strict");
 	});
 }
 
+// ── #13 scriptUnresolved: source/./script targets that cannot be resolved ──
+{
+	const VARSRC = 'source "$HEADAS/headas-init.sh" 2>/dev/null';
+	const labelOf = async (cmd: string) => {
+		await runTool("bash", { command: cmd }, { cwd: PROJ });
+		return selectOptions[0]?.join(" | ") ?? "";
+	};
+
+	// the ladder for an unresolvable target (literal tail present, not protected)
+	await setMode("normal");
+	check(
+		"src-unresolvable normal → confirm",
+		(await runCmd(VARSRC, PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("loose");
+	check(
+		"src-unresolvable loose → confirm",
+		(await runCmd(VARSRC, PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("trusted");
+	check(
+		"src-unresolvable trusted → pass (the reported annoyance)",
+		(await runCmd(VARSRC, PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"src-unresolvable naked → pass",
+		(await runCmd(VARSRC, PROJ)).verdict,
+		"pass",
+	);
+	await setMode("strict");
+	check(
+		"src-unresolvable strict → block",
+		(await runCmd(VARSRC, PROJ)).verdict,
+		"block",
+	);
+	await setMode("normal");
+
+	// rule-driven → the dialog names the specific rule (scoped session pass)
+	check(
+		"src-unresolvable dialog names scriptUnresolved",
+		(await labelOf(VARSRC)).includes("scriptUnresolved") ? "yes" : "no",
+		"yes",
+	);
+
+	// literal tail already recognisable as a built-in protected path
+	check(
+		"protected literal tail → runScriptProtected rule",
+		(await labelOf('source "$D/id_rsa"')).includes("runScriptProtected")
+			? "yes"
+			: "no",
+		"yes",
+	);
+
+	// info-free target (bare variable / bare glob) → stays conservative in trusted
+	await setMode("trusted");
+	check(
+		"bare $VAR trusted → still confirm (no literal info)",
+		(await runCmd('source "$MYKEY"', PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("normal");
+
+	// user-protected literal tail → hard block in every mode (incl. trusted/naked)
+	const VAULT = join(PROJ, "vault");
+	mkdirSync(VAULT, { recursive: true });
+	rmSync(FAKE_GLOBAL, { force: true });
+	writeFileSync(
+		FAKE_GLOBAL,
+		JSON.stringify({ pathGuard: { mode: "normal", extraProtected: [VAULT] } }),
+	);
+	newSession();
+	check(
+		"sanity: literal user-protected script → block",
+		(await runCmd(`source ${VAULT}/x.sh`, PROJ)).verdict,
+		"block",
+	);
+	check(
+		"user-protected literal tail (normal) → block",
+		(await runCmd('source "$S/vault/x.sh"', PROJ)).verdict,
+		"block",
+	);
+	await setMode("trusted");
+	check(
+		"user-protected literal tail (trusted) → block",
+		(await runCmd('source "$S/vault/x.sh"', PROJ)).verdict,
+		"block",
+	);
+	await setMode("naked");
+	check(
+		"user-protected literal tail (naked) → block",
+		(await runCmd('source "$S/vault/x.sh"', PROJ)).verdict,
+		"block",
+	);
+
+	// reset for the next block
+	rmSync(FAKE_GLOBAL, { force: true });
+	newSession();
+}
+
 // ── #10 confirm dialog: session pass (third option) ─────────
 {
 	await setMode("normal");

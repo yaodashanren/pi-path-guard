@@ -9,7 +9,7 @@ Intercepts destructive operations in tool calls (`bash`, `write`, `edit`): prote
 
 ## Feature highlights
 
-- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 17 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 17 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 17 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，17 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
+- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 19 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 19 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 19 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，19 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
 - **📁 Protected & trusted paths** — `/guard → paths` splits into two categories: **protected paths** (`/guard paths protected …`, the default) are guarded in **every** mode (incl. naked); **trusted paths** (`/guard paths trusted …`) are **always allowed** — operations on them pass like trusted mode, in any mode. System-important paths can never be trusted (see below). 管理**受保护路径**与**信任路径**两类路径。
 - **🔒 Three-way verdict** — every intercepted operation resolves to **block / confirm / pass**: block refuses outright, confirm asks you, pass executes. How strict the guard is depends entirely on your rules.
 
@@ -38,7 +38,7 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 ### `/guard` command
 
 - `/guard` — interactive main menu with three actions: **Switch mode** (title shows the full decision matrix; choices are bilingual), **Customize per-mode guard rules**, and **Manage custom protected paths**. The main menu loops: a sub-menu's **back** returns to the previous menu, and eventually back to this main menu; only cancelling at the top level (no selection) exits the command. 交互式主菜单，三个动作：**切换防护模式**（标题展示完整判定矩阵，选项中英双语）、**定制每模式守护规则**、**管理自定义受保护路径**。主菜单为循环：子菜单的 **back** 逐级返回上一级，最终回到本主菜单；只有顶层取消（不选）才退出命令
-- `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 17 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 17 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
+- `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 19 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 19 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive main menu 非法参数 → 兜底弹出交互主菜单
 - The active mode persists across sessions via **global** settings.json (`pathGuard.mode` in `~/.pi/agent/settings.json`), falling back to `normal`. `/guard <mode>` writes it back there. Persistence is intentionally **global-only**, never project-scoped: writing a project `.pi/settings.json` would make the project "trust-requiring", so pi would start asking for trust on the next launch (`defaultProjectTrust=ask`) and a declined/untrusted launch would silently ignore the saved mode — the old behavior that made a saved mode revert to normal. Global settings are never trust-gated, so the mode always survives. 模式跨会话持久化到**全局** settings.json（`~/.pi/agent/settings.json` 的 `pathGuard.mode`），缺省回 `normal`；`/guard <mode>` 切换时回写到该文件。持久化刻意只写**全局**、不写项目：写入项目 `.pi/settings.json` 会让项目变为需信任项目，导致下次启动 pi 弹出信任询问，若项目被拒/未信任则保存的模式会被静默忽略（这正是旧版模式重置为 normal 的根因）。全局设置不受信任判定门控，模式必然保留
@@ -85,8 +85,8 @@ Also settable statically:
 
 ### Tunable rules / 可调规则
 
-Each mode's judgement is a set of 17 rules; override any per mode in settings.json (`rule = "block" | "confirm" | "pass"`; invalid values are ignored):
-每个模式的判定由 17 条规则组成；可在 settings.json 里按模式覆盖（`rule` 取 `"block"|"confirm"|"pass"`，非法值忽略）：
+Each mode's judgement is a set of 19 rules; override any per mode in settings.json (`rule = "block" | "confirm" | "pass"`; invalid values are ignored):
+每个模式的判定由 19 条规则组成；可在 settings.json 里按模式覆盖（`rule` 取 `"block"|"confirm"|"pass"`，非法值忽略）：
 
 ```jsonc
 "pathGuard": {
@@ -98,7 +98,7 @@ Each mode's judgement is a set of 17 rules; override any per mode in settings.js
 }
 ```
 
-Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInProject`, `deleteOutside`, `deleteInProject`, `overwriteOutsideExisting`, `overwriteOutsideNew`, `overwriteInProject`, `truncate`, `gitDestructive`, `pipeToShellInProject`, `pipeToShellOutside`, `runScriptInProject`, `runScriptOutside`, `runScriptProtected`. Defaults reproduce the matrix above exactly.
+Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInProject`, `deleteOutside`, `deleteInProject`, `overwriteOutsideExisting`, `overwriteOutsideNew`, `overwriteInProject`, `truncate`, `gitDestructive`, `pipeToShellInProject`, `pipeToShellOutside`, `runScriptInProject`, `runScriptOutside`, `runScriptProtected`, `scriptUnresolved`. Defaults reproduce the matrix above exactly.
 
 ### Guard mode matrix / 防护模式矩阵
 
@@ -119,6 +119,7 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 | Run script in-project (source/. / bash x.sh) / 运行脚本·项目内 | confirm | confirm | pass | pass | pass |
 | Run script outside/HOME / 运行脚本·项目外/HOME | block | confirm | confirm | pass | pass |
 | Run script of built-in protected path / 运行脚本·内置保护 | block | confirm | confirm | pass | pass |
+| Run script with an unresolvable `$VAR`/glob target / 运行脚本·路径不可解析 | block | confirm | confirm | pass | pass |
 | cwd=HOME write / HOME 目录写 | confirm | confirm | pass | pass | pass |
 | No UI (headless) / 无交互界面 | block* | block* | block* | block* | pass |
 
@@ -138,8 +139,8 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 - **Shell wrapper recursion / shell 包装器递归**: strips `sudo`/`nohup`/`timeout`/`env` … prefixes, recurses into `bash -c` / `eval`; quote-aware tokenization — 前缀剥除后分析真实命令；引号感知分词
 - **git destructive commands / git 破坏性命令**: `clean -f` / `reset --hard` / `checkout -- .` / `checkout|switch -f|--force` / `restore .` / `worktree remove --force` / `tag -d` / `branch -D` / `push --force` / `stash drop` (a narrow `restore --source=<ref> -- <path>` is not treated as destructive) — `restore --source` 带路径的常规用法不再弹窗
 - **Dangerous pipe-to-shell / 危险管道到 shell**: `curl … \| bash` / `wget -qO- … \| sh` / `python -c '…' \| sh` — strict confirms at all positions; normal passes in-workspace and confirms remote/outside sources; other modes pass (per `pipeToShell*` rules) — 判定 `curl/wget` 等下载或解释器内联代码的输出被管道进 shell 执行
-- **Run-script guard / 运行脚本守护**: `source file` / `. file` / `bash|sh|zsh|dash|ksh [flags] script` are judged by **target path** instead of a blanket confirm — in-project (`runScriptInProject`), outside/HOME (`runScriptOutside`), built-in protected (`runScriptProtected`), each tunable per mode; user-protected targets stay **hard-blocked in every mode (incl naked)** and trusted targets always pass — 按目标路径判定并可按模式调整：项目内 / 项目外 / 内置保护各一条规则；用户自定义保护路径硬拦、信任路径放行
-- **Bypass resistance / 防绕过**: variable/wildcard paths that can't be statically resolved always confirm; command substitutions (`$(...)` / backticks) are recursively judged; any hard block in a compound command blocks the whole thing — 变量/通配符路径一律 confirm；命令替换（`$(...)` / 反引号）递归判定；复合命令任一段硬性阻止则整体阻止
+- **Run-script guard / 运行脚本守护**: `source file` / `. file` / `bash|sh|zsh|dash|ksh [flags] script` are judged by **target path** instead of a blanket confirm — in-project (`runScriptInProject`), outside/HOME (`runScriptOutside`), built-in protected (`runScriptProtected`), each tunable per mode; user-protected targets stay **hard-blocked in every mode (incl naked)** and trusted targets always pass — a **`$VAR`/glob target that cannot be resolved** follows the new `scriptUnresolved` rule (strict block / normal·loose confirm / trusted·naked pass), but its **literal tail is still inspected first**: a user-protected tail stays hard-blocked in every mode, a built-in protected tail (`$D/id_rsa`, `$D/.ssh/config`) uses `runScriptProtected`, and a bare `$VAR` with nothing literal to inspect stays a conservative confirm even in trusted — 按目标路径判定并可按模式调整：项目内 / 项目外 / 内置保护各一条规则；用户自定义保护路径硬拦、信任路径放行。无法静态解析的 `$VAR`/通配目标走新规则 `scriptUnresolved`（strict 阻止 / normal·loose 询问 / trusted·naked 放行），但会**先检查字面尾部**：命中用户自定义保护路径仍全模式硬拦，命中内置保护（如 `$D/id_rsa`、`$D/.ssh/config`）走 `runScriptProtected`，而无任何字面信息的裸 `$VAR` 即使在 trusted 下也保持确认
+- **Bypass resistance / 防绕过**: variable/wildcard paths that can't be statically resolved always confirm (script targets excepted — see the run-script guard: they follow `scriptUnresolved` and are exempt only in trusted/naked); command substitutions (`$(...)` / backticks) are recursively judged; any hard block in a compound command blocks the whole thing — 变量/通配符路径一律 confirm；命令替换（`$(...)` / 反引号）递归判定；复合命令任一段硬性阻止则整体阻止
 - **Block escape hints / 拦截提示**: every block message appends a short, category-aware "To run anyway / 如需执行:" hint — an English hint followed by the Chinese note on its own indented line — user-configured protected paths suggest `/guard paths rm`, built-in protected paths & system-destructive commands point to `/guard naked`, rule-level blocks suggest `/guard loose` or `/guard rules` — 每次拦截都会附一条按类别给出的解除建议：英文提示一行、中文注释另起一行缩进（头部 `To run anyway / 如需执行:`）
 
 - **Session pass from the confirm dialog / 弹窗内会话级放行**: every confirm prompt offers a third option `🔓 Allow & set <rule> = pass (session)` (multiple rules → `N rules`), so a repeated prompt can be answered in place without opening `/guard rules`; the pass is in-memory only (never persisted, cleared on a new session) and is not offered for `confirmGroup` (sudo/ssh/chmod 777), system-destructive commands, or in naked mode — 确认弹窗提供会话级放行第三选项，仅内存生效（不落盘、新会话清除）；`confirmGroup`、系统级破坏命令与 naked 模式不提供
@@ -148,19 +149,19 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 - **Static heuristics, not a sandbox / 静态启发式，不是沙箱**: the guard inspects the `bash` command text and the `write`/`edit` target paths; it is meant to catch **accidental** destructive operations, not to defeat a determined adversary or prompt injection. Run untrusted code in a real sandbox / VM / container under a least-privilege account — 本扩展只检查 `bash` 命令文本与 `write`/`edit` 目标路径，用于拦截**误操作**，并非对抗恶意输入或 prompt injection 的完整沙箱；不可信代码请放到真正的沙箱/容器/虚拟机里运行。
 - **POSIX-oriented / 面向 POSIX**: path handling assumes POSIX separators and `/dev`-style device names; Windows is not a supported target — 路径判定基于 POSIX 分隔符与 `/dev` 设备名，不支持 Windows。
-- **What is not statically expanded / 不做静态展开**: variable/glob targets (`$F`, `*.log`) cannot be resolved, so they trigger a **conservative confirm** instead of being followed; `~user` is not expanded either but is anchored outside the project (never mistaken for an in-project path); aliases, shell functions, `eval` of dynamically built strings, and `bash -c` / `$(...)` nesting beyond depth 4 are not resolved (too deep → confirm) — 变量/通配符目标（`$F`、`*.log`）无法静态解析，一律**保守 confirm**而不展开；`~user` 同样不展开，但按项目外处理（不会被误当成项目内路径）；别名、shell 函数、动态拼接后 `eval`、以及超过 4 层的 `bash -c` / `$()` 嵌套不会被解析（过深 → confirm）。
+- **What is not statically expanded / 不做静态展开**: variable/glob targets (`$F`, `*.log`) cannot be resolved, so they trigger a **conservative confirm** instead of being followed — except the script-file target of `source`/`.`/`<interp> script`, which is additionally judged by its **literal tail** (`scriptUnresolved` rule; a bare `$VAR` with no literal tail still confirms); `~user` is not expanded either but is anchored outside the project (never mistaken for an in-project path); aliases, shell functions, `eval` of dynamically built strings, and `bash -c` / `$(...)` nesting beyond depth 4 are not resolved (too deep → confirm) — 变量/通配符目标（`$F`、`*.log`）无法静态解析，一律**保守 confirm**而不展开；`~user` 同样不展开，但按项目外处理（不会被误当成项目内路径）；别名、shell 函数、动态拼接后 `eval`、以及超过 4 层的 `bash -c` / `$()` 嵌套不会被解析（过深 → confirm）。
 - **Conservative by design / 宁可误报**: unresolvable targets confirm; in a no-UI environment, confirm-grade operations are **blocked** instead of prompted — expect the occasional false positive and tune it with `/guard rules` or trusted paths — 无法解析的目标会 confirm；无 UI 时需确认项直接**阻止**；可能出现误报，可用 `/guard rules` 或信任路径调整。
 - **Scope / 范围**: only the `bash` tool and the `write`/`edit` tools are guarded; network access, MCP servers, other tools and extensions are out of scope — 仅守护 `bash` 工具与 `write`/`edit` 工具；网络、MCP、其它工具与扩展不在范围内。
 
 ## Development / 开发与测试
 
-Automated tests (254 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
+Automated tests (266 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（254 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
+自动化测试（266 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
@@ -168,7 +169,7 @@ cd tests && node --experimental-strip-types test-pathguard.ts
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.5.5**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.5.6**.
 
 ## License
 

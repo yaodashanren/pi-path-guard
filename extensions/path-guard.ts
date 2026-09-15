@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.5.5.
+ * recent release/tag is 1.5.6.
  */
 import type {
 	ExtensionAPI,
@@ -273,7 +273,8 @@ type RuleId =
 	| "pipeToShellOutside" // … with a remote/outside-workspace source
 	| "runScriptInProject" // source/./bash script.sh inside the project
 	| "runScriptOutside" // … outside the project / under HOME
-	| "runScriptProtected"; // … targeting a built-in protected path
+	| "runScriptProtected" // … targeting a built-in protected path
+	| "scriptUnresolved"; // … a `$VAR`/glob target that cannot be resolved statically
 
 const RULE_IDS: readonly RuleId[] = [
 	"blockGroup",
@@ -293,6 +294,7 @@ const RULE_IDS: readonly RuleId[] = [
 	"runScriptInProject",
 	"runScriptOutside",
 	"runScriptProtected",
+	"scriptUnresolved",
 ];
 
 /** Bilingual short labels for each tunable rule (used in the rule-editor menu). */
@@ -315,6 +317,8 @@ const RULE_DESCRIPTIONS: Record<RuleId, string> = {
 	runScriptOutside: "source/./bash script, outside/HOME (运行脚本·项目外/HOME)",
 	runScriptProtected:
 		"source/./bash script of a built-in protected path (运行脚本·内置保护)",
+	scriptUnresolved:
+		"source/./script with a $VAR/glob path that cannot be resolved (脚本路径不可静态解析)",
 };
 
 const RULE_LEVELS: readonly RuleLevel[] = ["block", "confirm", "pass"];
@@ -349,6 +353,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptInProject: "confirm",
 		runScriptOutside: "block",
 		runScriptProtected: "block",
+		scriptUnresolved: "block",
 	},
 	normal: {
 		blockGroup: "block",
@@ -368,6 +373,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptInProject: "confirm",
 		runScriptOutside: "confirm",
 		runScriptProtected: "confirm",
+		scriptUnresolved: "confirm",
 	},
 	loose: {
 		blockGroup: "block",
@@ -387,6 +393,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptInProject: "pass",
 		runScriptOutside: "confirm",
 		runScriptProtected: "confirm",
+		scriptUnresolved: "confirm",
 	},
 	trusted: {
 		blockGroup: "block",
@@ -406,6 +413,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptInProject: "pass",
 		runScriptOutside: "pass",
 		runScriptProtected: "pass",
+		scriptUnresolved: "pass",
 	},
 	naked: {
 		blockGroup: "confirm",
@@ -425,6 +433,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptInProject: "pass",
 		runScriptOutside: "pass",
 		runScriptProtected: "pass",
+		scriptUnresolved: "pass",
 	},
 };
 
@@ -1617,6 +1626,75 @@ function scriptTargetOf(cmdInfo: CmdInfo, realCwd: string): string | null {
 }
 
 /**
+ * The literal remainder of an unresolvable `source`/`.`/interpreter target: the part
+ * after a leading `$VAR` / `${VAR}` prefix, or the whole glob pattern. It is often
+ * enough to recognise a protected target (`$D/id_rsa`, `$D/.ssh/config`) even though
+ * the variable itself cannot be expanded.
+ */
+function unresolvedScriptTail(target: string): string {
+	const m = target.match(
+		/^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/,
+	);
+	return m ? target.slice(m[0].length) : target;
+}
+
+/**
+ * A `$VAR`-prefixed path cannot be matched against a user-protected entry (those are
+ * absolute prefixes), so the literal tail is compared segment-wise against the
+ * entries' basenames. Conservative direction: a same-named directory blocks too.
+ */
+function tailLooksUserProtected(tail: string): boolean {
+	if (extraProtected.length === 0) return false;
+	const segs = normalize("/x" + tail)
+		.toLowerCase()
+		.split(sep)
+		.filter(Boolean);
+	if (segs.length === 0) return false;
+	const names = new Set<string>();
+	for (const entry of extraProtected) {
+		const parts = normalize(resolveReal(entry))
+			.toLowerCase()
+			.split(sep)
+			.filter(Boolean);
+		if (parts.length > 0) names.add(parts[parts.length - 1]);
+	}
+	return segs.some((s) => names.has(s));
+}
+
+/**
+ * Verdict for a `source`/`.`/interpreter target that cannot be resolved statically
+ * (a `$VAR` prefix or a glob). The literal tail is still inspected:
+ *   1. user-protected tail → hard block, every mode (the user said "never")
+ *   2. built-in protected tail → runScriptProtected (same as a literal target)
+ *   3. no literal information at all (bare `$VAR` / bare glob) → conservative confirm
+ *   4. otherwise → scriptUnresolved (per-mode ladder: strict block, normal/loose
+ *      confirm, trusted/naked pass)
+ */
+function judgeUnresolvedScriptTarget(target: string): SegmentVerdict {
+	const tail = unresolvedScriptTail(target);
+	// Nothing but separators / glob metacharacters → no information to act on.
+	if (!/[^/*?[\]]/.test(tail)) {
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+	}
+	if (tailLooksUserProtected(tail)) {
+		return {
+			kind: "block",
+			reason: `Script execution of user-protected path: ${target}`,
+		};
+	}
+	if (matchesProtectedPath("/__var__" + tail)) {
+		return ruleVerdict(
+			"runScriptProtected",
+			`Script execution blocked by rule (runScriptProtected): ${target}`,
+		);
+	}
+	return ruleVerdict(
+		"scriptUnresolved",
+		`Script path cannot be resolved statically — confirm (scriptUnresolved): ${target}`,
+	);
+}
+
+/**
  * `source`/`.` or shell-interpreter script execution verdict — path-aware + tunable:
  *   - user-protected target → hard block in EVERY mode (incl naked)
  *   - built-in protected target → runScriptProtected rule (strict block / normal,loose confirm / trusted,naked pass)
@@ -1644,7 +1722,7 @@ function judgeScript(
 		return isSource && !inNaked() ? { kind: "confirm" } : { kind: "pass" };
 	}
 	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+		return judgeUnresolvedScriptTarget(target);
 	}
 	const real = resolveReal(resolve(realCwd, expandHome(target)));
 

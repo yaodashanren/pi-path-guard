@@ -4,6 +4,18 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.5.7] — split the truncate rule; trusted truly passes overwrites
+
+### Split `truncate` → `truncateInProject` / `truncateOutside`
+
+- The single `truncate` rule (`> existing file` / `truncate`) did not distinguish in-project from outside targets and was `confirm` in every mode except naked, so `trusted` still prompted on `cat file > existing` / `echo x > existing` / `truncate -s 0 file`. It is now split into two tunable rules:
+  - `truncateInProject` — strict/normal `confirm`, loose/trusted/naked `pass`.
+  - `truncateOutside` — strict `block` (consistent with `overwriteOutsideExisting`), normal/loose `confirm`, trusted/naked `pass`.
+- Both the redirect path (`cat a > b`) and the `truncate` command now pick the rule by whether the target real path is outside the project (or cwd is HOME).
+- `trusted.overwriteInProject` also changes from `confirm` to `pass`, matching the documented "Trusted: pass overwrites" behaviour; in-project `cp`/`mv`/`tee` overwrites no longer prompt in trusted.
+- **Config note**: a previously saved `pathGuard.rules.<mode>.truncate` override is now an unknown rule id and is silently ignored — re-tune `truncateInProject` / `truncateOutside` instead.
+- Tests: net +9 assertions (275 passing), covering the in/outside truncate matrix, the `truncate -s 0` command path, and trusted in-project overwrite.
+
 ## [1.5.6] — tunable unresolvable run-script targets
 
 ### Unresolvable run-script targets (13)

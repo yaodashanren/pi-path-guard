@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.5.6.
+ * recent release/tag is 1.5.7.
  */
 import type {
 	ExtensionAPI,
@@ -267,7 +267,8 @@ type RuleId =
 	| "overwriteOutsideExisting" // mv/cp over an existing target outside
 	| "overwriteOutsideNew" // mv/cp creating a target outside
 	| "overwriteInProject" // mv/cp overwrite in the project
-	| "truncate" // `> existing file` / truncate
+	| "truncateInProject" // `> existing in-project file` / truncate in project
+	| "truncateOutside" // `> existing outside file` / truncate outside
 	| "gitDestructive" // git clean -f / reset --hard / checkout . / push --force …
 	| "pipeToShellInProject" // curl/wget/interpreter output piped into a shell (in-workspace)
 	| "pipeToShellOutside" // … with a remote/outside-workspace source
@@ -287,7 +288,8 @@ const RULE_IDS: readonly RuleId[] = [
 	"overwriteOutsideExisting",
 	"overwriteOutsideNew",
 	"overwriteInProject",
-	"truncate",
+	"truncateInProject",
+	"truncateOutside",
 	"gitDestructive",
 	"pipeToShellInProject",
 	"pipeToShellOutside",
@@ -309,7 +311,8 @@ const RULE_DESCRIPTIONS: Record<RuleId, string> = {
 	overwriteOutsideExisting: "overwrite existing outside (项目外覆盖已存在)",
 	overwriteOutsideNew: "create target outside (项目外新建)",
 	overwriteInProject: "overwrite in project (项目内覆盖)",
-	truncate: "truncate existing >file (截断已存在文件)",
+	truncateInProject: "truncate existing in-project file (截断项目内已存在文件)",
+	truncateOutside: "truncate existing outside file (截断项目外已存在文件)",
 	gitDestructive: "git destructive reset --hard (Git 破坏性)",
 	pipeToShellInProject: "pipe to shell, in-project (管道进 shell·项目内)",
 	pipeToShellOutside: "pipe to shell, remote/outside (管道进 shell·远程/外)",
@@ -346,7 +349,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteOutsideExisting: "block",
 		overwriteOutsideNew: "confirm",
 		overwriteInProject: "confirm",
-		truncate: "confirm",
+		truncateInProject: "confirm",
+		truncateOutside: "block",
 		gitDestructive: "confirm",
 		pipeToShellInProject: "confirm",
 		pipeToShellOutside: "confirm",
@@ -366,7 +370,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteOutsideExisting: "block",
 		overwriteOutsideNew: "confirm",
 		overwriteInProject: "confirm",
-		truncate: "confirm",
+		truncateInProject: "confirm",
+		truncateOutside: "confirm",
 		gitDestructive: "confirm",
 		pipeToShellInProject: "pass",
 		pipeToShellOutside: "confirm",
@@ -386,7 +391,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteOutsideExisting: "confirm",
 		overwriteOutsideNew: "pass",
 		overwriteInProject: "confirm",
-		truncate: "confirm",
+		truncateInProject: "pass",
+		truncateOutside: "confirm",
 		gitDestructive: "confirm",
 		pipeToShellInProject: "pass",
 		pipeToShellOutside: "pass",
@@ -405,8 +411,9 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		deleteInProject: "pass",
 		overwriteOutsideExisting: "pass",
 		overwriteOutsideNew: "pass",
-		overwriteInProject: "confirm",
-		truncate: "confirm",
+		overwriteInProject: "pass",
+		truncateInProject: "pass",
+		truncateOutside: "pass",
 		gitDestructive: "confirm",
 		pipeToShellInProject: "pass",
 		pipeToShellOutside: "pass",
@@ -426,7 +433,8 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		overwriteOutsideExisting: "pass",
 		overwriteOutsideNew: "pass",
 		overwriteInProject: "pass",
-		truncate: "pass",
+		truncateInProject: "pass",
+		truncateOutside: "pass",
 		gitDestructive: "pass",
 		pipeToShellInProject: "pass",
 		pipeToShellOutside: "pass",
@@ -1945,7 +1953,11 @@ function classifySegmentOuter(
 			!DEVICE_TARGETS.has(redirect.target) &&
 			existsSync(real)
 		) {
-			return ruleVerdict("truncate", `Truncate blocked by rule: ${trimmed}`);
+			const rule =
+				isOutsideCwd(real, realCwd) || realCwd === HOME
+					? "truncateOutside"
+					: "truncateInProject";
+			return ruleVerdict(rule, `Truncate blocked by rule: ${trimmed}`);
 		}
 		// New/append target outside the project (or cwd is HOME) → per writeOutside / writeHome
 		if (!DEVICE_TARGETS.has(redirect.target)) {
@@ -2519,9 +2531,13 @@ function judgeTruncate(
 		}
 		// Trusted target truncate → pass in every mode.
 		if (isTrustedPath(t.path)) continue;
-		// Existing ordinary file truncated → per truncate rule
+		// Existing ordinary file truncated → per truncateInProject / truncateOutside
 		if (!DEVICE_TARGETS.has(t.path) && existsSync(t.path)) {
-			return ruleVerdict("truncate", `Truncate blocked by rule: ${t.raw}`);
+			const rule =
+				isOutsideCwd(t.path, realCwd) || realCwd === HOME
+					? "truncateOutside"
+					: "truncateInProject";
+			return ruleVerdict(rule, `Truncate blocked by rule: ${t.raw}`);
 		}
 	}
 	return { kind: "pass" };

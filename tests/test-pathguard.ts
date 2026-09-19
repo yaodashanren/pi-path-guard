@@ -898,16 +898,85 @@ for (const mode of ["loose", "trusted"]) {
 	);
 }
 
-// ── truncate existing: confirm in every mode ────────────────
+// ── truncate existing (split): in-project vs outside ────────
+// truncateInProject: strict/normal confirm, loose/trusted/naked pass
 writeFileSync(join(PROJ, "trunc.txt"), "data");
-for (const mode of ["strict", "normal", "loose", "trusted"]) {
+for (const mode of ["strict", "normal"]) {
 	await setMode(mode);
 	check(
-		`${mode} truncate existing → confirm`,
+		`${mode} truncate in-project existing → confirm`,
 		(await runCmd(`echo x > ${PROJ}/trunc.txt`, PROJ)).verdict,
 		"confirm",
 	);
 }
+await setMode("loose");
+check(
+	"loose truncate in-project existing → pass",
+	(await runCmd(`echo x > ${PROJ}/trunc.txt`, PROJ)).verdict,
+	"pass",
+);
+await setMode("trusted");
+check(
+	"trusted truncate in-project existing → pass",
+	(await runCmd(`echo x > ${PROJ}/trunc.txt`, PROJ)).verdict,
+	"pass",
+);
+// truncateOutside: strict block, normal/loose confirm, trusted/naked pass
+writeFileSync(join(OUT, "trunc_out.txt"), "data");
+await setMode("strict");
+check(
+	"strict truncate outside existing → block",
+	(await runCmd(`echo x > ${OUT}/trunc_out.txt`, PROJ)).verdict,
+	"block",
+);
+for (const mode of ["normal", "loose"]) {
+	await setMode(mode);
+	check(
+		`${mode} truncate outside existing → confirm`,
+		(await runCmd(`echo x > ${OUT}/trunc_out.txt`, PROJ)).verdict,
+		"confirm",
+	);
+}
+await setMode("loose");
+check(
+	"loose truncate outside existing → confirm",
+	(await runCmd(`echo x > ${OUT}/trunc_out.txt`, PROJ)).verdict,
+	"confirm",
+);
+await setMode("trusted");
+check(
+	"trusted truncate outside existing → pass",
+	(await runCmd(`echo x > ${OUT}/trunc_out.txt`, PROJ)).verdict,
+	"pass",
+);
+// the truncate command (not a redirect) follows the same split
+writeFileSync(join(OUT, "trunc_cmd.txt"), "data");
+await setMode("normal");
+check(
+	"normal truncate -s 0 outside existing → confirm",
+	(await runCmd(`truncate -s 0 ${OUT}/trunc_cmd.txt`, PROJ)).verdict,
+	"confirm",
+);
+await setMode("trusted");
+check(
+	"trusted truncate -s 0 outside existing → pass",
+	(await runCmd(`truncate -s 0 ${OUT}/trunc_cmd.txt`, PROJ)).verdict,
+	"pass",
+);
+// trusted now passes in-project overwrites too (matches its "pass overwrites" description)
+writeFileSync(join(PROJ, "ow_in.txt"), "x");
+writeFileSync(join(PROJ, "ow_dst.txt"), "x");
+check(
+	"trusted cp overwrite in-project existing → pass",
+	(await runCmd(`cp ${PROJ}/ow_in.txt ${PROJ}/ow_dst.txt`, PROJ)).verdict,
+	"pass",
+);
+await setMode("normal");
+check(
+	"normal cp overwrite in-project existing → confirm",
+	(await runCmd(`cp ${PROJ}/ow_in.txt ${PROJ}/ow_dst.txt`, PROJ)).verdict,
+	"confirm",
+);
 
 // ── #1 redirect: variable / wildcard / outside target ───────
 writeFileSync(join(PROJ, "redir_in.txt"), "data");

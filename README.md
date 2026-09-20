@@ -18,17 +18,17 @@ Intercepts destructive operations in tool calls (`bash`, `write`, `edit`): prote
 ## Install / 安装
 
 ```bash
-# From git (recommended / 推荐)
-pi install git:github.com/yaodashanren/pi-path-guard@v1
+# From npm (recommended / 最推荐)
+pi install npm:@yaosu/pi-path-guard
+
+# From git (second choice / 第二种方式)
+pi install git:github.com/yaodashanren/pi-path-guard
 
 # Local directory (development / 本地目录，开发用)
 pi install /path/to/pi-path-guard
 
 # Try without installing (no settings change / 临时试用，不写入 settings)
 pi -e ./pi-path-guard
-
-# npm: scope package
-# pi install npm:@yaosu/pi-path-guard
 ```
 
 After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 生效。

@@ -4,6 +4,18 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — interactive `/guard` is a single overlay popup
+
+### Overlay popup for the `/guard` settings UI
+
+- The interactive, no-argument `/guard` flow (switch mode / customize rules / manage protected & trusted paths) now runs inside **one self-contained floating overlay** (`ctx.ui.custom(..., { overlay: true })`) instead of a chain of separate host prompts. Navigation is a small in-panel screen stack: ↑/↓ move, ⏎ select, esc back, `q` quit at the main menu.
+- Everything is drawn in the popup, including the trusted/naked switch warnings (naked still asks **two** confirmations), the reset/clear confirmations, and the add-path text input (a `pi-tui` `Input` with IME cursor support).
+- The `tool_call` interception prompts are unchanged — they still use the host's built-in `ctx.ui.select` / `ctx.ui.confirm`.
+- Scriptable forms are unchanged: `/guard <mode>` and `/guard paths protected|trusted add|rm|list|clear <path>` behave exactly as before (including their host confirmations and no-UI behavior).
+- The previous chained `select`/`confirm`/`input` menus are kept as a fallback for hosts/mocks that do not implement `ctx.ui.custom`; headless no-UI behavior is unchanged.
+- State mutation is centralized in shared `action*` helpers (`actionSwitchMode`, `actionSetRule`, `actionResetMode`, `actionAddPath`, …) used by both the overlay and the fallback menus, so the two UI paths cannot drift.
+- Tests: +11 assertions (286 passing), driving the overlay component directly (mode switch incl. naked double-confirm, rule edit/reset, path add/remove, protected-path trust refusal, esc close) while the fallback chained-menu suite still passes unchanged.
+
 ## [1.5.7] — split the truncate rule; trusted truly passes overwrites
 
 ### Split `truncate` → `truncateInProject` / `truncateOutside`

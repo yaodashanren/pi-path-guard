@@ -19,11 +19,6 @@ import { register } from "node:module";
 // Redirect those specifiers to the installed pi runtime via a resolution hook.
 register(new URL("./pi-modules-hook.mjs", import.meta.url).href);
 
-// The extension needs the real pi-tui classes for its scrollable overview viewer.
-// Must be a dynamic import: register() above runs before this resolves (static imports
-// are hoisted, so a static `import { ScrollView }` would resolve too early).
-const { ScrollView } = await import("@earendil-works/pi-tui");
-
 const EXT = new URL("../extensions/path-guard.ts", import.meta.url).href;
 
 // ── mocked pi API ───────────────────────────────────────────
@@ -109,6 +104,42 @@ async function currentModeShown() {
 		ui: { notify: (m: string) => notify.push(m) },
 	});
 	return notify.join(" | ");
+}
+
+/**
+ * Open the /guard overlay and return a controller to drive it. The mock's
+ * custom() captures the component synchronously and resolves immediately, so
+ * the caller can press keys / render / inspect `closed` afterwards.
+ */
+async function openGuardPanel() {
+	let comp: any = null;
+	let closed = false;
+	const notifies: string[] = [];
+	await commands["guard"].handler("", {
+		hasUI: true,
+		cwd: PROJ,
+		ui: {
+			notify: (m: string) => notifies.push(m),
+			custom: async (
+				factory: (t: any, th: any, k: any, done: () => void) => any,
+			) => {
+				comp = factory({ requestRender: () => {} }, themeMock, {}, () => {
+					closed = true;
+				});
+				return undefined;
+			},
+			theme: themeMock,
+			setStatus: () => {},
+		},
+	});
+	return {
+		render: (w = 80): string => (comp?.render?.(w) ?? []).join("\n"),
+		press: (k: string) => comp?.handleInput?.(k),
+		get closed(): boolean {
+			return closed;
+		},
+		notifies,
+	};
 }
 
 function newSession() {
@@ -545,40 +576,188 @@ check(
 	"matrix",
 );
 
-// main → rules → overview → when custom() is available, uses the scrollable viewer
-const cusQueue = ["rules", "overview", "back"];
-let customCalls = 0;
-let customComponent: unknown = null;
-let customClosed = false;
+// /guard with a custom-capable UI → a single floating overlay popup. The rules
+// overview renders the effective matrix and scrolls in-panel (no host dialogs).
+let panelComp: any = null;
+let panelClosed = false;
 await commands["guard"].handler("", {
 	hasUI: true,
 	ui: {
 		notify: () => {},
-		select: async () => cusQueue.shift(),
 		custom: async (
-			factory: (t: any, th: any, k: any, done: () => void) => unknown,
+			factory: (t: any, th: any, k: any, done: () => void) => any,
 		) => {
-			customCalls++;
-			customComponent = factory({}, themeMock, {}, () => {
-				customClosed = true;
+			panelComp = factory({ requestRender: () => {} }, themeMock, {}, () => {
+				panelClosed = true;
 			});
-			// press "q" (raw input) → the component's handleInput should call done()
-			(
-				customComponent as { handleInput?: (data: string) => void } | null
-			)?.handleInput?.("q");
 			return undefined;
 		},
 		theme: themeMock,
 		setStatus: () => {},
 	},
 });
+const press = (k: string) => panelComp?.handleInput?.(k);
+// Raw terminal sequences for the keys (matchesKey parses these, not "down"/"return").
+const KEY_DOWN = "\x1b[B";
+const KEY_ENTER = "\r";
+const KEY_ESC = "\x1b";
+press(KEY_DOWN); // main: switch -> rules
+press(KEY_ENTER); // open rules
+press(KEY_DOWN); // rules: mode -> overview
+press(KEY_ENTER); // open overview
+const overviewRender: string = (panelComp?.render?.(80) ?? []).join("\n");
+press(KEY_DOWN); // scroll
+const scrolledRender: string = (panelComp?.render?.(80) ?? []).join("\n");
+press(KEY_ESC); // close overview
+press(KEY_ESC); // back to main
+press("q"); // quit
 check(
-	"rules menu overview uses scrollable custom viewer",
-	customCalls === 1 && customComponent instanceof ScrollView && customClosed
-		? "scrollable"
-		: "?",
-	"scrollable",
+	"/guard opens a single custom overlay popup",
+	panelComp && typeof panelComp.render === "function" ? "panel" : "?",
+	"panel",
 );
+check(
+	"overlay rules→overview shows the effective matrix",
+	overviewRender.includes("writeHome") &&
+		overviewRender.includes("effective rules matrix")
+		? "matrix"
+		: "?",
+	"matrix",
+);
+check(
+	"overlay overview scrolls in-panel",
+	scrolledRender.includes("1 more") ? "scrolled" : "?",
+	"scrolled",
+);
+check("overlay closes on q", panelClosed ? "closed" : "?", "closed");
+
+// ── /guard overlay popup (B1) — full-flow coverage ──
+// The overlay persists through ctx.cwd, so point it at a throwaway settings
+// file for these cases and restore the shared in-memory mode at the end.
+const PANEL_SETTINGS = "/tmp/pgtest/panel-settings.json";
+const prevSettingsEnv = process.env.PI_PATH_GUARD_SETTINGS;
+rmSync(PANEL_SETTINGS, { force: true });
+process.env.PI_PATH_GUARD_SETTINGS = PANEL_SETTINGS;
+const panelPrevMode =
+	(await currentModeShown()).match(/mode:\s*(\w+)/)?.[1] ?? "normal";
+
+// naked switch: two in-panel confirmations, no host dialog
+{
+	const p = await openGuardPanel();
+	p.press(KEY_ENTER); // main: switch (idx 0)
+	for (let i = 0; i < 4; i++) p.press(KEY_DOWN); // strict…naked
+	p.press(KEY_ENTER); // first confirmation
+	const first = p.render();
+	p.press(KEY_ENTER); // confirm #1 yes
+	const second = p.render();
+	p.press(KEY_ENTER); // confirm #2 yes → apply
+	check(
+		"overlay naked asks two in-panel confirmations",
+		first.includes("Switch to NAKED mode") &&
+			second.includes("FINAL confirmation")
+			? "two"
+			: "?",
+		"two",
+	);
+	check(
+		"overlay naked switch applies",
+		(await currentModeShown()).includes("naked") ? "naked" : "?",
+		"naked",
+	);
+	await setMode(panelPrevMode); // restore for the rest of the suite
+}
+
+// rule editing: rules → normal → writeHome → block (in-panel)
+{
+	const p = await openGuardPanel();
+	p.press(KEY_DOWN); // main: rules (idx 1)
+	p.press(KEY_ENTER);
+	p.press(KEY_ENTER); // rules → mode list (idx 0)
+	p.press(KEY_DOWN); // → normal (idx 1)
+	p.press(KEY_ENTER); // → normal rule editor
+	for (let i = 0; i < 3; i++) p.press(KEY_DOWN); // blockGroup…writeHome
+	p.press(KEY_ENTER); // → rule level
+	p.press(KEY_ENTER); // block (idx 0) → apply
+	check(
+		"overlay rule edit sets an override",
+		p.render().includes("set normal.writeHome = block") ? "set" : "?",
+		"set",
+	);
+}
+
+// reset all overrides: rules → reset → confirm (in-panel)
+{
+	const p = await openGuardPanel();
+	p.press(KEY_DOWN);
+	p.press(KEY_ENTER); // main → rules
+	p.press(KEY_DOWN);
+	p.press(KEY_DOWN);
+	p.press(KEY_ENTER); // rules → reset (idx 2)
+	p.press(KEY_ENTER); // confirm yes
+	check(
+		"overlay reset clears all overrides",
+		p.render().includes("cleared all rule overrides") ? "cleared" : "?",
+		"cleared",
+	);
+}
+
+// paths: add a protected path via the in-panel text input, then remove it
+{
+	await commands["guard"].handler("paths protected clear", {
+		ui: { notify: () => {} },
+	});
+	const path = "/tmp/pgtest/panel_add.txt";
+	const p = await openGuardPanel();
+	p.press(KEY_DOWN);
+	p.press(KEY_DOWN);
+	p.press(KEY_ENTER); // main → paths (idx 2)
+	p.press(KEY_ENTER); // → protected (idx 0)
+	p.press(KEY_ENTER); // → add (idx 0)
+	for (const ch of path) p.press(ch);
+	p.press(KEY_ENTER); // submit → add, back to actions
+	check(
+		"overlay adds a protected path via in-panel input",
+		p.render().includes("added protected path") ? "added" : "?",
+		"added",
+	);
+	p.press(KEY_DOWN);
+	p.press(KEY_ENTER); // actions → remove (idx 1)
+	p.press(KEY_ENTER); // pick the only path → remove, back to actions
+	check(
+		"overlay removes a protected path",
+		p.render().includes("removed protected path") ? "removed" : "?",
+		"removed",
+	);
+}
+
+// paths: trusting a built-in protected path is refused in-panel (no confirm)
+{
+	const p = await openGuardPanel();
+	p.press(KEY_DOWN);
+	p.press(KEY_DOWN);
+	p.press(KEY_ENTER); // main → paths
+	p.press(KEY_DOWN);
+	p.press(KEY_ENTER); // → trusted (idx 1)
+	p.press(KEY_ENTER); // → add
+	for (const ch of join(PROJ, ".env")) p.press(ch);
+	p.press(KEY_ENTER);
+	check(
+		"overlay refuses to trust a protected path",
+		p.render().includes("cannot trust") ? "refused" : "?",
+		"refused",
+	);
+}
+
+// esc at the top level closes the popup
+{
+	const p = await openGuardPanel();
+	p.press(KEY_ESC);
+	check("overlay esc at main closes", p.closed ? "closed" : "?", "closed");
+}
+
+// Restore the shared settings target and the suite's in-memory mode.
+process.env.PI_PATH_GUARD_SETTINGS = prevSettingsEnv;
+await setMode(panelPrevMode);
 
 // main → rules → reset → confirm → clears all overrides
 const resetQueue = ["rules", "reset", "back"];

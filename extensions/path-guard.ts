@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.5.7.
+ * recent release/tag is 1.6.0.
  */
 import type {
 	ExtensionAPI,
@@ -24,7 +24,14 @@ import {
 	sep,
 } from "node:path";
 import { homedir } from "node:os";
-import { ScrollView, Text, matchesKey } from "@earendil-works/pi-tui";
+import {
+	Input,
+	matchesKey,
+	truncateToWidth,
+	visibleWidth,
+	type Component,
+	type Focusable,
+} from "@earendil-works/pi-tui";
 import {
 	realpathSync,
 	existsSync,
@@ -828,37 +835,121 @@ async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
 			if (list.includes(norm)) {
 				return show(`Path Guard: already ${kind} — ${norm}`);
 			}
-			list.push(norm);
-			const where = persistConfig(ctx.cwd);
-			return show(
-				`Path Guard: added ${kind} path ${norm} (${persistNote(where)})`,
-			);
+			return show(actionAddPath(kind, arg, ctx));
 		}
 		case "rm":
 		case "remove": {
 			if (!arg) return show(`Usage: /guard paths ${kind} rm <path>`);
 			const norm = normalizeProtectedEntry(arg, ctx.cwd);
-			const idx = list.indexOf(norm);
-			if (idx === -1) {
-				return show(`Path Guard: not a ${kind} path — ${norm}`);
-			}
-			list.splice(idx, 1);
-			const where = persistConfig(ctx.cwd);
-			return show(
-				`Path Guard: removed ${kind} path ${norm} (${persistNote(where)})`,
-			);
+			return show(actionRemovePath(kind, norm, ctx));
 		}
-		case "clear": {
-			if (list.length === 0) {
-				return show(`Path Guard: no ${kind} paths to clear`);
-			}
-			list.length = 0;
-			const where = persistConfig(ctx.cwd);
-			return show(`Path Guard: cleared all ${kind} paths (${persistNote(where)})`);
-		}
+		case "clear":
+			return show(actionClearPaths(kind, ctx));
 		default:
 			return show(PATHS_USAGE);
 	}
+}
+
+// ─── Shared /guard actions (single source of truth for the overlay & menus) ──
+// Both the interactive overlay panel and the legacy chained menus (plus the
+// scriptable /guard paths handler) mutate state through these helpers, so the
+// two UI paths can never drift apart.
+
+/** Switch the active mode: update config, refresh the footer, persist. Confirm first. */
+function actionSwitchMode(mode: GuardMode, ctx: ExtensionCommandContext): string {
+	config.mode = mode;
+	setMode(mode, ctx.ui);
+	const where = persistConfig(ctx.cwd);
+	return `Path Guard switched to: ${mode} (${persistNote(where)})`;
+}
+
+/** Set one rule override for a mode (block/confirm/pass). */
+function actionSetRule(
+	mode: GuardMode,
+	rule: RuleId,
+	level: RuleLevel,
+	ctx: ExtensionCommandContext,
+): string {
+	(config.rules[mode] ??= {})[rule] = level;
+	clearSessionPass(mode);
+	const where = persistConfig(ctx.cwd);
+	return `Path Guard: set ${mode}.${rule} = ${level} (${persistNote(where)})`;
+}
+
+/** Reset one rule to its built-in default (drops the override). */
+function actionResetRule(
+	mode: GuardMode,
+	rule: RuleId,
+	ctx: ExtensionCommandContext,
+): string {
+	if (config.rules[mode]) delete config.rules[mode]![rule];
+	clearSessionPass(mode);
+	const where = persistConfig(ctx.cwd);
+	return `Path Guard: ${mode}.${rule} back to default ${DEFAULT_MODES[mode][rule]} (${persistNote(where)})`;
+}
+
+/** Reset every override of one mode to built-in defaults. */
+function actionResetMode(mode: GuardMode, ctx: ExtensionCommandContext): string {
+	delete config.rules[mode];
+	clearSessionPass(mode);
+	const where = persistConfig(ctx.cwd);
+	return `Path Guard: reset mode ${mode} to defaults (${persistNote(where)})`;
+}
+
+/** Clear all rule overrides for every mode. */
+function actionResetAllRules(ctx: ExtensionCommandContext): string {
+	config.rules = {};
+	clearSessionPass();
+	const where = persistConfig(ctx.cwd);
+	return `Path Guard: cleared all rule overrides (${persistNote(where)})`;
+}
+
+/**
+ * Add a path entry. Returns the notify/status message. For `trusted`, callers
+ * must show the warning confirmation first — this still re-checks that the path
+ * is trustable (defence in depth) and reports "already" rather than duplicating.
+ */
+function actionAddPath(
+	kind: PathKind,
+	input: string,
+	ctx: ExtensionCommandContext,
+): string {
+	const norm = normalizeProtectedEntry(input, ctx.cwd);
+	if (kind === "trusted") {
+		const denied = untrustableReason(norm);
+		if (denied) return `Path Guard: cannot trust ${norm} — ${denied}`;
+	}
+	const list = pathList(kind);
+	if (list.includes(norm)) return `Path Guard: already ${kind} — ${norm}`;
+	list.push(norm);
+	const where = persistConfig(ctx.cwd);
+	return `Path Guard: added ${kind} path ${norm} (${persistNote(where)})`;
+}
+
+/** Remove a (normalized) path entry. */
+function actionRemovePath(
+	kind: PathKind,
+	target: string,
+	ctx: ExtensionCommandContext,
+): string {
+	const list = pathList(kind);
+	const idx = list.indexOf(target);
+	if (idx === -1) return `Path Guard: not a ${kind} path — ${target}`;
+	list.splice(idx, 1);
+	const where = persistConfig(ctx.cwd);
+	return `Path Guard: removed ${kind} path ${target} (${persistNote(where)})`;
+}
+
+/** Clear every entry of a path category. */
+function actionClearPaths(
+	kind: PathKind,
+	ctx: ExtensionCommandContext,
+): string {
+	const list = pathList(kind);
+	if (list.length === 0) return `Path Guard: no ${kind} paths to clear`;
+	list.length = 0;
+	const where = persistConfig(ctx.cwd);
+	return `Path Guard: cleared all ${kind} paths (${persistNote(where)})`;
 }
 
 /**
@@ -919,13 +1010,7 @@ async function runModePicker(ctx: ExtensionCommandContext): Promise<boolean> {
 		);
 		return false;
 	}
-	config.mode = picked;
-	setMode(picked, ctx.ui);
-	const where = persistConfig(ctx.cwd);
-	ctx.ui.notify(
-		`Path Guard switched to: ${picked} (${persistNote(where)})`,
-		"info",
-	);
+	ctx.ui.notify(actionSwitchMode(picked, ctx), "info");
 	return true;
 }
 
@@ -1005,16 +1090,7 @@ async function runPathCategoryMenu(
 					continue;
 				}
 			}
-			if (list.includes(norm)) {
-				ctx.ui.notify(`Path Guard: already ${kind} — ${norm}`, "info");
-				continue;
-			}
-			list.push(norm);
-			const where = persistConfig(ctx.cwd);
-			ctx.ui.notify(
-				`Path Guard: added ${kind} path ${norm} (${persistNote(where)})`,
-				"info",
-			);
+			ctx.ui.notify(actionAddPath(kind, input, ctx), "info");
 			continue;
 		}
 
@@ -1028,14 +1104,7 @@ async function runPathCategoryMenu(
 				ctx.ui.notify("Cancelled remove", "info");
 				continue;
 			}
-			const idx = list.indexOf(target);
-			if (idx === -1) continue;
-			list.splice(idx, 1);
-			const where = persistConfig(ctx.cwd);
-			ctx.ui.notify(
-				`Path Guard: removed ${kind} path ${target} (${persistNote(where)})`,
-				"info",
-			);
+			ctx.ui.notify(actionRemovePath(kind, target, ctx), "info");
 			continue;
 		}
 
@@ -1053,12 +1122,7 @@ async function runPathCategoryMenu(
 				ctx.ui.notify("Cancelled clear", "info");
 				continue;
 			}
-			list.length = 0;
-			const where = persistConfig(ctx.cwd);
-			ctx.ui.notify(
-				`Path Guard: cleared all ${kind} paths (${persistNote(where)})`,
-				"info",
-			);
+			ctx.ui.notify(actionClearPaths(kind, ctx), "info");
 		}
 	}
 }
@@ -1078,51 +1142,14 @@ const GUARD_RULES_MENU = [
 const OVERVIEW_WIDGET = "path-guard-overview";
 
 /**
- * Show the full rules matrix in a scrollable viewer. Prefers ctx.ui.custom() (a proper
- * paged/scrollable read-only component); falls back to the string-array widget, which the
- * host caps at a few lines, for headless / minimal UI mocks.
+ * Show the full rules matrix above the editor. Only used by the legacy chained
+ * fallback menus (the overlay renders the matrix in its own overview screen).
  */
 async function showMatrixViewer(
 	ctx: ExtensionCommandContext,
 	matrix: string,
 ): Promise<void> {
-	const lines = matrix.split("\n");
-	if (typeof ctx.ui.custom === "function") {
-		await ctx.ui.custom<void>((_tui, _theme, _keybindings, done) => {
-			const view = new ScrollView(new Text(lines.join("\n"), 1, 1), {
-				scrollbar: "auto",
-				overscroll: "contain",
-			});
-			// A custom() component receives raw key input via handleInput(data);
-			// done() is the factory's 4th arg and closes the viewer. (The `onKey`
-			// property from some docs is not a real method in current pi-tui.)
-			view.handleInput = (data: string) => {
-				if (matchesKey(data, "up")) view.scrollBy(-1);
-				else if (matchesKey(data, "down")) view.scrollBy(1);
-				else if (matchesKey(data, "pageup") || matchesKey(data, "ctrl+u"))
-					view.scrollBy(-Math.max(1, view.viewportHeight));
-				else if (matchesKey(data, "pagedown") || matchesKey(data, "ctrl+d"))
-					view.scrollBy(Math.max(1, view.viewportHeight));
-				else if (matchesKey(data, "home")) view.scrollToStart();
-				else if (matchesKey(data, "end")) view.scrollToEnd();
-				else if (
-					matchesKey(data, "escape") ||
-					matchesKey(data, "q") ||
-					matchesKey(data, "return") ||
-					matchesKey(data, "enter") ||
-					matchesKey(data, "ctrl+c")
-				)
-					done();
-			};
-			return view;
-		});
-		ctx.ui.notify(
-			"Rule matrix shown — ↑/↓ scroll, q/⏎/esc to close (返回以收起)",
-			"info",
-		);
-		return;
-	}
-	ctx.ui.setWidget(OVERVIEW_WIDGET, lines);
+	ctx.ui.setWidget(OVERVIEW_WIDGET, matrix.split("\n"));
 	ctx.ui.notify(
 		"Effective rules matrix shown above the editor (返回以收起)",
 		"info",
@@ -1167,11 +1194,6 @@ function rulesSummary(): string {
 		: "Path Guard: no rule overrides — all modes use built-in defaults";
 }
 
-/** Persist a rules change and notify with the storage location. */
-function persistRules(ctx: ExtensionCommandContext): string {
-	return persistConfig(ctx.cwd);
-}
-
 /**
  * Level picker for a single rule in a mode. Picks block/confirm/pass, or reset
  * (delete the override so the built-in default applies). Returns to the caller,
@@ -1202,23 +1224,11 @@ async function ruleLevelPicker(
 	const op = picked.split(/\s+/)[0];
 	if (op === "back") return;
 	if (op === "reset") {
-		if (config.rules[mode]) delete config.rules[mode]![rule];
-		clearSessionPass(mode);
-		const where = persistRules(ctx);
-		ctx.ui.notify(
-			`Path Guard: ${mode}.${rule} back to default ${dflt} (${persistNote(where)})`,
-			"info",
-		);
+		ctx.ui.notify(actionResetRule(mode, rule, ctx), "info");
 		return;
 	}
 	if (isRuleLevel(op)) {
-		(config.rules[mode] ??= {})[rule] = op;
-		clearSessionPass(mode);
-		const where = persistRules(ctx);
-		ctx.ui.notify(
-			`Path Guard: set ${mode}.${rule} = ${op} (${persistNote(where)})`,
-			"info",
-		);
+		ctx.ui.notify(actionSetRule(mode, rule, op, ctx), "info");
 	}
 }
 
@@ -1253,13 +1263,7 @@ async function runModeEditor(
 				"",
 			);
 			if (!ok) continue;
-			delete config.rules[mode];
-			clearSessionPass(mode);
-			const where = persistRules(ctx);
-			ctx.ui.notify(
-				`Path Guard: reset mode ${mode} to defaults (${persistNote(where)})`,
-				"info",
-			);
+			ctx.ui.notify(actionResetMode(mode, ctx), "info");
 			continue;
 		}
 		if ((RULE_IDS as readonly string[]).includes(op)) {
@@ -1302,13 +1306,7 @@ async function runModeSubmenu(ctx: ExtensionCommandContext): Promise<void> {
 				"",
 			);
 			if (!ok) continue;
-			delete config.rules[mo];
-			clearSessionPass(mo);
-			const where = persistRules(ctx);
-			ctx.ui.notify(
-				`Path Guard: reset mode ${mo} to defaults (${persistNote(where)})`,
-				"info",
-			);
+			ctx.ui.notify(actionResetMode(mo, ctx), "info");
 			continue;
 		}
 		if (isGuardMode(op)) await runModeEditor(op, ctx);
@@ -1352,17 +1350,609 @@ async function runRulesMenu(ctx: ExtensionCommandContext): Promise<void> {
 				"Reset every mode back to its built-in defaults?",
 			);
 			if (!ok) continue;
-			config.rules = {};
-			clearSessionPass();
-			const where = persistRules(ctx);
-			ctx.ui.notify(
-				`Path Guard: cleared all rule overrides (${persistNote(where)})`,
-				"info",
-			);
+			ctx.ui.notify(actionResetAllRules(ctx), "info");
 			continue;
 		}
 		if (op === "mode") await runModeSubmenu(ctx);
 	}
+}
+
+// ─── Interactive /guard overlay (single self-contained popup) ──────────
+// B1: the whole /guard settings flow (mode / rules / paths, including all
+// confirmations and the path text input) lives inside ONE floating overlay
+// component. The tool_call interception prompts are unrelated and still use the
+// host's built-in ctx.ui.select/confirm.
+
+/** One screen in the /guard overlay navigation stack (the top of the stack is shown). */
+type PanelScreen =
+	| { kind: "main"; idx: number }
+	| { kind: "mode"; idx: number }
+	| { kind: "rules"; idx: number }
+	| { kind: "ruleMode"; idx: number }
+	| { kind: "ruleEditor"; mode: GuardMode; idx: number }
+	| { kind: "ruleLevel"; mode: GuardMode; rule: RuleId; idx: number }
+	| { kind: "overview"; scroll: number }
+	| { kind: "pathsCategory"; idx: number }
+	| { kind: "pathsActions"; pathKind: PathKind; idx: number }
+	| { kind: "resetModePick"; idx: number }
+	| { kind: "pathsRemove"; pathKind: PathKind; idx: number }
+	| { kind: "pathsAdd"; pathKind: PathKind };
+
+/** An in-panel yes/no confirmation (never offered by the direct /guard <mode> shortcut). */
+interface PendingConfirm {
+	title: string;
+	body: string;
+	onConfirm: () => void;
+}
+
+/** Minimal theme surface the panel uses (kept loose so test mocks are accepted). */
+type PanelTheme = { fg: (color: any, text: string) => string };
+
+/** The option labels for a screen; the leading token is the action id. */
+function panelOptions(s: PanelScreen): string[] {
+	switch (s.kind) {
+		case "main":
+			return GUARD_MAIN_MENU;
+		case "mode":
+			return GUARD_MODES.map(
+				(mo) =>
+					`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === currentMode ? " (current)" : ""}`,
+			);
+		case "rules":
+			return GUARD_RULES_MENU;
+		case "ruleMode":
+			return [
+				...GUARD_MODES.map((mo) => {
+					const n = Object.keys(config.rules[mo] ?? {}).length;
+					return `${mo} — ${MODE_DESCRIPTIONS[mo]}${n ? ` (${n} overrides)` : ""}${mo === currentMode ? " (current)" : ""}`;
+				}),
+				"reset — Reset a mode to built-in defaults (恢复某模式默认)",
+				"back — Back to rules menu (返回)",
+			];
+		case "resetModePick":
+			return [
+				...GUARD_MODES.map((mo) => `${mo} — ${MODE_DESCRIPTIONS[mo]}`),
+				"back — Back (返回)",
+			];
+		case "ruleEditor":
+			return [
+				...RULE_IDS.map(
+					(r) => `${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(s.mode, r)})`,
+				),
+				"reset — Reset this mode to built-in defaults (恢复该模式默认)",
+				"back — Back to mode list (返回)",
+			];
+		case "ruleLevel":
+			return [
+				...RULE_LEVELS.map(
+					(l) =>
+						`${RULE_LEVEL_LABELS[l]}${l === rlFor(s.mode, s.rule) ? " (current)" : ""}${l === DEFAULT_MODES[s.mode][s.rule] ? " [default]" : ""}`,
+				),
+				`reset — back to built-in default (${DEFAULT_MODES[s.mode][s.rule]}) (恢复该条默认)`,
+				"back — Back to rule list (返回)",
+			];
+		case "pathsCategory":
+			return GUARD_PATHS_CATEGORY_MENU;
+		case "pathsActions":
+			return pathsActionsMenu(s.pathKind);
+		case "pathsRemove":
+			return [...pathList(s.pathKind), "back — Back to actions (返回)"];
+		case "pathsAdd":
+		case "overview":
+			return [];
+	}
+}
+
+/** Draw a bordered dialog frame around inner lines, clamped to the render width. */
+function framePanel(inner: string[], width: number): string[] {
+	const w = Math.max(2, width);
+	const contentW = Math.max(0, w - 2);
+	const top = "┌" + "─".repeat(contentW) + "┐";
+	const bottom = "└" + "─".repeat(contentW) + "┘";
+	const body = inner.map((line) => {
+		const t = truncateToWidth(line, contentW, "…");
+		const pad = " ".repeat(Math.max(0, contentW - visibleWidth(t)));
+		return "│" + t + pad + "│";
+	});
+	return [top, ...body, bottom];
+}
+
+/**
+ * The self-contained /guard settings popup: a small screen-stack state machine
+ * rendered as one floating overlay. It owns its own confirmations and its own
+ * single-line path input, so nothing else is shown while it is open.
+ */
+class GuardPanel implements Component, Focusable {
+	/** Focusable — set by the TUI so the embedded Input can position the cursor. */
+	focused = false;
+
+	private stack: PanelScreen[] = [{ kind: "main", idx: 0 }];
+	private confirmState: PendingConfirm | null = null;
+	private confirmIdx = 0;
+	private status = "";
+	private addInput: Input | null = null;
+
+	private ctx: ExtensionCommandContext;
+	private theme: PanelTheme;
+	private requestRender: () => void;
+	private done: (result: void) => void;
+
+	constructor(
+		ctx: ExtensionCommandContext,
+		theme: PanelTheme,
+		requestRender: () => void,
+		done: (result: void) => void,
+	) {
+		this.ctx = ctx;
+		this.theme = theme;
+		this.requestRender = requestRender;
+		this.done = done;
+	}
+
+	private current(): PanelScreen {
+		return this.stack[this.stack.length - 1];
+	}
+
+	private push(s: PanelScreen): void {
+		this.stack.push(s);
+		if (s.kind === "pathsAdd") {
+			this.addInput = new Input({
+				placeholder: "absolute, ~, or path relative to cwd",
+			});
+			this.addInput.onSubmit = (v) => this.submitAdd(v);
+			this.addInput.onEscape = () => this.pop();
+		}
+		this.requestRender();
+	}
+
+	private pop(): void {
+		if (this.stack.length <= 1) {
+			this.done();
+			return;
+		}
+		const leaving = this.current();
+		this.stack.pop();
+		if (leaving.kind === "pathsAdd") this.addInput = null;
+		this.requestRender();
+	}
+
+	private goMain(): void {
+		this.stack = [{ kind: "main", idx: 0 }];
+		this.addInput = null;
+		this.requestRender();
+	}
+
+	private move(delta: number): void {
+		const s = this.current();
+		const n = panelOptions(s).length;
+		if (n === 0 || !("idx" in s)) return;
+		s.idx = Math.max(0, Math.min(n - 1, s.idx + delta));
+	}
+
+	private askConfirm(title: string, body: string, onConfirm: () => void): void {
+		this.confirmState = { title, body, onConfirm };
+		this.confirmIdx = 0;
+		this.requestRender();
+	}
+
+	private resolveConfirm(yes: boolean): void {
+		const c = this.confirmState;
+		this.confirmState = null;
+		this.requestRender();
+		if (c && yes) c.onConfirm();
+	}
+
+	private requestModeSwitch(mode: GuardMode): void {
+		if (mode === "trusted") {
+			this.askConfirm("⚠️ Switch to trusted mode?", TRUSTED_SWITCH_WARNING, () =>
+				this.doSwitch(mode),
+			);
+		} else if (mode === "naked") {
+			this.askConfirm(
+				"⚠️ Switch to NAKED mode?",
+				NAKED_SWITCH_WARNING_1,
+				() =>
+					this.askConfirm(
+						"⚠️⚠️ FINAL confirmation — disable ALL protection?",
+						NAKED_SWITCH_WARNING_2,
+						() => this.doSwitch(mode),
+					),
+			);
+		} else {
+			this.doSwitch(mode);
+		}
+	}
+
+	private doSwitch(mode: GuardMode): void {
+		this.status = actionSwitchMode(mode, this.ctx);
+		this.goMain();
+	}
+
+	private submitAdd(raw: string): void {
+		const s = this.current();
+		if (s.kind !== "pathsAdd") return;
+		const kind = s.pathKind;
+		if (!raw.trim()) return;
+		if (kind === "trusted") {
+			const norm = normalizeProtectedEntry(raw, this.ctx.cwd);
+			const denied = untrustableReason(norm);
+			if (denied) {
+				this.status = `Path Guard: cannot trust ${norm} — ${denied}`;
+				this.requestRender();
+				return;
+			}
+			this.askConfirm("⚠️ Trust this path?", TRUST_PATH_WARNING, () => {
+				this.status = actionAddPath(kind, raw, this.ctx);
+				this.pop();
+			});
+			return;
+		}
+		this.status = actionAddPath(kind, raw, this.ctx);
+		this.pop();
+	}
+
+	private activate(): void {
+		const s = this.current();
+		const opts = panelOptions(s);
+		if (opts.length === 0) return;
+		const id = opts[(s as { idx: number }).idx].split(/\s+/)[0];
+		switch (s.kind) {
+			case "main":
+				if (id === "switch") this.push({ kind: "mode", idx: 0 });
+				else if (id === "rules") this.push({ kind: "rules", idx: 0 });
+				else if (id === "paths")
+					this.push({ kind: "pathsCategory", idx: 0 });
+				return;
+			case "mode": {
+				const mode = GUARD_MODES[s.idx];
+				if (mode) this.requestModeSwitch(mode);
+				return;
+			}
+			case "rules":
+				if (id === "mode") this.push({ kind: "ruleMode", idx: 0 });
+				else if (id === "overview")
+					this.push({ kind: "overview", scroll: 0 });
+				else if (id === "reset")
+					this.askConfirm(
+						"Clear ALL rule overrides?",
+						"Reset every mode back to its built-in defaults?",
+						() => {
+							this.status = actionResetAllRules(this.ctx);
+							this.requestRender();
+						},
+					);
+				else if (id === "back") this.pop();
+				return;
+			case "ruleMode":
+				if (id === "reset") this.push({ kind: "resetModePick", idx: 0 });
+				else if (id === "back") this.pop();
+				else if (isGuardMode(id))
+					this.push({ kind: "ruleEditor", mode: id, idx: 0 });
+				return;
+			case "resetModePick": {
+				if (id === "back") {
+					this.pop();
+					return;
+				}
+				if (!isGuardMode(id)) return;
+				const mode = id;
+				this.askConfirm(
+					`Reset mode "${mode}" to built-in defaults?`,
+					"",
+					() => {
+						this.status = actionResetMode(mode, this.ctx);
+						this.pop();
+					},
+				);
+				return;
+			}
+			case "ruleEditor": {
+				const mode = s.mode;
+				if (id === "reset")
+					this.askConfirm(
+						`Reset mode "${mode}" to built-in defaults?`,
+						"",
+						() => {
+							this.status = actionResetMode(mode, this.ctx);
+							this.requestRender();
+						},
+					);
+				else if (id === "back") this.pop();
+				else if ((RULE_IDS as readonly string[]).includes(id))
+					this.push({
+						kind: "ruleLevel",
+						mode,
+						rule: id as RuleId,
+						idx: 0,
+					});
+				return;
+			}
+			case "ruleLevel": {
+				const { mode, rule } = s;
+				if (id === "back") this.pop();
+				else if (id === "reset") {
+					this.status = actionResetRule(mode, rule, this.ctx);
+					this.pop();
+				} else if (isRuleLevel(id)) {
+					this.status = actionSetRule(mode, rule, id, this.ctx);
+					this.pop();
+				}
+				return;
+			}
+			case "pathsCategory":
+				if (id === "protected" || id === "trusted")
+					this.push({ kind: "pathsActions", pathKind: id, idx: 0 });
+				else if (id === "back") this.pop();
+				return;
+			case "pathsActions": {
+				const kind = s.pathKind;
+				if (id === "add") this.push({ kind: "pathsAdd", pathKind: kind });
+				else if (id === "remove") {
+					if (pathList(kind).length === 0) {
+						this.status = `Path Guard: no ${kind} paths to remove`;
+						this.requestRender();
+					} else this.push({ kind: "pathsRemove", pathKind: kind, idx: 0 });
+				} else if (id === "clear") {
+					if (pathList(kind).length === 0) {
+						this.status = `Path Guard: no ${kind} paths to clear`;
+						this.requestRender();
+					} else
+						this.askConfirm(
+							`Clear all ${kind} paths?`,
+							`Remove these ${pathList(kind).length} path(s)?\n` +
+								pathList(kind)
+									.map((p) => `· ${p}`)
+									.join("\n"),
+							() => {
+								this.status = actionClearPaths(kind, this.ctx);
+								this.requestRender();
+							},
+						);
+				} else if (id === "back") this.pop();
+				return;
+			}
+			case "pathsRemove": {
+				const kind = s.pathKind;
+				const list = pathList(kind);
+				if (s.idx >= list.length) {
+					this.pop();
+					return;
+				}
+				this.status = actionRemovePath(kind, list[s.idx], this.ctx);
+				this.pop();
+				return;
+			}
+			case "pathsAdd":
+			case "overview":
+				return;
+		}
+	}
+
+	handleInput(data: string): void {
+		if (this.confirmState) {
+			if (
+				matchesKey(data, "up") ||
+				matchesKey(data, "down") ||
+				matchesKey(data, "left") ||
+				matchesKey(data, "right") ||
+				matchesKey(data, "tab")
+			) {
+				this.confirmIdx = this.confirmIdx === 0 ? 1 : 0;
+				this.requestRender();
+				return;
+			}
+			if (matchesKey(data, "return") || matchesKey(data, "enter")) {
+				this.resolveConfirm(this.confirmIdx === 0);
+				return;
+			}
+			if (matchesKey(data, "escape")) this.resolveConfirm(false);
+			return;
+		}
+
+		const s = this.current();
+		if (s.kind === "pathsAdd") {
+			this.addInput?.handleInput(data);
+			this.requestRender();
+			return;
+		}
+		if (s.kind === "overview") {
+			const maxScroll = Math.max(0, rulesMatrix().split("\n").length - 1);
+			if (matchesKey(data, "up")) s.scroll = Math.max(0, s.scroll - 1);
+			else if (matchesKey(data, "down"))
+				s.scroll = Math.min(maxScroll, s.scroll + 1);
+			else if (matchesKey(data, "pageup") || matchesKey(data, "ctrl+u"))
+				s.scroll = Math.max(0, s.scroll - 10);
+			else if (matchesKey(data, "pagedown") || matchesKey(data, "ctrl+d"))
+				s.scroll = Math.min(maxScroll, s.scroll + 10);
+			else if (matchesKey(data, "home")) s.scroll = 0;
+			else if (matchesKey(data, "end")) s.scroll = maxScroll;
+			else if (
+				matchesKey(data, "escape") ||
+				matchesKey(data, "q") ||
+				matchesKey(data, "return") ||
+				matchesKey(data, "enter")
+			) {
+				this.pop();
+				return;
+			}
+			this.requestRender();
+			return;
+		}
+
+		if (matchesKey(data, "up")) this.move(-1);
+		else if (matchesKey(data, "down")) this.move(1);
+		else if (matchesKey(data, "return") || matchesKey(data, "enter"))
+			this.activate();
+		else if (matchesKey(data, "escape")) this.pop();
+		else if (matchesKey(data, "q") && s.kind === "main") {
+			this.done();
+			return;
+		}
+		this.requestRender();
+	}
+
+	/** Windowed selection list (bounded so the panel never grows unbounded). */
+	private listLines(items: string[], idx: number, max = 14): string[] {
+		if (items.length === 0) return ["(none)"];
+		const n = items.length;
+		const start = Math.max(0, Math.min(idx - Math.floor(max / 2), n - max));
+		const end = Math.min(n, start + max);
+		const lines: string[] = [];
+		if (start > 0) lines.push(`  … ${start} above`);
+		for (let i = start; i < end; i++)
+			lines.push(`${i === idx ? "▶ " : "  "}${items[i]}`);
+		if (end < n) lines.push(`  … ${n - end} below`);
+		return lines;
+	}
+
+	private overviewLines(lines: string[], scroll: number): string[] {
+		const rows = 14;
+		const maxScroll = Math.max(0, lines.length - rows);
+		const start = Math.min(scroll, maxScroll);
+		const end = Math.min(lines.length, start + rows);
+		const out = lines.slice(start, end);
+		if (start > 0) out.unshift(`  ↑ ${start} more`);
+		if (end < lines.length) out.push(`  ↓ ${lines.length - end} more`);
+		return out;
+	}
+
+	private footerHint(): string {
+		if (this.confirmState) return "↑/↓ choose · ⏎ confirm · esc cancel";
+		const s = this.current();
+		if (s.kind === "overview")
+			return "↑/↓/PgUp/PgDn scroll · ⏎/esc close";
+		if (s.kind === "pathsAdd") return "type a path · ⏎ submit · esc back";
+		return `↑/↓ move · ⏎ select · esc back${s.kind === "main" ? " · q quit" : ""}`;
+	}
+
+	private renderScreen(s: PanelScreen, width: number): string[] {
+		const out: string[] = [];
+		switch (s.kind) {
+			case "main":
+				out.push("Choose an action:", "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "mode":
+				out.push(...rulesMatrix().split("\n"), "");
+				out.push(`Current mode: ${currentMode} — choose one:`);
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "rules":
+				out.push(rulesSummary().split("\n")[0], "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "ruleMode":
+				out.push("Pick a mode to customize:", "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "resetModePick":
+				out.push("Reset which mode to its built-in defaults?", "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "ruleEditor":
+				out.push(
+					`Mode: ${s.mode} — pick a rule to set (current levels shown):`,
+				);
+				out.push(...this.listLines(panelOptions(s), s.idx, 16));
+				break;
+			case "ruleLevel":
+				out.push(
+					`Mode: ${s.mode} · Rule: ${s.rule} — ${RULE_DESCRIPTIONS[s.rule]}`,
+				);
+				out.push(
+					`Current: ${rlFor(s.mode, s.rule)} · Built-in default: ${DEFAULT_MODES[s.mode][s.rule]}`,
+					"",
+				);
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "overview":
+				out.push(...this.overviewLines(rulesMatrix().split("\n"), s.scroll));
+				break;
+			case "pathsCategory":
+				out.push("Choose a path category:", "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "pathsActions": {
+				const list = pathList(s.pathKind);
+				out.push(
+					`${s.pathKind} paths (${list.length}):`,
+					...(list.length
+						? list.slice(0, 6).map((p) => `· ${p}`)
+						: ["(none)"]),
+					"",
+				);
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			}
+			case "pathsRemove":
+				out.push(`Choose a ${s.pathKind} path to remove:`, "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "pathsAdd":
+				out.push(
+					s.pathKind === "trusted"
+						? "Enter the path to ALWAYS trust:"
+						: "Enter the path to protect:",
+					"",
+				);
+				if (this.addInput)
+					out.push(...this.addInput.render(Math.max(20, width - 6)));
+				break;
+		}
+		return out;
+	}
+
+	render(width: number): string[] {
+		if (this.addInput) this.addInput.focused = this.focused;
+		const fg = (color: string, text: string) => {
+			try {
+				return this.theme.fg(color, text);
+			} catch {
+				return text;
+			}
+		};
+		const inner: string[] = [
+			fg("accent", `Path Guard  ·  mode: ${currentMode}`),
+			"",
+		];
+		if (this.confirmState) {
+			inner.push(fg("warning", this.confirmState.title));
+			for (const line of this.confirmState.body.split("\n")) inner.push(line);
+			inner.push("");
+			inner.push(`${this.confirmIdx === 0 ? "▶ " : "  "}✅ Confirm (确认)`);
+			inner.push(`${this.confirmIdx === 1 ? "▶ " : "  "}❌ Cancel (取消)`);
+		} else {
+			inner.push(...this.renderScreen(this.current(), width));
+		}
+		if (this.status) {
+			inner.push("");
+			for (const line of this.status.split("\n").slice(0, 4))
+				inner.push(fg("dim", line));
+		}
+		inner.push("", fg("dim", this.footerHint()));
+		return framePanel(inner, width);
+	}
+
+	invalidate(): void {
+		/* no cached render state */
+	}
+}
+
+/** Open the single /guard settings popup as a floating overlay. */
+async function runGuardPanel(ctx: ExtensionCommandContext): Promise<void> {
+	await ctx.ui.custom<void>(
+		(tui, theme, _keybindings, done) =>
+			new GuardPanel(ctx, theme, () => tui.requestRender(), done),
+		{
+			overlay: true,
+			overlayOptions: {
+				anchor: "center",
+				width: "80%",
+				maxHeight: "80%",
+				margin: 1,
+			},
+		},
+	);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -1428,6 +2018,13 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx.hasUI) {
 				ctx.ui.notify(`Path Guard current mode: ${currentMode}`, "info");
 				return;
+			}
+
+			// Prefer the single self-contained overlay popup when the host supports
+			// custom components; the chained select/confirm menus below remain as a
+			// fallback for hosts/mocks that do not implement ctx.ui.custom.
+			if (typeof ctx.ui.custom === "function") {
+				return runGuardPanel(ctx);
 			}
 
 			// Interactive main menu loop (fallback for no/invalid arg): switch mode, manage
@@ -3013,16 +3610,31 @@ function resolveReal(p: string): string {
 
 // ─── UI Interaction ───────────────────────────────────────────────────
 
+// ─── Warning copy (shared by the host confirm dialogs and the /guard overlay) ──
+
+/** Body of the trusted-path warning (used by both confirm paths). */
+const TRUST_PATH_WARNING =
+	"A trusted path is ALWAYS allowed: path-guard will not block or prompt for writes/edits/deletes/overwrites/truncates inside it, in ANY mode (like trusted mode for just that path).\n\nOnly protected paths (which can never be trusted) still apply. Confirm trusting it?";
+
+/** Body of the single trusted-mode switch warning. */
+const TRUSTED_SWITCH_WARNING =
+	"trusted is the most permissive mode: in-project deletes and outside overwrites/deletes of\nordinary files are no longer prompted. Only protected paths and system-destructive commands\nremain blocked.\n\npi's behavior boundary is very loose in this mode — please confirm the switch.";
+
+/** First of the two naked-mode switch warnings. */
+const NAKED_SWITCH_WARNING_1 =
+	"naked passes nearly everything: protected paths (.env/.ssh/keys), write/edit tool checks, git\ndestructive ops, truncation, and outside deletes/overwrites are no longer blocked or prompted.\nOnly system-destructive commands (mkfs/reboot/bulk-delete/block-device writes) are still\nconfirmed — everything else is allowed without a prompt.";
+
+/** Second, final naked-mode switch warning. */
+const NAKED_SWITCH_WARNING_2 =
+	"This is the final step. After this, path-guard passes nearly every operation with no blocking and\nno confirmation, including writes to protected paths and git destructive / truncate / outside\ndelete operations. Only system-destructive commands (mkfs/reboot/bulk-delete/block-device\nwrites) will still prompt for confirmation.\n\nOnly switch if you are certain you want minimal protection.";
+
 /** Warning confirmation before adding a trusted path: that path bypasses all path-guard prompts in every mode */
 async function confirmTrustPath(
 	ctx: ExtensionCommandContext,
 ): Promise<boolean> {
 	// No UI (headless) cannot confirm → conservatively refuse the trust
 	if (!ctx.hasUI) return false;
-	return ctx.ui.confirm(
-		"⚠️ Trust this path?",
-		"A trusted path is ALWAYS allowed: path-guard will not block or prompt for writes/edits/deletes/overwrites/truncates inside it, in ANY mode (like trusted mode for just that path).\n\nOnly protected paths (which can never be trusted) still apply. Confirm trusting it?",
-	);
+	return ctx.ui.confirm("⚠️ Trust this path?", TRUST_PATH_WARNING);
 }
 
 /** Warning confirmation before switching to trusted: behavior boundary is very loose; requires explicit user confirmation */
@@ -3031,10 +3643,7 @@ async function confirmTrustedSwitch(
 ): Promise<boolean> {
 	// No UI (headless) cannot confirm → conservatively refuse the switch
 	if (!ctx.hasUI) return false;
-	return ctx.ui.confirm(
-		"⚠️ Switch to trusted mode?",
-		"trusted is the most permissive mode: in-project deletes and outside overwrites/deletes of\nordinary files are no longer prompted. Only protected paths and system-destructive commands\nremain blocked.\n\npi's behavior boundary is very loose in this mode — please confirm the switch.",
-	);
+	return ctx.ui.confirm("⚠️ Switch to trusted mode?", TRUSTED_SWITCH_WARNING);
 }
 
 /** Double confirmation before switching to naked: disables ALL protection (incl. protected paths, destructive commands, and write/edit checks) */
@@ -3045,13 +3654,13 @@ async function confirmNakedSwitch(
 	if (!ctx.hasUI) return false;
 	const first = await ctx.ui.confirm(
 		"⚠️ Switch to NAKED mode?",
-		"naked passes nearly everything: protected paths (.env/.ssh/keys), write/edit tool checks, git\ndestructive ops, truncation, and outside deletes/overwrites are no longer blocked or prompted.\nOnly system-destructive commands (mkfs/reboot/bulk-delete/block-device writes) are still\nconfirmed — everything else is allowed without a prompt.",
+		NAKED_SWITCH_WARNING_1,
 	);
 	if (!first) return false;
 	// Second, final confirmation — makes an accidental /guard naked far less likely
 	return ctx.ui.confirm(
 		"⚠️⚠️ FINAL confirmation — disable ALL protection?",
-		"This is the final step. After this, path-guard passes nearly every operation with no blocking and\nno confirmation, including writes to protected paths and git destructive / truncate / outside\ndelete operations. Only system-destructive commands (mkfs/reboot/bulk-delete/block-device\nwrites) will still prompt for confirmation.\n\nOnly switch if you are certain you want minimal protection.",
+		NAKED_SWITCH_WARNING_2,
 	);
 }
 

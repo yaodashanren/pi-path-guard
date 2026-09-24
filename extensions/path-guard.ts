@@ -282,7 +282,8 @@ type RuleId =
 	| "runScriptInProject" // source/./bash script.sh inside the project
 	| "runScriptOutside" // … outside the project / under HOME
 	| "runScriptProtected" // … targeting a built-in protected path
-	| "scriptUnresolved"; // … a `$VAR`/glob target that cannot be resolved statically
+	| "scriptUnresolved" // … a `$VAR`/glob target that cannot be resolved statically
+	| "redirectUnresolved"; // … a `$VAR`/glob redirect target that cannot be resolved statically
 
 const RULE_IDS: readonly RuleId[] = [
 	"blockGroup",
@@ -304,6 +305,7 @@ const RULE_IDS: readonly RuleId[] = [
 	"runScriptOutside",
 	"runScriptProtected",
 	"scriptUnresolved",
+	"redirectUnresolved",
 ];
 
 /** Bilingual short labels for each tunable rule (used in the rule-editor menu). */
@@ -329,6 +331,8 @@ const RULE_DESCRIPTIONS: Record<RuleId, string> = {
 		"source/./bash script of a built-in protected path (运行脚本·内置保护)",
 	scriptUnresolved:
 		"source/./script with a $VAR/glob path that cannot be resolved (脚本路径不可静态解析)",
+	redirectUnresolved:
+		"redirect target with a $VAR/glob that cannot be resolved (重定向目标不可静态解析)",
 };
 
 const RULE_LEVELS: readonly RuleLevel[] = ["block", "confirm", "pass"];
@@ -365,6 +369,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptOutside: "block",
 		runScriptProtected: "block",
 		scriptUnresolved: "block",
+		redirectUnresolved: "block",
 	},
 	normal: {
 		blockGroup: "block",
@@ -386,6 +391,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptOutside: "confirm",
 		runScriptProtected: "confirm",
 		scriptUnresolved: "confirm",
+		redirectUnresolved: "confirm",
 	},
 	loose: {
 		blockGroup: "block",
@@ -407,6 +413,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptOutside: "confirm",
 		runScriptProtected: "confirm",
 		scriptUnresolved: "confirm",
+		redirectUnresolved: "confirm",
 	},
 	trusted: {
 		blockGroup: "block",
@@ -428,6 +435,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptOutside: "pass",
 		runScriptProtected: "pass",
 		scriptUnresolved: "pass",
+		redirectUnresolved: "pass",
 	},
 	naked: {
 		blockGroup: "confirm",
@@ -449,6 +457,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptOutside: "pass",
 		runScriptProtected: "pass",
 		scriptUnresolved: "pass",
+		redirectUnresolved: "pass",
 	},
 };
 
@@ -2300,6 +2309,41 @@ function judgeUnresolvedScriptTarget(target: string): SegmentVerdict {
 }
 
 /**
+ * Verdict for a redirect write target (`> "$VAR/..."`, `> *.log`) that cannot be
+ * resolved statically. The literal tail is still inspected, mirroring the
+ * run-script guard:
+ *   1. user-protected tail → hard block, every mode (the user said "never")
+ *   2. built-in protected tail → hard block (same as a literal redirect target;
+ *      still passes in naked, matching the literal-target branch)
+ *   3. no literal information at all (bare `$VAR` / bare glob) → conservative confirm
+ *   4. otherwise → redirectUnresolved (per-mode ladder: strict block, normal/loose
+ *      confirm, trusted/naked pass)
+ */
+function judgeUnresolvedRedirectTarget(target: string): SegmentVerdict {
+	const tail = unresolvedScriptTail(target);
+	// Nothing but separators / glob metacharacters → no information to act on.
+	if (!/[^/*?[\]]/.test(tail)) {
+		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+	}
+	if (tailLooksUserProtected(tail)) {
+		return {
+			kind: "block",
+			reason: `Redirect writes to user-protected path: ${target}`,
+		};
+	}
+	if (!inNaked() && matchesProtectedPath("/__var__" + tail)) {
+		return {
+			kind: "block",
+			reason: `Redirect writes to protected path: ${target}`,
+		};
+	}
+	return ruleVerdict(
+		"redirectUnresolved",
+		`Redirect target cannot be resolved statically — confirm (redirectUnresolved): ${target}`,
+	);
+}
+
+/**
  * `source`/`.` or shell-interpreter script execution verdict — path-aware + tunable:
  *   - user-protected target → hard block in EVERY mode (incl naked)
  *   - built-in protected target → runScriptProtected rule (strict block / normal,loose confirm / trusted,naked pass)
@@ -2526,9 +2570,10 @@ function classifySegmentOuter(
 	//    - "> existing file" (truncate, not >> append, not a device) → per truncate rule
 	const redirect = extractRedirectTarget(trimmed);
 	if (redirect) {
-		// Variable/glob target can't be statically resolved (echo x > $F) → conservative confirm (pass in naked)
+		// Variable/glob target can't be statically resolved (echo x > $F): inspect
+		// the literal tail, then follow the redirectUnresolved rule (per-mode).
 		if (isUnresolvedTarget(redirect.target)) {
-			return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+			return judgeUnresolvedRedirectTarget(redirect.target);
 		}
 		const real = resolveReal(resolve(realCwd, expandHome(redirect.target)));
 		if (isUserProtectedPath(real)) {

@@ -2767,6 +2767,114 @@ await setMode("strict");
 	);
 }
 
+// ── #14 redirectUnresolved: `> "$VAR/..."` targets that cannot be resolved ──
+{
+	// the reported command: a `sed ... > "$VAR/..."` rewrite (target unresolvable)
+	const REDIR =
+		'sed \'s/something/otherthing/g\' "$D/somepath/filea.py" > "$R/otherpath/fileb.py"';
+	const labelOf = async (cmd: string) => {
+		await runTool("bash", { command: cmd }, { cwd: PROJ });
+		return selectOptions[0]?.join(" | ") ?? "";
+	};
+
+	// the ladder for an unresolvable redirect target (literal tail present, not protected)
+	await setMode("normal");
+	check(
+		"redir-unresolvable normal → confirm",
+		(await runCmd(REDIR, PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("loose");
+	check(
+		"redir-unresolvable loose → confirm",
+		(await runCmd(REDIR, PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("trusted");
+	check(
+		"redir-unresolvable trusted → pass (the reported annoyance)",
+		(await runCmd(REDIR, PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"redir-unresolvable naked → pass",
+		(await runCmd(REDIR, PROJ)).verdict,
+		"pass",
+	);
+	await setMode("strict");
+	check(
+		"redir-unresolvable strict → block",
+		(await runCmd(REDIR, PROJ)).verdict,
+		"block",
+	);
+	await setMode("normal");
+
+	// rule-driven → the dialog names the specific rule (scoped session pass)
+	check(
+		"redir-unresolvable dialog names redirectUnresolved",
+		(await labelOf(REDIR)).includes("redirectUnresolved") ? "yes" : "no",
+		"yes",
+	);
+
+	// bare $VAR redirect target (no literal tail) → stays conservative in trusted
+	await setMode("trusted");
+	check(
+		"bare $VAR redirect trusted → still confirm (no literal info)",
+		(await runCmd('echo x > "$MYFILE"', PROJ)).verdict,
+		"confirm",
+	);
+
+	// built-in protected literal tail → hard block (trusted), matching a literal target
+	check(
+		"protected literal tail redirect (trusted) → block",
+		(await runCmd('echo x > "$D/.env"', PROJ)).verdict,
+		"block",
+	);
+	check(
+		"key literal tail redirect (trusted) → block",
+		(await runCmd('echo x > "$D/id_rsa"', PROJ)).verdict,
+		"block",
+	);
+	await setMode("normal");
+
+	// user-protected literal tail → hard block in every mode (incl. trusted/naked)
+	const VAULT2 = join(PROJ, "vault2");
+	mkdirSync(VAULT2, { recursive: true });
+	rmSync(FAKE_GLOBAL, { force: true });
+	writeFileSync(
+		FAKE_GLOBAL,
+		JSON.stringify({ pathGuard: { mode: "normal", extraProtected: [VAULT2] } }),
+	);
+	newSession();
+	check(
+		"sanity: literal user-protected redirect → block",
+		(await runCmd(`echo x > ${VAULT2}/x.txt`, PROJ)).verdict,
+		"block",
+	);
+	check(
+		"user-protected literal tail redirect (normal) → block",
+		(await runCmd('echo x > "$S/vault2/x.txt"', PROJ)).verdict,
+		"block",
+	);
+	await setMode("trusted");
+	check(
+		"user-protected literal tail redirect (trusted) → block",
+		(await runCmd('echo x > "$S/vault2/x.txt"', PROJ)).verdict,
+		"block",
+	);
+	await setMode("naked");
+	check(
+		"user-protected literal tail redirect (naked) → block",
+		(await runCmd('echo x > "$S/vault2/x.txt"', PROJ)).verdict,
+		"block",
+	);
+
+	// reset for the next block
+	rmSync(FAKE_GLOBAL, { force: true });
+	newSession();
+}
+
 // back to normal for tidiness
 await setMode("normal");
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

@@ -4,6 +4,15 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] — tunable unresolvable redirect targets (`redirectUnresolved`)
+
+### Redirect target rule for `$VAR`/glob paths
+
+- A `>` / `>>` / `2>` **write target that cannot be resolved statically** (`sed … > "$R/out.py"`, `echo x > "$F"`, `> *.log`) no longer takes a hardcoded conservative confirm that ignored the current mode. It now follows a new tunable rule **`redirectUnresolved`** (strict block / normal·loose confirm / **trusted·naked pass**), so trusted mode no longer prompts for a variable redirect target — the reported annoyance.
+- The **literal tail is still inspected first**, mirroring the run-script guard: a user-protected tail stays hard-blocked in every mode (incl naked), a built-in protected tail (`$D/.env`, `$D/id_rsa`) stays hard-blocked, and a bare `$VAR` with nothing literal to inspect stays a conservative confirm even in trusted.
+- `redirectUnresolved` is exposed to the `/guard` rule editor and the rule matrix exactly like `scriptUnresolved`.
+- Tests: +13 assertions (299 passing).
+
 ## [1.6.0] — interactive `/guard` is a single overlay popup
 
 ### Overlay popup for the `/guard` settings UI

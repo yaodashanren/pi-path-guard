@@ -4,6 +4,15 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] — split into modules (no behavior change)
+
+### Directory-form extension
+- The single 4100-line `extensions/path-guard.ts` is now a multi-file extension at `extensions/path-guard/` with `index.ts` as the single entry point (pi loads subdirectories via `index.ts`; package.json still points at `./extensions` — nothing to reconfigure).
+- Modules: `constants.ts` (patterns, command sets, copy constants), `escape.ts` ([cat:] tagging + escape hints), `paths.ts` (path classification utils), `rules.ts` (modes, tunable rules, ALL mutable state, settings persistence), `shell-parse.ts` (tokenizer/parser, pure), `judges.ts` (all judge* + classification pipeline), `panel.ts` (/guard menus, actions, TUI overlay), `pipeline.ts` (write/edit + bash tool_call checks).
+- All mutable guard state (`currentMode`, `config`, path lists, session passes) lives in `rules.ts`; other modules access it via accessors (`getMode`, `getConfig`, `applyConfig`, `pathList`, …).
+- Pure refactor: code moved verbatim, zero behavior change — all 328 tests pass unchanged. `tests/test-pathguard.ts` has a single diff (entry URL).
+- New README section "已知边界 / Known limitations".
+
 ## [1.6.3] — verdict-chain dedup refactor
 
 ### Shared per-target verdict chain

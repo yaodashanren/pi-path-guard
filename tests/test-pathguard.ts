@@ -19,7 +19,7 @@ import { register } from "node:module";
 // Redirect those specifiers to the installed pi runtime via a resolution hook.
 register(new URL("./pi-modules-hook.mjs", import.meta.url).href);
 
-const EXT = new URL("../extensions/path-guard.ts", import.meta.url).href;
+const EXT = new URL("../extensions/path-guard/index.ts", import.meta.url).href;
 
 // ── mocked pi API ───────────────────────────────────────────
 const handlers: Record<string, (e: any, ctx: any) => any> = {};

@@ -4,6 +4,43 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.6.2] — P0/P1 hardening: bypass fixes, commandNameUnresolved, heredoc & archive coverage
+
+### Command-name indirection (new rule `commandNameUnresolved`)
+- A command **name** that cannot be resolved statically (`$CMD -rf x`, or a leading substitution like `$(echo rm) -rf x`) previously fell through as an unknown command → pass. The leading-substitution form is now resolved to the real command in `parseCommand` (the substitution body's last word is the executed command), and a literal `$VAR` command name follows a new tunable rule **`commandNameUnresolved`** (strict block / normal·loose confirm / **trusted·naked pass** — zero new prompts in relaxed modes).
+- `\rm`, `"rm"` and `/bin/rm` forms were already covered and are unchanged.
+
+### `exec` prefix
+- `exec` is now stripped like `sudo`/`nohup`/`env`, so `exec rm -rf x` is judged as `rm -rf x` instead of slipping through as an unknown command.
+
+### stdin-redirect script execution (`sh < script.sh`)
+- `sh`/`bash`/`zsh`/`dash`/`ksh` with an **input redirect** (`sh < script.sh`) execute the file as a script just like an argument target; it now follows the same `runScript*` ladder via a shared `judgeScriptTargetPath` helper. Unresolvable (`$VAR`/glob) and non-existing targets pass (no false positives on `cat < file`).
+
+### Generic block-device targets
+- The `dd of=` / `> /dev/…` hard block no longer enumerates a few devices (`sda|sdb|sdc|nvme|mmcblk`); it now blocks any `/dev/<dev>` **except** harmless pseudo-devices (`null`, `zero`, `tty`, `stdin`, `stdout`, `stderr`, `pts`, `ptmx`, `full`, `random`, `urandom`, `fuse`, `shm`). Covers `/dev/rdiskN`, `/dev/diskN`, `/dev/hda`, `/dev/vda`, etc.
+- A raw `> /dev/<disk>` redirect now takes the blockGroup verdict **before** the `writeOutside` ladder (which would only confirm).
+
+### Process substitution `<( )` / `>( )`
+- The inner command of a process substitution runs immediately, so its body is now extracted (shared balanced-paren scanner `findMatchingParen`) and judged recursively like `$(...)`. `cat <(rm -rf x)` no longer slips through.
+
+### heredoc body scanning
+- `bash <<EOF … EOF` bodies are executed as script text but were never scanned. `checkBashCommand` now extracts heredoc bodies (`extractHeredocs`, quote-aware so a literal `'a<<b'` does not start a heredoc), judges each line like a command segment (block reasons carry a `heredoc:` prefix), and scans the stripped command separately. `<<<` herestrings are data and left in place.
+
+### Archive extraction coverage
+- `tar` extraction (`-x`/`--extract`, not create/list) now gets the same conservative confirm as `unzip` (pass in naked) — archive contents are unknowable and may overwrite anything. `tar -czf` / `tar -tf` are unaffected.
+
+### git history rewrite
+- `judgeGit` adds `git filter-branch`, `git filter-repo` and `git stash clear` to the `gitDestructive` ladder (`branch -D`, `stash drop`, `push --force[-with-lease]`, `worktree remove --force`, `tag -d` were already covered).
+
+### Structural escape-hint categories
+- Block reasons now carry a structural `[cat:…]` escape category (auto-tagged in `ruleVerdict`; 22 direct block sites tagged), so the "how to run anyway" hint classification no longer depends on reason wording. Tags are stripped before display; the legacy wording fallback remains for untagged lines.
+
+### Config-dir fixes
+- The global agent dir now follows pi's `PI_CODING_AGENT_DIR` override (default `~/.pi/agent`) instead of a hardcoded path; the test-only `PI_PATH_GUARD_SETTINGS` hook keeps priority. The project `.pi` dir name is fixed by pi (no override mechanism) and stays hardcoded.
+
+### Tests
+- +29 assertions (**328 passing**): command-name ladder across all five modes, `$(echo rm)` / `exec` / `sh <` / process substitution / heredoc (incl. quoted-`<<` non-trigger and protected redirect inside heredoc) / tar & unzip / git history rewrite / generic block devices (incl. `/dev/null` pass).
+
 ## [1.6.1] — tunable unresolvable redirect targets (`redirectUnresolved`)
 
 ### Redirect target rule for `$VAR`/glob paths

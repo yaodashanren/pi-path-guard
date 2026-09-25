@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.6.0.
+ * recent release/tag is 1.6.2.
  */
 import type {
 	ExtensionAPI,
@@ -119,8 +119,11 @@ const BLOCK_DANGEROUS_PATTERNS: RegExp[] = [
 	/\bshutdown\b/,
 	/\binit\s+0\b/,
 	/\binit\s+6\b/,
-	/\bdd\b[^;|&]*\bof=\s*\/dev\/(sda|sdb|sdc|nvme|mmcblk)/, // dd writing directly to a block device (ordinary files handled by judgeDd)
-	/(>|>>)\s*\/dev\/(sda|sdb|sdc|nvme|mmcblk)/, // direct write to a block device (note: no \b — > is often preceded by a space)
+	// dd writing directly to a block device (ordinary files handled by judgeDd);
+	// generic /dev/<dev> with fixed exclusions for harmless pseudo-devices
+	/\bdd\b[^;|&]*\bof=\s*\/dev\/(?!null\b|zero\b|tty\b|stdin\b|stdout\b|stderr\b|pts\b|ptmx\b|full\b|random\b|urandom\b|fuse\b|shm\b)[a-z0-9]+/,
+	// direct write to a block device (note: no \b — > is often preceded by a space)
+	/(>|>>)\s*\/dev\/(?!null\b|zero\b|tty\b|stdin\b|stdout\b|stderr\b|pts\b|ptmx\b|full\b|random\b|urandom\b|fuse\b|shm\b)[a-z0-9]+/,
 	/\bfind\b[^;|&]*-delete\b/, // find ... -delete bulk delete
 	/\bfind\b[^;|&]*-exec(dir)?\b[^;|&]*\brm\b/, // find ... -exec rm bulk delete
 	/\bxargs\b[^;|&]*\brm\b/, // xargs rm bulk delete (backup beyond judgeGit)
@@ -196,6 +199,7 @@ const PREFIX_COMMANDS = new Set([
 	"ionice",
 	"chroot",
 	"watch",
+	"exec",
 ]);
 
 /** Prefix flags that take a value (skip one extra token when stripping) */
@@ -212,10 +216,9 @@ const DEVICE_TARGETS = new Set([
 
 const HOME = homedir();
 
-/** Global settings.json path (default pi agent dir). */
-const GLOBAL_SETTINGS_PATH = join(HOME, ".pi", "agent", "settings.json");
+/** Global settings.json path (default pi agent dir; PI_CODING_AGENT_DIR overrides, per pi docs). */
 
-/** pi project config dir name (default CONFIG_DIR_NAME is `.pi`). */
+/** pi project config dir name — fixed by pi (no override mechanism), see docs/configuration.md. */
 const CONFIG_DIR = ".pi";
 
 // ─── Guard Modes ─────────────────────────────────────────────────────
@@ -283,7 +286,8 @@ type RuleId =
 	| "runScriptOutside" // … outside the project / under HOME
 	| "runScriptProtected" // … targeting a built-in protected path
 	| "scriptUnresolved" // … a `$VAR`/glob target that cannot be resolved statically
-	| "redirectUnresolved"; // … a `$VAR`/glob redirect target that cannot be resolved statically
+	| "redirectUnresolved" // … a `$VAR`/glob redirect target that cannot be resolved statically
+	| "commandNameUnresolved"; // … the command NAME itself is `$VAR`/`$(…)` and cannot be resolved statically
 
 const RULE_IDS: readonly RuleId[] = [
 	"blockGroup",
@@ -306,6 +310,7 @@ const RULE_IDS: readonly RuleId[] = [
 	"runScriptProtected",
 	"scriptUnresolved",
 	"redirectUnresolved",
+	"commandNameUnresolved",
 ];
 
 /** Bilingual short labels for each tunable rule (used in the rule-editor menu). */
@@ -333,6 +338,8 @@ const RULE_DESCRIPTIONS: Record<RuleId, string> = {
 		"source/./script with a $VAR/glob path that cannot be resolved (脚本路径不可静态解析)",
 	redirectUnresolved:
 		"redirect target with a $VAR/glob that cannot be resolved (重定向目标不可静态解析)",
+	commandNameUnresolved:
+		"command name itself is $VAR/$(…) and cannot be resolved (命令名不可静态解析)",
 };
 
 const RULE_LEVELS: readonly RuleLevel[] = ["block", "confirm", "pass"];
@@ -370,6 +377,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "block",
 		scriptUnresolved: "block",
 		redirectUnresolved: "block",
+		commandNameUnresolved: "block",
 	},
 	normal: {
 		blockGroup: "block",
@@ -392,6 +400,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "confirm",
 		scriptUnresolved: "confirm",
 		redirectUnresolved: "confirm",
+		commandNameUnresolved: "confirm",
 	},
 	loose: {
 		blockGroup: "block",
@@ -414,6 +423,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "confirm",
 		scriptUnresolved: "confirm",
 		redirectUnresolved: "confirm",
+		commandNameUnresolved: "confirm",
 	},
 	trusted: {
 		blockGroup: "block",
@@ -436,6 +446,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "pass",
 		scriptUnresolved: "pass",
 		redirectUnresolved: "pass",
+		commandNameUnresolved: "pass",
 	},
 	naked: {
 		blockGroup: "confirm",
@@ -458,6 +469,7 @@ const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "pass",
 		scriptUnresolved: "pass",
 		redirectUnresolved: "pass",
+		commandNameUnresolved: "pass",
 	},
 };
 
@@ -477,7 +489,14 @@ function rlFor(mode: GuardMode, rule: RuleId): RuleLevel {
 /** Map a rule to a segment verdict: block (with reason) / confirm / pass. */
 function ruleVerdict(rule: RuleId, blockReason: string): SegmentVerdict {
 	const lvl = rl(rule);
-	if (lvl === "block") return { kind: "block", reason: blockReason };
+	if (lvl === "block")
+		return {
+			kind: "block",
+			reason: tagged(
+				rule === "blockGroup" ? "systemDestructive" : "rule",
+				blockReason,
+			),
+		};
 	if (lvl === "confirm") return { kind: "confirm", rule };
 	return { kind: "pass" };
 }
@@ -590,9 +609,16 @@ function refreshModeStatus(ui: ExtensionUIContext) {
 
 // ─── Settings persistence (mode survives across sessions) ─────────────
 
-/** Global settings.json path (~/.pi/agent/settings.json; PI_PATH_GUARD_SETTINGS overrides, for tests). */
+/** Global settings.json path (~/.pi/agent/settings.json; PI_PATH_GUARD_SETTINGS overrides, for tests).
+ * The agent dir itself follows pi's PI_CODING_AGENT_DIR override (default ~/.pi/agent). */
 function globalSettingsPath(): string {
-	return process.env.PI_PATH_GUARD_SETTINGS ?? GLOBAL_SETTINGS_PATH;
+	return (
+		process.env.PI_PATH_GUARD_SETTINGS ??
+		join(
+			process.env.PI_CODING_AGENT_DIR ?? join(HOME, ".pi", "agent"),
+			"settings.json",
+		)
+	);
 }
 
 /** Whether cwd is the user's HOME (never treated as a project for settings). */
@@ -2086,7 +2112,7 @@ function checkWriteEdit(
 	if (isUserProtectedPath(real)) {
 		return {
 			block: true,
-			reason: withEscapeHints(`Path "${real}" is user-protected; write blocked.`),
+			reason: withEscapeHints(tagged("userPath", `Path "${real}" is user-protected; write blocked.`)),
 		};
 	}
 
@@ -2097,7 +2123,7 @@ function checkWriteEdit(
 	if (matchesProtectedPath(real)) {
 		return {
 			block: true,
-			reason: withEscapeHints(`Path "${real}" is protected; write blocked.`),
+			reason: withEscapeHints(tagged("protectedPath", `Path "${real}" is protected; write blocked.`)),
 		};
 	}
 
@@ -2165,7 +2191,25 @@ function checkBashCommand(
 
 	// Dangerous pipe-to-shell (curl … | bash, python -c '…' | sh) — the pipe
 	// crosses segments, so scan the raw command before the per-segment loop.
-	const pipeVerdict = scanPipeToShell(command, realCwd);
+	// Heredoc bodies are executed as script text, so they are extracted first,
+	// judged like segments, and removed from the command (otherwise they would
+	// misparse as tokens of the intro command).
+	const { command: bareCommand, bodies: heredocBodies } = extractHeredocs(
+		command,
+	);
+	for (const body of heredocBodies) {
+		for (const line of body.split("\n")) {
+			const t = line.trim();
+			if (!t) continue;
+			const v = classifySegment(t, realCwd, ctx.hasUI);
+			if (v.kind === "block") blockReasons.push(`heredoc: ${v.reason}`);
+			else if (v.kind === "confirm") {
+				confirmNeeded.push(`(heredoc) ${t}`);
+				if (v.rule) confirmRules.add(v.rule);
+			}
+		}
+	}
+	const pipeVerdict = scanPipeToShell(bareCommand, realCwd);
 	if (pipeVerdict.kind === "block") {
 		blockReasons.push(pipeVerdict.reason);
 	} else if (pipeVerdict.kind === "confirm") {
@@ -2173,7 +2217,7 @@ function checkBashCommand(
 		if (pipeVerdict.rule) confirmRules.add(pipeVerdict.rule);
 	}
 
-	for (const seg of splitSegments(command)) {
+	for (const seg of splitSegments(bareCommand)) {
 		const trimmed = seg.trim();
 		if (!trimmed) continue;
 
@@ -2293,7 +2337,7 @@ function judgeUnresolvedScriptTarget(target: string): SegmentVerdict {
 	if (tailLooksUserProtected(tail)) {
 		return {
 			kind: "block",
-			reason: `Script execution of user-protected path: ${target}`,
+			reason: tagged("userPath", `Script execution of user-protected path: ${target}`),
 		};
 	}
 	if (matchesProtectedPath("/__var__" + tail)) {
@@ -2328,13 +2372,13 @@ function judgeUnresolvedRedirectTarget(target: string): SegmentVerdict {
 	if (tailLooksUserProtected(tail)) {
 		return {
 			kind: "block",
-			reason: `Redirect writes to user-protected path: ${target}`,
+			reason: tagged("userPath", `Redirect writes to user-protected path: ${target}`),
 		};
 	}
 	if (!inNaked() && matchesProtectedPath("/__var__" + tail)) {
 		return {
 			kind: "block",
-			reason: `Redirect writes to protected path: ${target}`,
+			reason: tagged("protectedPath", `Redirect writes to protected path: ${target}`),
 		};
 	}
 	return ruleVerdict(
@@ -2379,7 +2423,7 @@ function judgeScript(
 	if (isUserProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `Script execution of user-protected path: ${target}`,
+			reason: tagged("userPath", `Script execution of user-protected path: ${target}`),
 		};
 	}
 	// Built-in protected paths → per-mode ladder (runScriptProtected).
@@ -2392,14 +2436,64 @@ function judgeScript(
 	// Trusted path → always allowed.
 	if (isTrustedPath(real)) return { kind: "pass" };
 
+	return judgeScriptTargetPath(real, target, realCwd);
+}
+
+/**
+ * Shared verdict ladder for executing the script file at `real` (used by
+ * `judgeScript` for argument targets and `judgeInputRedirect` for `< file`):
+ * user-protected → hard block, built-in protected → runScriptProtected,
+ * trusted → pass, otherwise runScriptOutside / runScriptInProject.
+ */
+function judgeScriptTargetPath(
+	real: string,
+	target: string,
+	realCwd: string,
+): SegmentVerdict {
 	const rule =
 		isOutsideCwd(real, realCwd) || realCwd === HOME
 			? "runScriptOutside"
 			: "runScriptInProject";
-	return ruleVerdict(
-		rule,
-		`Script execution blocked by rule (${rule}): ${target}`,
-	);
+	return ruleVerdict(rule, `Script execution blocked by rule (${rule}): ${target}`);
+}
+
+/** Input-redirect operand of a command (`sh < file` → "file"), or null. */
+function inputRedirectTarget(args: string[]): string | null {
+	for (let i = 0; i < args.length - 1; i++) {
+		if (args[i] === "<" || args[i] === "0<") return args[i + 1];
+	}
+	return null;
+}
+
+/**
+ * `sh < script.sh` executes the file as the interpreter's stdin script — same
+ * protection ladder as an argument target. Unresolved (`$VAR`/glob) targets and
+ * non-existing/directory targets are left to the other judges / pass.
+ */
+function judgeInputRedirect(
+	_trimmed: string,
+	cmdInfo: CmdInfo,
+	realCwd: string,
+): SegmentVerdict {
+	if (!SHELL_INTERPRETERS.has(cmdInfo.command)) return { kind: "pass" };
+	const target = inputRedirectTarget(cmdInfo.args);
+	if (!target || isUnresolvedTarget(target)) return { kind: "pass" };
+	const real = resolveReal(resolve(realCwd, expandHome(target)));
+	if (!existsSync(real) || isDirectory(real)) return { kind: "pass" };
+	if (isUserProtectedPath(real)) {
+		return {
+			kind: "block",
+			reason: tagged("userPath", `Script execution of user-protected path: ${target}`),
+		};
+	}
+	if (matchesProtectedPath(real)) {
+		return ruleVerdict(
+			"runScriptProtected",
+			`Script execution blocked by rule (runScriptProtected): ${target}`,
+		);
+	}
+	if (isTrustedPath(real)) return { kind: "pass" };
+	return judgeScriptTargetPath(real, target, realCwd);
 }
 
 /**
@@ -2443,34 +2537,22 @@ function extractCommandSubstitutions(input: string): string[] {
 			i = end + 1;
 			continue;
 		}
+		// Process substitution <(cmd) / >(cmd) — the inner command runs
+		// immediately, so judge its body like a command substitution
+		if ((ch === "<" || ch === ">") && input[i + 1] === "(") {
+			const close = findMatchingParen(input, i + 1);
+			if (close < 0) {
+				results.push(input.slice(i + 2));
+				break;
+			}
+			results.push(input.slice(i + 2, close));
+			i = close;
+			continue;
+		}
 		// $( ... ) — balanced, quote-aware; `$((` arithmetic is left to the parser
 		if (ch === "$" && input[i + 1] === "(" && input[i + 2] !== "(") {
-			let depth = 0;
-			let j = i + 1; // points at the opening "("
-			let sq = false;
-			let dq = false;
-			for (; j < input.length; j++) {
-				const c = input[j];
-				if (c === "\\") {
-					j++;
-					continue;
-				}
-				if (c === "'" && !dq) {
-					sq = !sq;
-					continue;
-				}
-				if (c === '"' && !sq) {
-					dq = !dq;
-					continue;
-				}
-				if (sq) continue;
-				if (c === "(") depth++;
-				else if (c === ")") {
-					depth--;
-					if (depth === 0) break;
-				}
-			}
-			if (depth !== 0) {
+			const j = findMatchingParen(input, i + 1);
+			if (j < 0) {
 				results.push(input.slice(i + 2));
 				break;
 			}
@@ -2481,6 +2563,37 @@ function extractCommandSubstitutions(input: string): string[] {
 		i++;
 	}
 	return results;
+}
+
+/**
+ * Index of the ")" matching the "(" at openIdx (quote- and escape-aware), or -1.
+ */
+function findMatchingParen(input: string, openIdx: number): number {
+	let depth = 0;
+	let sq = false;
+	let dq = false;
+	for (let j = openIdx; j < input.length; j++) {
+		const c = input[j];
+		if (c === "\\") {
+			j++;
+			continue;
+		}
+		if (c === "'" && !dq) {
+			sq = !sq;
+			continue;
+		}
+		if (c === '"' && !sq) {
+			dq = !dq;
+			continue;
+		}
+		if (sq) continue;
+		if (c === "(") depth++;
+		else if (c === ")") {
+			depth--;
+			if (depth === 0) return j;
+		}
+	}
+	return -1;
 }
 
 /**
@@ -2575,17 +2688,30 @@ function classifySegmentOuter(
 		if (isUnresolvedTarget(redirect.target)) {
 			return judgeUnresolvedRedirectTarget(redirect.target);
 		}
+		// Direct write to a block device (/dev/sda, /dev/rdiskN, …) — system-
+		// destructive, must outrank the writeOutside ladder below (which would
+		// only confirm).
+		if (
+			/^\/dev\/(?!null\b|zero\b|tty\b|stdin\b|stdout\b|stderr\b|pts\b|ptmx\b|full\b|random\b|urandom\b|fuse\b|shm\b)[a-z0-9]+/.test(
+				redirect.target,
+			)
+		) {
+			return ruleVerdict(
+				"blockGroup",
+				`Direct write to a block device blocked: ${trimmed}`,
+			);
+		}
 		const real = resolveReal(resolve(realCwd, expandHome(redirect.target)));
 		if (isUserProtectedPath(real)) {
 			return {
 				kind: "block",
-				reason: `Redirect writes to user-protected path: ${trimmed}`,
+				reason: tagged("userPath", `Redirect writes to user-protected path: ${trimmed}`),
 			};
 		}
 		if (!inNaked() && matchesProtectedPath(real)) {
 			return {
 				kind: "block",
-				reason: `Redirect writes to protected path: ${trimmed}`,
+				reason: tagged("protectedPath", `Redirect writes to protected path: ${trimmed}`),
 			};
 		}
 		// Redirect into a trusted path (incl. truncating it) → pass in every mode.
@@ -2635,7 +2761,7 @@ function classifySegmentOuter(
 				? { kind: "confirm" }
 				: {
 						kind: "block",
-						reason: `Dangerous command blocked (no interactive UI): ${trimmed}`,
+						reason: tagged("noUi", `Dangerous command blocked (no interactive UI): ${trimmed}`),
 					};
 		}
 		return { kind: "pass" }; // confirmGroup = pass
@@ -2643,6 +2769,16 @@ function classifySegmentOuter(
 
 	const cmdInfo = parseCommand(trimmed);
 	if (!cmdInfo) return { kind: "pass" };
+
+	// ⓪b The command name itself is unresolved ($VAR left after prefix stripping):
+	// statically unknowable → per commandNameUnresolved rule (strict block,
+	// normal/loose confirm, trusted/naked pass).
+	if (cmdInfo.command.includes("$")) {
+		return ruleVerdict(
+			"commandNameUnresolved",
+			`Command name cannot be resolved statically — confirm (commandNameUnresolved): ${trimmed}`,
+		);
+	}
 
 	// ③ Shell wrapper (bash -c 'code' / eval 'code') → recursively check the inner code
 	const wrapperVerdict = judgeShellWrapper(
@@ -2657,6 +2793,11 @@ function classifySegmentOuter(
 	// ④ source / . / <shell> script.sh: runs a script file → path-aware + tunable
 	const scriptVerdict = judgeScript(trimmed, cmdInfo, realCwd);
 	if (scriptVerdict.kind !== "pass") return scriptVerdict;
+
+	// ④b `sh < script.sh` — an input redirect feeds the file as the interpreter's
+	// stdin script, which executes it just like `sh script.sh` → same ladder.
+	const inputRedirectVerdict = judgeInputRedirect(trimmed, cmdInfo, realCwd);
+	if (inputRedirectVerdict.kind !== "pass") return inputRedirectVerdict;
 
 	// ⑤-⑪ Pipeline for target-writing commands (git / dd / download / truncate / in-place edit / delete / overwrite / unzip -o)
 	return judgeWriters(trimmed, cmdInfo, realCwd);
@@ -2722,11 +2863,38 @@ function judgeWriters(
 		const v = judge(trimmed, cmdInfo, realCwd);
 		if (v.kind !== "pass") return v;
 	}
-	// Forced extraction overwrite (unzip -o): archive contents unknowable → conservative confirm (pass in naked)
-	if (cmdInfo.command === "unzip" && hasShortFlag(cmdInfo.args, "o")) {
+	// Archive extraction (unzip / tar -x): archive contents are unknowable, so
+	// anything it lands on may be overwritten → conservative confirm (pass in
+	// naked). unzip without -o would prompt interactively and stall a
+	// non-interactive run — same treatment.
+	if (
+		cmdInfo.command === "unzip" ||
+		(cmdInfo.command === "tar" && tarIsExtraction(cmdInfo.args))
+	) {
 		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 	return { kind: "pass" };
+}
+
+/** Whether tar args express an extraction (that writes files), not a create/list */
+function tarIsExtraction(args: string[]): boolean {
+	let extract = false;
+	let create = false;
+	let list = false;
+	for (const a of args) {
+		if (a === "--extract" || a === "--get") extract = true;
+		if (a === "--create" || a === "--append" || a === "--update") create = true;
+		if (a === "--list") list = true;
+		if (a.startsWith("--")) continue;
+		if (a.startsWith("-")) {
+			const flags = a.slice(1);
+			if (flags.includes("x")) extract = true;
+			if (flags.includes("c") || flags.includes("r") || flags.includes("u"))
+				create = true;
+			if (flags.includes("t")) list = true;
+		}
+	}
+	return extract && !create && !list;
 }
 
 /** git destructive commands: clean -f / reset --hard / checkout -- . / restore . / branch -D / push --force / stash drop */
@@ -2801,8 +2969,10 @@ function judgeGit(
 		args.some((a) => a === "-f" || a === "--force" || a === "--force-with-lease")
 	)
 		return ruleVerdict("gitDestructive", "git push --force blocked by rule");
-	if (sub === "stash" && args.includes("drop"))
+	if (sub === "stash" && (args.includes("drop") || args.includes("clear")))
 		return ruleVerdict("gitDestructive", "git stash drop blocked by rule");
+	if (sub === "filter-branch" || sub === "filter-repo")
+		return ruleVerdict("gitDestructive", "git history rewrite blocked by rule");
 
 	return { kind: "pass" };
 }
@@ -2830,7 +3000,7 @@ function judgeDelete(
 		if (isUserProtectedPath(p.path)) {
 			return {
 				kind: "block",
-				reason: `Delete command targets user-protected path: ${p.path}`,
+				reason: tagged("userPath", `Delete command targets user-protected path: ${p.path}`),
 			};
 		}
 		if (!inNaked() && matchesProtectedPath(p.path)) {
@@ -2930,13 +3100,13 @@ function judgeOverwrite(
 	if (isUserProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `Command may overwrite user-protected path: ${cmdInfo.command} ${target}`,
+			reason: tagged("userPath", `Command may overwrite user-protected path: ${cmdInfo.command} ${target}`),
 		};
 	}
 	if (!inNaked() && matchesProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `Command may overwrite protected path: ${cmdInfo.command} ${target}`,
+			reason: tagged("protectedPath", `Command may overwrite protected path: ${cmdInfo.command} ${target}`),
 		};
 	}
 
@@ -3035,11 +3205,11 @@ function judgeDd(
 		if (isUserProtectedPath(real)) {
 			return {
 				kind: "block",
-				reason: `dd writes to user-protected path: ${trimmed}`,
+				reason: tagged("userPath", `dd writes to user-protected path: ${trimmed}`),
 			};
 		}
 		if (!inNaked() && matchesProtectedPath(real)) {
-			return { kind: "block", reason: `dd writes to protected path: ${trimmed}` };
+			return { kind: "block", reason: tagged("protectedPath", `dd writes to protected path: ${trimmed}`) };
 		}
 		if (isTrustedPath(real)) continue;
 		// Outside target → same outside logic as overwrite commands (existing vs new)
@@ -3074,13 +3244,13 @@ function judgeDownload(
 	if (isUserProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `Download writes to user-protected path: ${cmdInfo.command} ${target}`,
+			reason: tagged("userPath", `Download writes to user-protected path: ${cmdInfo.command} ${target}`),
 		};
 	}
 	if (!inNaked() && matchesProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `Download writes to protected path: ${cmdInfo.command} ${target}`,
+			reason: tagged("protectedPath", `Download writes to protected path: ${cmdInfo.command} ${target}`),
 		};
 	}
 	if (isTrustedPath(real)) return { kind: "pass" };
@@ -3162,13 +3332,13 @@ function judgeTruncate(
 		if (isUserProtectedPath(t.path)) {
 			return {
 				kind: "block",
-				reason: `truncate truncates user-protected path: ${t.raw}`,
+				reason: tagged("userPath", `truncate truncates user-protected path: ${t.raw}`),
 			};
 		}
 		if (!inNaked() && matchesProtectedPath(t.path)) {
 			return {
 				kind: "block",
-				reason: `truncate truncates protected path: ${t.raw}`,
+				reason: tagged("protectedPath", `truncate truncates protected path: ${t.raw}`),
 			};
 		}
 		// Trusted target truncate → pass in every mode.
@@ -3208,13 +3378,13 @@ function judgeInPlace(
 	if (isUserProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `In-place edit of user-protected path: ${cmdInfo.command} ${dest}`,
+			reason: tagged("userPath", `In-place edit of user-protected path: ${cmdInfo.command} ${dest}`),
 		};
 	}
 	if (!inNaked() && matchesProtectedPath(real)) {
 		return {
 			kind: "block",
-			reason: `In-place edit of protected path: ${cmdInfo.command} ${dest}`,
+			reason: tagged("protectedPath", `In-place edit of protected path: ${cmdInfo.command} ${dest}`),
 		};
 	}
 	// In-place edit of a trusted path → pass in every mode.
@@ -3386,6 +3556,10 @@ interface CmdInfo {
 function parseCommand(fullCommand: string): CmdInfo | null {
 	// Strip command-substitution $(...), subshell (...), and group {...} wrappers
 	let cleaned = fullCommand.trim();
+	// A LEADING command substitution supplies the command name itself:
+	// `$(echo rm) -rf x` executes `rm -rf x` — replace it with the last word of
+	// its body so the judges see the real command instead of the literal `$(echo`.
+	cleaned = replaceLeadingSubstitutionCommand(cleaned);
 	cleaned = cleaned.replace(/^\$\(\s*/, "").replace(/\s*\)$/, "");
 	cleaned = cleaned.replace(/^\(\s*/, "").replace(/\s*\)$/, "");
 	cleaned = cleaned.replace(/^\{\s*/, "").replace(/\s*;?\s*\}$/, "");
@@ -3401,6 +3575,41 @@ function parseCommand(fullCommand: string): CmdInfo | null {
 	const raw = stripped[0].split("/").pop() ?? stripped[0];
 	const base = raw.replace(/^\\(?=[A-Za-z])/, "");
 	return { command: base, args: stripped.slice(1) };
+}
+
+/**
+ * Replace a leading command substitution (`$(…) ` or backtick form) with the last
+ * word of its body — when a substitution sits in command-name position, its value
+ * IS the executed command. Returns the input unchanged when there is no leading
+ * substitution or the parentheses cannot be balanced.
+ */
+function replaceLeadingSubstitutionCommand(input: string): string {
+	let body: string;
+	let rest: string;
+	if (input.startsWith("$(")) {
+		let depth = 0;
+		let i = 1;
+		for (; i < input.length; i++) {
+			if (input[i] === "(") depth++;
+			else if (input[i] === ")") {
+				depth--;
+				if (depth === 0) break;
+			}
+		}
+		if (depth !== 0) return input;
+		body = input.slice(2, i);
+		rest = input.slice(i + 1);
+	} else if (input.startsWith("`")) {
+		const end = input.indexOf("`", 1);
+		if (end < 0) return input;
+		body = input.slice(1, end);
+		rest = input.slice(end + 1);
+	} else {
+		return input;
+	}
+	const words = body.trim().split(/\s+/).filter(Boolean);
+	if (words.length === 0) return input;
+	return words[words.length - 1] + rest;
 }
 
 /** Strip prefix commands (sudo etc.), skipping their flags / numbers / VAR= assignments */
@@ -3576,6 +3785,65 @@ function splitShellTokens(input: string): string[] {
 	return tokens;
 }
 
+/**
+ * Extract heredoc bodies (`<<TAG` / `<<-TAG`, terminated by a line equal to the
+ * tag). The body is executed as script text by the shell, so it must be judged
+ * like command segments; it is removed from the returned command so the
+ * per-segment scanners don't misparse it. `<<<` herestrings are data, not
+ * commands — left in place. The `<<TAG` marker must be unquoted; a quoted `<<'
+ * literal in a string does not start a heredoc.
+ */
+function extractHeredocs(input: string): {
+	command: string;
+	bodies: string[];
+} {
+	const bodies: string[] = [];
+	const lines = input.split("\n");
+	const out: string[] = [];
+	for (let li = 0; li < lines.length; li++) {
+		const line = lines[li];
+		const m = line.match(/<<(-?)([A-Za-z_][A-Za-z0-9_]*)/);
+		if (m && m.index !== undefined && !isQuotedAt(line, m.index)) {
+			const dash = m[1] === "-";
+			const tag = m[2];
+			const body: string[] = [];
+			let closed = false;
+			let lj = li + 1;
+			for (; lj < lines.length; lj++) {
+				const t = dash ? lines[lj].replace(/^\t+/, "").trim() : lines[lj].trim();
+				if (t === tag) {
+					closed = true;
+					break;
+				}
+				body.push(lines[lj]);
+			}
+			bodies.push(body.join("\n"));
+			// strip the <<TAG marker from the intro line, keep the rest of the command
+			out.push(line.replace(m[0], "").trimEnd());
+			if (closed) {
+				li = lj; // skip past the terminator line
+			} else {
+				li = lines.length; // unterminated: the rest was body
+			}
+			continue;
+		}
+		out.push(line);
+	}
+	return { command: out.join("\n"), bodies };
+}
+
+/** Whether the character at idx sits inside a single/double-quoted span of line */
+function isQuotedAt(line: string, idx: number): boolean {
+	let sq = false;
+	let dq = false;
+	for (let i = 0; i < idx; i++) {
+		const c = line[i];
+		if (c === "'" && !dq) sq = !sq;
+		else if (c === '"' && !sq) dq = !dq;
+	}
+	return sq || dq;
+}
+
 /** Split by shell operators (&&, ||, ;, |, newline); never inside quotes */
 function splitSegments(input: string): string[] {
 	const segments: string[] = [];
@@ -3733,7 +4001,7 @@ async function askConfirm(
 	if (!ctx.hasUI) {
 		return {
 			block: true,
-			reason: withEscapeHints("No interactive UI; blocked"),
+			reason: withEscapeHints(tagged("noUi", "No interactive UI; blocked")),
 		};
 	}
 
@@ -3805,8 +4073,18 @@ const ESCAPE_HINTS: Record<EscapeCat, { en: string; zh: string }> = {
 	},
 };
 
+/** Prefix a reason with its structural escape category (stripped on display). */
+function tagged(cat: EscapeCat, reason: string): string {
+	return `[cat:${cat}] ${reason}`;
+}
+
+const CAT_TAG_RE = /\[cat:([A-Za-z]+)\]/;
+
 /** Pick the single most specific category for one blocked-reason line. */
 function escapeCatOf(line: string): EscapeCat {
+	const m = line.match(CAT_TAG_RE);
+	if (m && m[1] in ESCAPE_HINTS) return m[1] as EscapeCat;
+	// legacy fallback for untagged lines
 	if (/user-protected/i.test(line)) return "userPath";
 	if (/system-destructive/i.test(line)) return "systemDestructive";
 	if (/protected\b/i.test(line)) return "protectedPath";
@@ -3827,7 +4105,8 @@ function withEscapeHints(reason: string): string {
 		if (t.endsWith(":")) continue; // "Command blocked:" / "Inner command blocked:"
 		cats.add(escapeCatOf(t));
 	}
-	if (cats.size === 0) return reason;
+	if (cats.size === 0) return reason.replace(CAT_TAG_RE, "");
+	const clean = reason.replace(/\[cat:[A-Za-z]+\] /g, "");
 	const order: EscapeCat[] = [
 		"systemDestructive",
 		"protectedPath",
@@ -3842,5 +4121,5 @@ function withEscapeHints(reason: string): string {
 			hintLines.push(`· ${ESCAPE_HINTS[cat].en}\n  ${ESCAPE_HINTS[cat].zh}`);
 		}
 	}
-	return `${reason}\n\nTo run anyway / 如需执行:\n${hintLines.join("\n")}`;
+	return `${clean}\n\nTo run anyway / 如需执行:\n${hintLines.join("\n")}`;
 }

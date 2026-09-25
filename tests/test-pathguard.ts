@@ -2877,6 +2877,210 @@ await setMode("strict");
 
 // back to normal for tidiness
 await setMode("normal");
+
+// ── P0 hardening: command-name indirection, exec, input-redirect scripts, block devices ──
+{
+	mkdirSync(PROJ, { recursive: true });
+	writeFileSync(join(PROJ, "victim.txt"), "x");
+	writeFileSync(join(PROJ, "script.sh"), "echo hi");
+
+	// 1) command name is an unexpanded $VAR → new rule commandNameUnresolved
+	await setMode("strict");
+	check(
+		"$VAR command name strict → block",
+		(await runCmd("$CMD -rf inside.txt", PROJ)).verdict,
+		"block",
+	);
+	await setMode("normal");
+	check(
+		"$VAR command name normal → confirm",
+		(await runCmd("$CMD -rf inside.txt", PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("trusted");
+	check(
+		"$VAR command name trusted → pass",
+		(await runCmd("$CMD -rf inside.txt", PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"$VAR command name naked → pass",
+		(await runCmd("$CMD -rf inside.txt", PROJ)).verdict,
+		"pass",
+	);
+
+	// 2) leading substitution supplies the command name: $(echo rm) → rm
+	await setMode("normal");
+	check(
+		"$(echo rm) -rf in-project normal → confirm (seen as rm)",
+		(await runCmd("$(echo rm) -rf victim.txt", PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"$(echo rm) -rf outside normal → block (deleteOutside)",
+		(await runCmd("$(echo rm) -rf /etc/passwd", PROJ)).verdict,
+		"block",
+	);
+
+	// 3) exec prefix: exec rm judged as rm
+	check(
+		"exec rm -rf in-project normal → confirm",
+		(await runCmd("exec rm -rf victim.txt", PROJ)).verdict,
+		"confirm",
+	);
+
+	// 4) stdin-redirect script execution: sh < script.sh
+	check(
+		"sh < in-project script normal → confirm (runScriptInProject)",
+		(await runCmd("sh < script.sh", PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("trusted");
+	check(
+		"sh < in-project script trusted → pass",
+		(await runCmd("sh < script.sh", PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"sh < in-project script naked → pass",
+		(await runCmd("sh < script.sh", PROJ)).verdict,
+		"pass",
+	);
+	await setMode("normal");
+	check(
+		"bash < protected script (HOME .bashrc) normal → confirm (runScriptProtected)",
+		(await runCmd("bash < ~/.bashrc", PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"cat < ordinary file normal → pass (no false positive)",
+		(await runCmd("cat < inside.txt", PROJ)).verdict,
+		"pass",
+	);
+
+	// 5) generic block-device targets
+	check(
+		"dd of=/dev/rdisk2 normal → block",
+		(await runCmd("dd if=x of=/dev/rdisk2", PROJ)).verdict,
+		"block",
+	);
+	check(
+		"> /dev/disk3 normal → block",
+		(await runCmd("echo x > /dev/disk3", PROJ)).verdict,
+		"block",
+	);
+	check(
+		"> /dev/null normal → pass (pseudo-device still allowed)",
+		(await runCmd("echo x > /dev/null", PROJ)).verdict,
+		"pass",
+	);
+
+	// 6) process substitution <( ) body is judged
+	await setMode("normal");
+	writeFileSync(join(PROJ, "victim.txt"), "x");
+	check(
+		"cat <(rm -rf victim.txt) normal → confirm",
+		(await runCmd("cat <(rm -rf victim.txt)", PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("trusted");
+	check(
+		"cat <(rm -rf victim.txt) trusted → pass",
+		(await runCmd("cat <(rm -rf victim.txt)", PROJ)).verdict,
+		"pass",
+	);
+
+	// 7) heredoc body is judged like segments
+	await setMode("normal");
+	check(
+		"heredoc rm normal → confirm",
+		(
+			await runCmd("bash <<EOF\nrm -rf victim.txt\nEOF", PROJ)
+		).verdict,
+		"confirm",
+	);
+	check(
+		"heredoc protected redirect normal → block",
+		(
+			await runCmd('bash <<EOF\necho x > ".env"\nEOF', PROJ)
+		).verdict,
+		"block",
+	);
+	await setMode("trusted");
+	check(
+		"heredoc trusted → pass",
+		(
+			await runCmd("bash <<EOF\nrm -rf victim.txt\nEOF", PROJ)
+		).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"heredoc naked → pass",
+		(
+			await runCmd("bash <<EOF\nrm -rf victim.txt\nEOF", PROJ)
+		).verdict,
+		"pass",
+	);
+	await setMode("normal");
+	check(
+		"quoted << literal is not a heredoc → pass",
+		(await runCmd("grep 'a<<b' file.txt", PROJ)).verdict,
+		"pass",
+	);
+
+	// 8) archive extraction: unzip / tar -x → confirm (pass in naked)
+	writeFileSync(join(PROJ, "a.tar.gz"), "x");
+	writeFileSync(join(PROJ, "a.zip"), "x");
+	check(
+		"tar -xf normal → confirm",
+		(await runCmd("tar -xf a.tar.gz", PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"tar -czf (create) normal → pass",
+		(await runCmd("tar -czf out.tgz .", PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"tar -tf (list) normal → pass",
+		(await runCmd("tar -tf a.tar.gz", PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"unzip normal → confirm",
+		(await runCmd("unzip a.zip", PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("naked");
+	check(
+		"tar -xf naked → pass",
+		(await runCmd("tar -xf a.tar.gz", PROJ)).verdict,
+		"pass",
+	);
+
+	// 9) git history rewrite / stash clear
+	await setMode("normal");
+	check(
+		"git filter-branch normal → confirm",
+		(await runCmd("git filter-branch --tree-filter ls HEAD", PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"git stash clear normal → confirm",
+		(await runCmd("git stash clear", PROJ)).verdict,
+		"confirm",
+	);
+
+	rmSync(join(PROJ, "victim.txt"), { force: true });
+	rmSync(join(PROJ, "script.sh"), { force: true });
+	rmSync(join(PROJ, "a.tar.gz"), { force: true });
+	rmSync(join(PROJ, "a.zip"), { force: true });
+	rmSync(join(PROJ, "out.tgz"), { force: true });
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

@@ -2,7 +2,7 @@
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.6.2.
+ * recent release/tag is 1.6.3.
  */
 import type {
 	ExtensionAPI,
@@ -3086,29 +3086,21 @@ function judgeOverwrite(
 	if (!target || sources.length === 0) return { kind: "pass" };
 
 	// Variable/wildcard not statically resolvable → conservative confirm (pass in naked)
-	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
-	}
+	if (isUnresolvedTarget(target)) return unresolvedTargetVerdict();
 	// rsync/scp remote target (user@host:/path) is not a local path — resolving it
 	// would fake an in-project path. Writing to a remote host → conservative confirm.
 	if (isRemoteTarget(target)) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+		return unresolvedTargetVerdict();
 	}
 
 	const real = resolveReal(resolve(realCwd, expandHome(target)));
 	// ① Target hits a protected path → block (user paths in every mode; built-in except naked)
-	if (isUserProtectedPath(real)) {
-		return {
-			kind: "block",
-			reason: tagged("userPath", `Command may overwrite user-protected path: ${cmdInfo.command} ${target}`),
-		};
-	}
-	if (!inNaked() && matchesProtectedPath(real)) {
-		return {
-			kind: "block",
-			reason: tagged("protectedPath", `Command may overwrite protected path: ${cmdInfo.command} ${target}`),
-		};
-	}
+	const blocked = protectedVerdict(
+		real,
+		`Command may overwrite user-protected path: ${cmdInfo.command} ${target}`,
+		`Command may overwrite protected path: ${cmdInfo.command} ${target}`,
+	);
+	if (blocked) return blocked;
 
 	// Overwrite/rename target is inside a trusted path → pass (no prompt in any mode).
 	if (isTrustedPath(real)) return { kind: "pass" };
@@ -3198,30 +3190,17 @@ function judgeDd(
 		if (!a.startsWith("of=")) continue;
 		const target = a.slice(3);
 		if (!target) continue;
-		if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
-			return inNaked() ? { kind: "pass" } : { kind: "confirm" };
-		}
+		if (isUnresolvedTarget(target)) return unresolvedTargetVerdict();
 		const real = resolveReal(resolve(realCwd, expandHome(target)));
-		if (isUserProtectedPath(real)) {
-			return {
-				kind: "block",
-				reason: tagged("userPath", `dd writes to user-protected path: ${trimmed}`),
-			};
-		}
-		if (!inNaked() && matchesProtectedPath(real)) {
-			return { kind: "block", reason: tagged("protectedPath", `dd writes to protected path: ${trimmed}`) };
-		}
+		const blocked = protectedVerdict(
+			real,
+			`dd writes to user-protected path: ${trimmed}`,
+			`dd writes to protected path: ${trimmed}`,
+		);
+		if (blocked) return blocked;
 		if (isTrustedPath(real)) continue;
-		// Outside target → same outside logic as overwrite commands (existing vs new)
-		if (!DEVICE_TARGETS.has(target) && isOutsideCwd(real, realCwd)) {
-			const rule = existsSync(real)
-				? "overwriteOutsideExisting"
-				: "overwriteOutsideNew";
-			return ruleVerdict(
-				rule,
-				`dd writes outside the project blocked by rule: ${trimmed}`,
-			);
-		}
+		const outside = outsideWriteVerdict(real, target, realCwd, `dd writes outside the project blocked by rule: ${trimmed}`);
+		if (outside) return outside;
 	}
 	return { kind: "pass" };
 }
@@ -3237,34 +3216,61 @@ function judgeDownload(
 	}
 	const target = downloadTarget(cmdInfo.command, cmdInfo.args);
 	if (!target) return { kind: "pass" };
-	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
-	}
+	if (isUnresolvedTarget(target)) return unresolvedTargetVerdict();
 	const real = resolveReal(resolve(realCwd, expandHome(target)));
+	const blocked = protectedVerdict(
+		real,
+		`Download writes to user-protected path: ${cmdInfo.command} ${target}`,
+		`Download writes to protected path: ${cmdInfo.command} ${target}`,
+	);
+	if (blocked) return blocked;
+	if (isTrustedPath(real)) return { kind: "pass" };
+	return (
+		outsideWriteVerdict(
+			real,
+			target,
+			realCwd,
+			`Download writes outside the project blocked by rule: ${cmdInfo.command} ${target}`,
+		) ?? { kind: "pass" }
+	);
+}
+
+/** Shared: unresolved target → conservative confirm (pass in naked) */
+function unresolvedTargetVerdict(): SegmentVerdict {
+	return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+}
+
+/** Shared first legs of the per-target verdict chain: user-protected → block in
+ *  every mode; built-in protected → block except naked. Returns the block
+ *  verdict, or null when the caller should apply its own trusted/outside legs. */
+function protectedVerdict(
+	real: string,
+	userMsg: string,
+	protectedMsg: string,
+): SegmentVerdict | null {
 	if (isUserProtectedPath(real)) {
-		return {
-			kind: "block",
-			reason: tagged("userPath", `Download writes to user-protected path: ${cmdInfo.command} ${target}`),
-		};
+		return { kind: "block", reason: tagged("userPath", userMsg) };
 	}
 	if (!inNaked() && matchesProtectedPath(real)) {
-		return {
-			kind: "block",
-			reason: tagged("protectedPath", `Download writes to protected path: ${cmdInfo.command} ${target}`),
-		};
+		return { kind: "block", reason: tagged("protectedPath", protectedMsg) };
 	}
-	if (isTrustedPath(real)) return { kind: "pass" };
-	// Outside target → same outside logic as overwrite commands (existing vs new)
-	if (!DEVICE_TARGETS.has(target) && isOutsideCwd(real, realCwd)) {
-		const rule = existsSync(real)
-			? "overwriteOutsideExisting"
-			: "overwriteOutsideNew";
-		return ruleVerdict(
-			rule,
-			`Download writes outside the project blocked by rule: ${cmdInfo.command} ${target}`,
-		);
-	}
-	return { kind: "pass" };
+	return null;
+}
+
+/** Shared outside leg (dd / download): device targets skip; outside target →
+ *  overwriteOutsideExisting / overwriteOutsideNew. Null when not applicable. */
+function outsideWriteVerdict(
+	real: string,
+	rawTarget: string,
+	realCwd: string,
+	describe: string,
+): SegmentVerdict | null {
+	if (DEVICE_TARGETS.has(rawTarget)) return null;
+	if (!isOutsideCwd(real, realCwd)) return null;
+	const rule = existsSync(real)
+		? "overwriteOutsideExisting"
+		: "overwriteOutsideNew";
+	return ruleVerdict(rule, describe);
 }
 
 /** Extract the download output target; null if none explicit */
@@ -3329,18 +3335,12 @@ function judgeTruncate(
 		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
 	}
 	for (const t of extractPathArgs(cmdInfo.args, realCwd)) {
-		if (isUserProtectedPath(t.path)) {
-			return {
-				kind: "block",
-				reason: tagged("userPath", `truncate truncates user-protected path: ${t.raw}`),
-			};
-		}
-		if (!inNaked() && matchesProtectedPath(t.path)) {
-			return {
-				kind: "block",
-				reason: tagged("protectedPath", `truncate truncates protected path: ${t.raw}`),
-			};
-		}
+		const blocked = protectedVerdict(
+			t.path,
+			`truncate truncates user-protected path: ${t.raw}`,
+			`truncate truncates protected path: ${t.raw}`,
+		);
+		if (blocked) return blocked;
 		// Trusted target truncate → pass in every mode.
 		if (isTrustedPath(t.path)) continue;
 		// Existing ordinary file truncated → per truncateInProject / truncateOutside
@@ -3371,22 +3371,14 @@ function judgeInPlace(
 	// sed syntax: sed -i 'script' file — target file is last (multi-file: only the last is checked; conservative enough)
 	const dest = lastDestArg(cmdInfo.args);
 	if (!dest) return { kind: "pass" };
-	if (dest.startsWith("$") || dest.includes("*") || dest.includes("?")) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
-	}
+	if (isUnresolvedTarget(dest)) return unresolvedTargetVerdict();
 	const real = resolveReal(resolve(realCwd, expandHome(dest)));
-	if (isUserProtectedPath(real)) {
-		return {
-			kind: "block",
-			reason: tagged("userPath", `In-place edit of user-protected path: ${cmdInfo.command} ${dest}`),
-		};
-	}
-	if (!inNaked() && matchesProtectedPath(real)) {
-		return {
-			kind: "block",
-			reason: tagged("protectedPath", `In-place edit of protected path: ${cmdInfo.command} ${dest}`),
-		};
-	}
+	const blocked = protectedVerdict(
+		real,
+		`In-place edit of user-protected path: ${cmdInfo.command} ${dest}`,
+		`In-place edit of protected path: ${cmdInfo.command} ${dest}`,
+	);
+	if (blocked) return blocked;
 	// In-place edit of a trusted path → pass in every mode.
 	if (isTrustedPath(real)) return { kind: "pass" };
 	return { kind: "pass" };

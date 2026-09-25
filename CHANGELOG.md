@@ -4,6 +4,16 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.6.3] — verdict-chain dedup refactor
+
+### Shared per-target verdict chain
+- The "user-protected → built-in protected → trusted → outside/rule" ladder was duplicated across `judgeDd` / `judgeDownload` / `judgeTruncate` / `judgeInPlace` / `judgeOverwrite`. Extracted shared helpers:
+  - `protectedVerdict(real, userMsg, protectedMsg)` — the two block legs (user paths block in every mode; built-in protected paths block except naked);
+  - `outsideWriteVerdict(real, rawTarget, realCwd, describe)` — the device-target skip + `overwriteOutsideExisting` / `overwriteOutsideNew` outside leg shared by `dd` and curl/wget;
+  - `unresolvedTargetVerdict()` — the "$VAR / wildcard target → conservative confirm (pass in naked)" snippet.
+- Pure refactor, zero behavior change: all 328 tests pass unchanged, and dd/curl/wget outside-write plus rsync/scp remote-target behavior re-verified end-to-end by probe.
+- Note: items "#2 dd/curl outside-write" and "#4 rsync/scp remote targets" in the older review-status doc were already implemented (and tested) before this release — that doc was stale.
+
 ## [1.6.2] — P0/P1 hardening: bypass fixes, commandNameUnresolved, heredoc & archive coverage
 
 ### Command-name indirection (new rule `commandNameUnresolved`)

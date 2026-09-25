@@ -40,6 +40,7 @@ import {
 } from "node:fs";
 import { BLOCK_DANGEROUS_PATTERNS, CONFIG_DIR, CONFIRM_DANGEROUS_PATTERNS, DELETE_COMMANDS, DEVICE_TARGETS, EXACT_ONLY_PATTERNS, FLAGS_WITH_ARG, HOME, INPLACE_EDITORS, NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, OVERWRITE_COMMANDS, PIPE_TO_SHELL_SOURCES, PREFIX_COMMANDS, PROTECTED_PATH_PATTERNS, SAFE_CREDENTIAL_SUFFIXES, SHELL_INTERPRETERS, SHELL_WRAPPERS, TRUSTED_SWITCH_WARNING, TRUST_PATH_WARNING } from "./constants.ts";
 import { tagged, withEscapeHints } from "./escape.ts";
+import { expandHome, isDirectory, isOutsideCwd, isRemoteTarget, isUnresolvedTarget, matchesProtectedPath, resolveReal } from "./paths.ts";
 
 
 // ─── Guard Modes ─────────────────────────────────────────────────────
@@ -3203,62 +3204,8 @@ function judgeInPlace(
 	return { kind: "pass" };
 }
 
-// ─── Path Utils ───────────────────────────────────────────────────────
-
-/** Whether an absolute path is outside cwd */
-function isOutsideCwd(absolutePath: string, cwd: string): boolean {
-	const normCwd = normalize(cwd);
-	const normPath = normalize(absolutePath);
-	if (normPath === normCwd) return false;
-	const rel = relativePath(normCwd, normPath);
-	return rel.startsWith("..") || rel === normPath;
-}
-
-/** Protected-path match regardless of in/out project (used by bash redirect/overwrite checks and the write guard) */
-function matchesProtectedPath(absolutePath: string): boolean {
-	const segments = normalize(absolutePath).toLowerCase().split(sep);
-
-	for (const pattern of PROTECTED_PATH_PATTERNS) {
-		const pat = pattern.toLowerCase();
-		const isDir = pat.endsWith("/");
-		const core = isDir ? pat.slice(0, -1) : pat;
-
-		// Suffix patterns (*.pem, *.key): match any path segment
-		if (core.startsWith("*.")) {
-			const suffix = core.slice(1);
-			if (segments.some((seg) => seg.endsWith(suffix))) return true;
-			continue;
-		}
-
-		for (let i = 0; i < segments.length; i++) {
-			const seg = segments[i];
-			if (seg === core) {
-				// Dir patterns (.git/, node_modules/, etc.) match any directory segment;
-				// file patterns (.env) only match the last segment
-				if (isDir || i === segments.length - 1) return true;
-			}
-			// File-pattern variants (.env.local / .env.production, last segment)
-			if (!isDir && i === segments.length - 1 && seg.startsWith(core + ".")) {
-				// key files: exact name only, never a `.pub`/backup variant
-				if (EXACT_ONLY_PATTERNS.has(core)) continue;
-				// credentials: allow clearly non-secret template/example variants
-				if (core === "credentials") {
-					const ext = seg.slice(core.length);
-					if (SAFE_CREDENTIAL_SUFFIXES.has(ext)) continue;
-				}
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-/**
- * Dangerous command classification:
- *   - "block"   → system-destructive (format/shutdown/bulk-delete/block-device writes), blocked in every mode
- *   - "confirm" → privilege/remote/risky (sudo/ssh/chmod 777), blocked in strict, confirmed otherwise
- *   - null      → not dangerous
- */
+// ─── Dangerous command classification ──────────────────────────────────
+/** Dangerous command classification: "block" → system-destructive; "confirm" → privilege/remote/risky; null → not dangerous */
 function dangerousLevel(fullCommand: string): "block" | "confirm" | null {
 	for (const pattern of BLOCK_DANGEROUS_PATTERNS) {
 		if (pattern.test(fullCommand)) return "block";
@@ -3504,44 +3451,10 @@ function extractPathArgs(
 	return results;
 }
 
-/** Expand ~ / ~/xxx to HOME */
-function expandHome(p: string): string {
-	if (p === "~") return HOME;
-	if (p.startsWith("~/")) return join(HOME, p.slice(2));
-	// Foreign home (~user/...) can't be resolved statically and must never be
-	// mistaken for an in-project relative path. Anchor it at the filesystem root
-	// so the outside-project rules apply (conservative confirm / block instead
-	// of a silent in-project pass).
-	if (p.startsWith("~")) return "/" + p;
-	return p;
-}
-
-/** Whether a path token carries shell variable/glob syntax that can't be statically resolved */
-function isUnresolvedTarget(p: string): boolean {
-	return p.includes("$") || p.includes("*") || p.includes("?");
-}
-
-/**
- * Whether a command operand is an rsync/scp-style remote target
- * (`user@host:/path`, `host:/path`, `user@host::module`, `rsync://host/path`).
- * Remote targets must never be resolved as local (in-project) paths.
- */
-function isRemoteTarget(p: string): boolean {
-	if (p.startsWith("rsync://")) return true;
-	// user@host:path (also git@github.com:owner/repo)
-	if (/^[^/@:\s]+@[^/:\s]+:/.test(p)) return true;
-	// host:path (no user, and not a local path like /foo or ./bar)
-	if (/^[^/@:\s]+:/.test(p)) return true;
-	return false;
-}
-
-/** Redirect target: { op, target }; null if none */
 interface RedirectTarget {
-	op: string; // redirect operator (>, 2>, &>, >>, 2>>, ...)
+	op: string; // redirect operator (>, 2>, &>, >>, 2>>...)
 	target: string; // target path
 }
-
-/** Extract the redirect write target (> file, 2>>file, &> file, ...); null if none */
 function extractRedirectTarget(fullCommand: string): RedirectTarget | null {
 	const tokens = splitShellTokens(fullCommand);
 	const REDIR = /^([0-9]*&?>>?\|?)(.*)$/;
@@ -3694,47 +3607,6 @@ function splitSegments(input: string): string[] {
 	if (current.trim()) segments.push(current.trim());
 	return segments;
 }
-
-/** Whether the path is a directory */
-function isDirectory(p: string): boolean {
-	try {
-		return statSync(p).isDirectory();
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Resolve symlinks to the real path.
- * For missing paths, walk upward from the nearest existing ancestor, resolve the first
- * resolvable parent, and append the remainder. Unlike top-down resolution, this correctly
- * handles mid-path symlinks (e.g. in-project lnk -> external dir), preventing deep missing
- * paths from being written through a symlink to outside the project; also handles symlink cwd.
- */
-function resolveReal(p: string): string {
-	try {
-		return realpathSync(p);
-	} catch {
-		let cur = p;
-		const tail: string[] = [];
-		for (;;) {
-			const parent = dirname(cur);
-			if (parent === cur) break; // reached root; path doesn't exist at all
-			try {
-				const real = realpathSync(parent);
-				return join(real, basename(cur), ...tail);
-			} catch {
-				tail.unshift(basename(cur));
-				cur = parent;
-			}
-		}
-		return normalize(p);
-	}
-}
-
-// ─── UI Interaction ───────────────────────────────────────────────────
-
-// ─── Warning copy (shared by the host confirm dialogs and the /guard overlay) ──
 
 /** Warning confirmation before adding a trusted path: that path bypasses all path-guard prompts in every mode */
 async function confirmTrustPath(

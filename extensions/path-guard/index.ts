@@ -41,671 +41,8 @@ import {
 import { BLOCK_DANGEROUS_PATTERNS, CONFIG_DIR, CONFIRM_DANGEROUS_PATTERNS, DELETE_COMMANDS, DEVICE_TARGETS, EXACT_ONLY_PATTERNS, FLAGS_WITH_ARG, HOME, INPLACE_EDITORS, NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, OVERWRITE_COMMANDS, PIPE_TO_SHELL_SOURCES, PREFIX_COMMANDS, PROTECTED_PATH_PATTERNS, SAFE_CREDENTIAL_SUFFIXES, SHELL_INTERPRETERS, SHELL_WRAPPERS, TRUSTED_SWITCH_WARNING, TRUST_PATH_WARNING } from "./constants.ts";
 import { tagged, withEscapeHints } from "./escape.ts";
 import { expandHome, isDirectory, isOutsideCwd, isRemoteTarget, isUnresolvedTarget, matchesProtectedPath, resolveReal } from "./paths.ts";
+import { applyConfig, SESSION_PASS_EXCLUDED, clearSessionPass, DEFAULT_MODES, getConfig, getMode, GUARD_MODES, MODE_DESCRIPTIONS, inNaked, isGuardMode, isRuleLevel, isSessionPassed, isTrustedPath, isUserProtectedPath, normalizeProtectedEntry, pathList, persistConfig, persistNote, readSavedConfig, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, rl, rlFor, ruleVerdict, sessionPassList, sessionPassRule, setMode, untrustableReason, type GuardMode, type GuardVerdict, type PathKind, type PathGuardConfig, type RuleId, type RuleLevel } from "./rules.ts";
 
-
-// ─── Guard Modes ─────────────────────────────────────────────────────
-
-/** Guard mode: strict (full) / normal (default) / loose (relaxed) / trusted (most permissive) / naked (no protection) */
-type GuardMode = "strict" | "normal" | "loose" | "trusted" | "naked";
-
-/** Current session guard mode (switched via /guard; reset to normal on session_start) */
-let currentMode: GuardMode = "normal";
-
-/** Valid guard modes */
-const GUARD_MODES: readonly GuardMode[] = [
-	"strict",
-	"normal",
-	"loose",
-	"trusted",
-	"naked",
-];
-
-/** Whether a string is a valid guard mode (for /guard argument validation) */
-function isGuardMode(m: string): m is GuardMode {
-	return (GUARD_MODES as readonly string[]).includes(m);
-}
-
-/** Mode descriptions (shown in the /guard interactive picker; English first, Chinese brief after) */
-const MODE_DESCRIPTIONS: Record<GuardMode, string> = {
-	strict:
-		"Strict: confirm in-project writes, block dangerous commands / 全防护：项目内写也询问，危险命令直接阻止",
-	normal:
-		"Normal: block system-destructive commands, confirm sudo/ssh / 默认：系统级破坏直接阻止，提权/远程询问",
-	loose:
-		"Loose: pass new-file writes & deletes, confirm overwrites / 放宽：新建/删除免问，覆盖需确认",
-	trusted:
-		"Trusted: pass overwrites & ordinary-file deletes / 最宽松：覆盖/删除普通文件也免问",
-	naked:
-		"Naked: pass everything except system-destructive cmds (confirmed) / 裸奔：除系统级破坏命令外全部放行（破坏命令弹窗询问）",
-};
-
-// ─── Tunable rules & user-configured protected paths ──────────────────
-
-/** Decision level a rule can produce. */
-type RuleLevel = "block" | "confirm" | "pass";
-
-/**
- * Tunable rule IDs — each is a single decision point in the judgement logic.
- * A rule's effective value for the current mode = settings override ?? default.
- */
-type RuleId =
-	| "blockGroup" // system-destructive mkfs/reboot/dev-write/bulk-delete
-	| "confirmGroup" // privilege/remote sudo/ssh/chmod777
-	| "writeOutside" // write/edit targeting a path outside the project
-	| "writeHome" // write/edit under HOME
-	| "writeInProject" // write/edit creating/overwriting in the project
-	| "deleteOutside" // rm outside the project
-	| "deleteInProject" // rm in the project
-	| "overwriteOutsideExisting" // mv/cp over an existing target outside
-	| "overwriteOutsideNew" // mv/cp creating a target outside
-	| "overwriteInProject" // mv/cp overwrite in the project
-	| "truncateInProject" // `> existing in-project file` / truncate in project
-	| "truncateOutside" // `> existing outside file` / truncate outside
-	| "gitDestructive" // git clean -f / reset --hard / checkout . / push --force …
-	| "pipeToShellInProject" // curl/wget/interpreter output piped into a shell (in-workspace)
-	| "pipeToShellOutside" // … with a remote/outside-workspace source
-	| "runScriptInProject" // source/./bash script.sh inside the project
-	| "runScriptOutside" // … outside the project / under HOME
-	| "runScriptProtected" // … targeting a built-in protected path
-	| "scriptUnresolved" // … a `$VAR`/glob target that cannot be resolved statically
-	| "redirectUnresolved" // … a `$VAR`/glob redirect target that cannot be resolved statically
-	| "commandNameUnresolved"; // … the command NAME itself is `$VAR`/`$(…)` and cannot be resolved statically
-
-const RULE_IDS: readonly RuleId[] = [
-	"blockGroup",
-	"confirmGroup",
-	"writeOutside",
-	"writeHome",
-	"writeInProject",
-	"deleteOutside",
-	"deleteInProject",
-	"overwriteOutsideExisting",
-	"overwriteOutsideNew",
-	"overwriteInProject",
-	"truncateInProject",
-	"truncateOutside",
-	"gitDestructive",
-	"pipeToShellInProject",
-	"pipeToShellOutside",
-	"runScriptInProject",
-	"runScriptOutside",
-	"runScriptProtected",
-	"scriptUnresolved",
-	"redirectUnresolved",
-	"commandNameUnresolved",
-];
-
-/** Bilingual short labels for each tunable rule (used in the rule-editor menu). */
-const RULE_DESCRIPTIONS: Record<RuleId, string> = {
-	blockGroup: "system-destructive mkfs/reboot (系统级破坏)",
-	confirmGroup: "privilege/remote sudo/ssh/chmod777 (权限/远程)",
-	writeOutside: "write/edit outside project (项目外写)",
-	writeHome: "write/edit under HOME (HOME 下写)",
-	writeInProject: "write/edit in project (项目内写)",
-	deleteOutside: "delete outside project (项目外删)",
-	deleteInProject: "delete in project (项目内删)",
-	overwriteOutsideExisting: "overwrite existing outside (项目外覆盖已存在)",
-	overwriteOutsideNew: "create target outside (项目外新建)",
-	overwriteInProject: "overwrite in project (项目内覆盖)",
-	truncateInProject: "truncate existing in-project file (截断项目内已存在文件)",
-	truncateOutside: "truncate existing outside file (截断项目外已存在文件)",
-	gitDestructive: "git destructive reset --hard (Git 破坏性)",
-	pipeToShellInProject: "pipe to shell, in-project (管道进 shell·项目内)",
-	pipeToShellOutside: "pipe to shell, remote/outside (管道进 shell·远程/外)",
-	runScriptInProject: "source/./bash script, in-project (运行脚本·项目内)",
-	runScriptOutside: "source/./bash script, outside/HOME (运行脚本·项目外/HOME)",
-	runScriptProtected:
-		"source/./bash script of a built-in protected path (运行脚本·内置保护)",
-	scriptUnresolved:
-		"source/./script with a $VAR/glob path that cannot be resolved (脚本路径不可静态解析)",
-	redirectUnresolved:
-		"redirect target with a $VAR/glob that cannot be resolved (重定向目标不可静态解析)",
-	commandNameUnresolved:
-		"command name itself is $VAR/$(…) and cannot be resolved (命令名不可静态解析)",
-};
-
-const RULE_LEVELS: readonly RuleLevel[] = ["block", "confirm", "pass"];
-
-const RULE_LEVEL_LABELS: Record<RuleLevel, string> = {
-	block: "block — Block (阻止)",
-	confirm: "confirm — Confirm (确认)",
-	pass: "pass — Pass (放行)",
-};
-
-function isRuleLevel(v: string | undefined): v is RuleLevel {
-	return v === "block" || v === "confirm" || v === "pass";
-}
-
-/** Default rules per built-in mode — reproduces the pre-config (v1.0.0) hardcoded behaviour exactly. */
-const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
-	strict: {
-		blockGroup: "block",
-		confirmGroup: "block",
-		writeOutside: "confirm",
-		writeHome: "confirm",
-		writeInProject: "confirm",
-		deleteOutside: "block",
-		deleteInProject: "confirm",
-		overwriteOutsideExisting: "block",
-		overwriteOutsideNew: "confirm",
-		overwriteInProject: "confirm",
-		truncateInProject: "confirm",
-		truncateOutside: "block",
-		gitDestructive: "confirm",
-		pipeToShellInProject: "confirm",
-		pipeToShellOutside: "confirm",
-		runScriptInProject: "confirm",
-		runScriptOutside: "block",
-		runScriptProtected: "block",
-		scriptUnresolved: "block",
-		redirectUnresolved: "block",
-		commandNameUnresolved: "block",
-	},
-	normal: {
-		blockGroup: "block",
-		confirmGroup: "confirm",
-		writeOutside: "confirm",
-		writeHome: "confirm",
-		writeInProject: "pass",
-		deleteOutside: "block",
-		deleteInProject: "confirm",
-		overwriteOutsideExisting: "block",
-		overwriteOutsideNew: "confirm",
-		overwriteInProject: "confirm",
-		truncateInProject: "confirm",
-		truncateOutside: "confirm",
-		gitDestructive: "confirm",
-		pipeToShellInProject: "pass",
-		pipeToShellOutside: "confirm",
-		runScriptInProject: "confirm",
-		runScriptOutside: "confirm",
-		runScriptProtected: "confirm",
-		scriptUnresolved: "confirm",
-		redirectUnresolved: "confirm",
-		commandNameUnresolved: "confirm",
-	},
-	loose: {
-		blockGroup: "block",
-		confirmGroup: "confirm",
-		writeOutside: "pass",
-		writeHome: "pass",
-		writeInProject: "pass",
-		deleteOutside: "confirm",
-		deleteInProject: "pass",
-		overwriteOutsideExisting: "confirm",
-		overwriteOutsideNew: "pass",
-		overwriteInProject: "confirm",
-		truncateInProject: "pass",
-		truncateOutside: "confirm",
-		gitDestructive: "confirm",
-		pipeToShellInProject: "pass",
-		pipeToShellOutside: "pass",
-		runScriptInProject: "pass",
-		runScriptOutside: "confirm",
-		runScriptProtected: "confirm",
-		scriptUnresolved: "confirm",
-		redirectUnresolved: "confirm",
-		commandNameUnresolved: "confirm",
-	},
-	trusted: {
-		blockGroup: "block",
-		confirmGroup: "confirm",
-		writeOutside: "pass",
-		writeHome: "pass",
-		writeInProject: "pass",
-		deleteOutside: "pass",
-		deleteInProject: "pass",
-		overwriteOutsideExisting: "pass",
-		overwriteOutsideNew: "pass",
-		overwriteInProject: "pass",
-		truncateInProject: "pass",
-		truncateOutside: "pass",
-		gitDestructive: "confirm",
-		pipeToShellInProject: "pass",
-		pipeToShellOutside: "pass",
-		runScriptInProject: "pass",
-		runScriptOutside: "pass",
-		runScriptProtected: "pass",
-		scriptUnresolved: "pass",
-		redirectUnresolved: "pass",
-		commandNameUnresolved: "pass",
-	},
-	naked: {
-		blockGroup: "confirm",
-		confirmGroup: "pass",
-		writeOutside: "pass",
-		writeHome: "pass",
-		writeInProject: "pass",
-		deleteOutside: "pass",
-		deleteInProject: "pass",
-		overwriteOutsideExisting: "pass",
-		overwriteOutsideNew: "pass",
-		overwriteInProject: "pass",
-		truncateInProject: "pass",
-		truncateOutside: "pass",
-		gitDestructive: "pass",
-		pipeToShellInProject: "pass",
-		pipeToShellOutside: "pass",
-		runScriptInProject: "pass",
-		runScriptOutside: "pass",
-		runScriptProtected: "pass",
-		scriptUnresolved: "pass",
-		redirectUnresolved: "pass",
-		commandNameUnresolved: "pass",
-	},
-};
-
-/** Effective rule level for the current mode (settings override ?? built-in default). */
-function rl(rule: RuleId): RuleLevel {
-	// A confirm dialog's "Allow & set … = pass (session)" outranks config/defaults
-	// for the rest of this session (never persisted).
-	if (isSessionPassed(currentMode, rule)) return "pass";
-	return config.rules[currentMode]?.[rule] ?? DEFAULT_MODES[currentMode][rule];
-}
-
-/** Effective rule level for a specific mode (override ?? built-in default). */
-function rlFor(mode: GuardMode, rule: RuleId): RuleLevel {
-	return config.rules[mode]?.[rule] ?? DEFAULT_MODES[mode][rule];
-}
-
-/** Map a rule to a segment verdict: block (with reason) / confirm / pass. */
-function ruleVerdict(rule: RuleId, blockReason: string): SegmentVerdict {
-	const lvl = rl(rule);
-	if (lvl === "block")
-		return {
-			kind: "block",
-			reason: tagged(
-				rule === "blockGroup" ? "systemDestructive" : "rule",
-				blockReason,
-			),
-		};
-	if (lvl === "confirm") return { kind: "confirm", rule };
-	return { kind: "pass" };
-}
-
-/** Whether the current mode is naked (many conservative confirms become pass). */
-const inNaked = () => currentMode === "naked";
-
-/**
- * User-configured protected paths (pathGuard.extraProtected). Unlike built-in
- * protected paths, these are enforced in EVERY mode — including naked.
- */
-let extraProtected: string[] = [];
-
-/** Match a resolved absolute path against a user-configured protected entry. */
-function isUserProtectedPath(absolutePath: string): boolean {
-	for (const entry of extraProtected) {
-		const e = normalize(resolveReal(entry));
-		if (absolutePath === e) return true;
-		if (absolutePath.startsWith(e + sep)) return true;
-	}
-	return false;
-}
-
-/** Expand ~ and resolve relative entries against cwd into a canonical absolute path.
- * Deliberately does NOT resolve symlinks: protection/trust is anchored to the literal
- * path the user configured, so it keeps guarding that location even when a symlink in
- * it is created/removed/retargeted later (across sessions or during builds). At match
- * time (isUserProtectedPath / isTrustedPath) the entry's CURRENT real path is resolved,
- * so writes through a symlink to the same real target are still caught — but a write to
- * the literal path is never missed because the stored entry drifted to an old target. */
-function normalizeProtectedEntry(
-	entry: string,
-	cwd: string | undefined,
-): string {
-	const expanded = expandHome(entry.trim());
-	// resolve() normalizes (absolute, dot-segment-free) but does NOT follow symlinks.
-	return resolve(cwd ?? HOME, expanded);
-}
-
-/**
- * User-configured trusted paths (pathGuard.trustedPaths). Operations whose target
- * lies inside a trusted path are always allowed — path-guard treats them as if the
- * active mode were "trusted" for just that path, regardless of the current mode:
- * writes/edits/deletes/overwrites/truncates/in-place edits inside it pass without
- * prompting. Protection always outranks trust: a trusted path can never be a
- * protected path (built-in system path or user-protected path), so those stay blocked.
- */
-let trustedPaths: string[] = [];
-
-/** Path category selector used by both the CLI and interactive /guard paths UIs. */
-type PathKind = "protected" | "trusted";
-
-/** The live entry list for a path category. */
-function pathList(kind: PathKind): string[] {
-	return kind === "trusted" ? trustedPaths : extraProtected;
-}
-
-/** Whether a path is a user-configured trusted entry (or under one). */
-function isTrustedPath(absolutePath: string): boolean {
-	for (const entry of trustedPaths) {
-		const e = normalize(resolveReal(entry));
-		if (absolutePath === e) return true;
-		if (absolutePath.startsWith(e + sep)) return true;
-	}
-	return false;
-}
-
-/**
- * Why a path cannot be added as a trusted entry, or null if it can be trusted.
- * Trusting never overrides protection, so built-in system paths and user-protected
- * paths (or anything under them) are refused.
- */
-function untrustableReason(absolutePath: string): string | null {
-	// Compare on the REAL path so a literal entry that goes through a symlink into a
-	// protected location is still refused as trusted.
-	const real = resolveReal(absolutePath);
-	if (isUserProtectedPath(real)) {
-		return "it is a user-protected path — remove it from protected paths first";
-	}
-	if (matchesProtectedPath(real)) {
-		return "it is a system-important protected path (.env/.ssh/keys/credentials/node_modules/build-output) and cannot be trusted";
-	}
-	return null;
-}
-
-/** Guard verdict: { block, reason } to block / undefined to allow (askConfirm returns a Promise) */
-type GuardVerdict =
-	| ToolCallEventResult
-	| undefined
-	| Promise<ToolCallEventResult | undefined>;
-
-// ─── Entry ────────────────────────────────────────────────────────────
-
-/** Set the current guard mode and mirror it into the TUI footer status bar. */
-function setMode(mode: GuardMode, ui: ExtensionUIContext) {
-	currentMode = mode;
-	refreshModeStatus(ui);
-}
-
-/**
- * Show the active guard mode in the footer status bar (persists across renders).
- * naked is highlighted in warning color so the "bare" state is unmissable.
- */
-function refreshModeStatus(ui: ExtensionUIContext) {
-	const t = ui.theme;
-	const color = currentMode === "naked" ? "warning" : "accent";
-	const label = currentMode === "naked" ? "🛡 NAKED" : `🛡 ${currentMode}`;
-	ui.setStatus("path-guard", t.fg(color, label));
-}
-
-// ─── Settings persistence (mode survives across sessions) ─────────────
-
-/** Global settings.json path (~/.pi/agent/settings.json; PI_PATH_GUARD_SETTINGS overrides, for tests).
- * The agent dir itself follows pi's PI_CODING_AGENT_DIR override (default ~/.pi/agent). */
-function globalSettingsPath(): string {
-	return (
-		process.env.PI_PATH_GUARD_SETTINGS ??
-		join(
-			process.env.PI_CODING_AGENT_DIR ?? join(HOME, ".pi", "agent"),
-			"settings.json",
-		)
-	);
-}
-
-/** Whether cwd is the user's HOME (never treated as a project for settings). */
-function isHomeCwd(cwd: string | undefined): boolean {
-	if (!cwd) return false;
-	return resolveReal(cwd) === resolveReal(HOME);
-}
-
-/** Project settings.json path (cwd/.pi/settings.json), or undefined when no cwd. */
-function projectSettingsPath(cwd: string | undefined): string | undefined {
-	return cwd ? join(cwd, CONFIG_DIR, "settings.json") : undefined;
-}
-
-/**
- * Loaded path-guard config: active mode, user-configured protected paths, and
- * per-mode rule overrides. Repopulated from settings.json on every session_start.
- */
-interface PathGuardConfig {
-	mode: GuardMode;
-	extraProtected: string[];
-	trustedPaths: string[];
-	rules: Partial<Record<GuardMode, Partial<Record<RuleId, RuleLevel>>>>;
-}
-
-let config: PathGuardConfig = {
-	mode: "normal",
-	extraProtected: [],
-	trustedPaths: [],
-	rules: {},
-};
-
-/**
- * Session-only rule passes set from a confirm dialog's "Allow & set … = pass
- * (session)" option. Kept separate from `config.rules` so that a later
- * persistConfig (e.g. /guard rules) can never write them to disk — a new session
- * reverts to the configured / built-in levels.
- */
-const sessionPass: Partial<Record<GuardMode, Set<RuleId>>> = {};
-
-/** Whether a rule was session-passed from a confirm dialog. */
-function isSessionPassed(mode: GuardMode, rule: RuleId): boolean {
-	return sessionPass[mode]?.has(rule) ?? false;
-}
-
-/** Session-pass one or more rules for a mode (in-memory only, never persisted). */
-function sessionPassRule(mode: GuardMode, rule: RuleId): void {
-	(sessionPass[mode] ??= new Set()).add(rule);
-}
-
-/** Drop session-pass overrides (one mode, or all) — used when rules are edited. */
-function clearSessionPass(mode?: GuardMode): void {
-	if (mode) {
-		delete sessionPass[mode];
-		return;
-	}
-	for (const m of GUARD_MODES) delete sessionPass[m];
-}
-
-/** Read and validate the raw pathGuard block from a settings.json file, or undefined. */
-function readSettingsGuard(
-	filePath: string | undefined,
-): Partial<PathGuardConfig> | undefined {
-	if (!filePath) return undefined;
-	try {
-		if (!existsSync(filePath)) return undefined;
-		const data = JSON.parse(readFileSync(filePath, "utf8")) as {
-			pathGuard?: {
-				mode?: string;
-				extraProtected?: string[];
-				trustedPaths?: string[];
-				rules?: Record<string, Record<string, string>>;
-			};
-		};
-		const g = data?.pathGuard;
-		if (!g) return undefined;
-		const out: Partial<PathGuardConfig> = {};
-		if (typeof g.mode === "string" && isGuardMode(g.mode)) out.mode = g.mode;
-		if (Array.isArray(g.extraProtected)) {
-			out.extraProtected = g.extraProtected.filter(
-				(p): p is string => typeof p === "string",
-			);
-		}
-		if (Array.isArray(g.trustedPaths)) {
-			out.trustedPaths = g.trustedPaths.filter(
-				(p): p is string => typeof p === "string",
-			);
-		}
-		if (g.rules && typeof g.rules === "object") {
-			const rules: PathGuardConfig["rules"] = {};
-			for (const [m, overrides] of Object.entries(g.rules)) {
-				if (!isGuardMode(m) || !overrides || typeof overrides !== "object")
-					continue;
-				const clean: Partial<Record<RuleId, RuleLevel>> = {};
-				for (const [r, lvl] of Object.entries(overrides)) {
-					if ((RULE_IDS as readonly string[]).includes(r) && isRuleLevel(lvl)) {
-						clean[r as RuleId] = lvl;
-					}
-				}
-				if (Object.keys(clean).length > 0) rules[m] = clean;
-			}
-			if (Object.keys(rules).length > 0) out.rules = rules;
-		}
-		return out;
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * Effective config at session start. The active mode/extraProtected/rules are
- * persisted to the GLOBAL settings file only (~/.pi/agent/settings.json) and
- * restored from there — see persistConfig for why project-scoped writes are
- * avoided. A trusted project's .pi/settings.json may still OPT-IN override the
- * global mode (read-side only, for hand-authored project config); since path-guard
- * itself never writes that file, using /guard can no longer turn a plain project
- * into a "trust-requiring" one (which is what made pi start asking for trust and
- * silently drop a saved mode on untrusted launches).
- */
-function readSavedConfig(
-	cwd: string | undefined,
-	trusted: boolean,
-): PathGuardConfig {
-	const global = readSettingsGuard(globalSettingsPath()) ?? {};
-	const project =
-		trusted && !isHomeCwd(cwd)
-			? (readSettingsGuard(projectSettingsPath(cwd)) ?? {})
-			: {};
-	const mode = project.mode ?? global.mode ?? "normal";
-	const extraProtected = [
-		...(global.extraProtected ?? []),
-		...(project.extraProtected ?? []),
-	].map((e) => normalizeProtectedEntry(e, cwd));
-	const trustedPaths = [
-		...(global.trustedPaths ?? []),
-		...(project.trustedPaths ?? []),
-	].map((e) => normalizeProtectedEntry(e, cwd));
-	const rules = { ...global.rules, ...project.rules };
-	return { mode, extraProtected, trustedPaths, rules };
-}
-
-/**
- * Persist the whole config to the GLOBAL settings file (~/.pi/agent/settings.json),
- * regardless of cwd or project trust. Project-scoped writes are deliberately avoided:
- * writing cwd/.pi/settings.json would make that project "trust-requiring", so pi would
- * begin asking for trust on the next launch (defaultProjectTrust=ask) and a declined/
- * untrusted launch would silently ignore the saved mode — the flapping that made a
- * saved mode revert to normal. Global settings are never trust-gated, so the mode the
- * user sets always survives. Returns "global" on success, "none" when there is no cwd.
- */
-/** Reason the last persistConfig call fell back to session-only (empty on success). */
-let lastPersistError = "";
-
-function persistConfig(cwd: string | undefined): string {
-	if (!cwd) return "none";
-	const target = globalSettingsPath();
-	try {
-		let data: Record<string, unknown> = {};
-		if (existsSync(target)) {
-			data = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown>;
-		}
-		const guard = (data.pathGuard as Record<string, unknown>) ?? {};
-		guard.mode = config.mode;
-		if (extraProtected.length > 0) {
-			guard.extraProtected = extraProtected;
-		} else {
-			delete guard.extraProtected;
-		}
-		if (trustedPaths.length > 0) {
-			guard.trustedPaths = trustedPaths;
-		} else {
-			delete guard.trustedPaths;
-		}
-		if (Object.keys(config.rules).length > 0) {
-			guard.rules = config.rules;
-		} else {
-			delete guard.rules;
-		}
-		data.pathGuard = guard;
-		writeFileSync(target, JSON.stringify(data, null, 2) + "\n", "utf8");
-		lastPersistError = "";
-		return "global";
-	} catch (e) {
-		lastPersistError = e instanceof Error ? e.message : String(e);
-		return "none";
-	}
-}
-
-/** Human-readable persistence note for notify messages. */
-function persistNote(where: string): string {
-	if (where === "global") return "saved to global settings";
-	return lastPersistError
-		? `session-only — could not write global settings: ${lastPersistError}`
-		: "session-only (not persisted)";
-}
-
-/** Path Guard paths usage message. */
-const PATHS_USAGE =
-	"Path Guard paths usage:\n" +
-	"  /guard paths list | add <path> | rm <path> | clear\n" +
-	"  /guard paths protected …   (same, explicit — this is the default)\n" +
-	"  /guard paths trusted …     manage trusted (always-allowed) paths\n\n" +
-	"Protected paths are guarded in EVERY mode (including naked).\n" +
-	"Trusted paths are ALWAYS allowed (trusted-mode protection for that path);\n" +
-	"system-important protected paths (.env/.ssh/keys/…) cannot be trusted.";
-
-/**
- * /guard paths … subcommand handler. The optional leading category token
- * (protected | trusted) picks the list; it defaults to "protected" for backward
- * compatibility. list / add / rm / clear then operate on that category.
- */
-async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
-	let rest = raw.replace(/^paths\s*/i, "").trim();
-	let kind: PathKind = "protected";
-	const cat = rest.match(/^(protected|trusted)\b/i);
-	if (cat) {
-		kind = cat[1].toLowerCase() as PathKind;
-		rest = rest.slice(cat[0].length).trim();
-	}
-	const spaceIdx = rest.indexOf(" ");
-	const sub = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).toLowerCase();
-	const arg = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).trim();
-	const show = (msg: string) => ctx.ui.notify(msg, "info");
-	const list = pathList(kind);
-
-	switch (sub) {
-		case "list":
-		case "show":
-			if (list.length === 0) {
-				return show(`Path Guard: no ${kind} paths configured`);
-			}
-			return show(
-				`Path Guard ${kind} paths (${list.length}):\n` +
-					list.map((p) => `· ${p}`).join("\n"),
-			);
-		case "add": {
-			if (!arg) return show(`Usage: /guard paths ${kind} add <path>`);
-			const norm = normalizeProtectedEntry(arg, ctx.cwd);
-			if (kind === "trusted") {
-				const denied = untrustableReason(norm);
-				if (denied) {
-					return show(`Path Guard: cannot trust ${norm} — ${denied}`);
-				}
-				if (!(await confirmTrustPath(ctx))) {
-					return show(
-						`Path Guard: not added — trusting ${norm} requires confirmation`,
-					);
-				}
-			}
-			if (list.includes(norm)) {
-				return show(`Path Guard: already ${kind} — ${norm}`);
-			}
-			return show(actionAddPath(kind, arg, ctx));
-		}
-		case "rm":
-		case "remove": {
-			if (!arg) return show(`Usage: /guard paths ${kind} rm <path>`);
-			const norm = normalizeProtectedEntry(arg, ctx.cwd);
-			return show(actionRemovePath(kind, norm, ctx));
-		}
-		case "clear":
-			return show(actionClearPaths(kind, ctx));
-		default:
-			return show(PATHS_USAGE);
-	}
-}
 
 // ─── Shared /guard actions (single source of truth for the overlay & menus) ──
 // Both the interactive overlay panel and the legacy chained menus (plus the
@@ -714,7 +51,7 @@ async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
 
 /** Switch the active mode: update config, refresh the footer, persist. Confirm first. */
 function actionSwitchMode(mode: GuardMode, ctx: ExtensionCommandContext): string {
-	config.mode = mode;
+	getConfig().mode = mode;
 	setMode(mode, ctx.ui);
 	const where = persistConfig(ctx.cwd);
 	return `Path Guard switched to: ${mode} (${persistNote(where)})`;
@@ -727,7 +64,7 @@ function actionSetRule(
 	level: RuleLevel,
 	ctx: ExtensionCommandContext,
 ): string {
-	(config.rules[mode] ??= {})[rule] = level;
+	(getConfig().rules[mode] ??= {})[rule] = level;
 	clearSessionPass(mode);
 	const where = persistConfig(ctx.cwd);
 	return `Path Guard: set ${mode}.${rule} = ${level} (${persistNote(where)})`;
@@ -739,7 +76,7 @@ function actionResetRule(
 	rule: RuleId,
 	ctx: ExtensionCommandContext,
 ): string {
-	if (config.rules[mode]) delete config.rules[mode]![rule];
+	if (getConfig().rules[mode]) delete getConfig().rules[mode]![rule];
 	clearSessionPass(mode);
 	const where = persistConfig(ctx.cwd);
 	return `Path Guard: ${mode}.${rule} back to default ${DEFAULT_MODES[mode][rule]} (${persistNote(where)})`;
@@ -747,7 +84,7 @@ function actionResetRule(
 
 /** Reset every override of one mode to built-in defaults. */
 function actionResetMode(mode: GuardMode, ctx: ExtensionCommandContext): string {
-	delete config.rules[mode];
+	delete getConfig().rules[mode];
 	clearSessionPass(mode);
 	const where = persistConfig(ctx.cwd);
 	return `Path Guard: reset mode ${mode} to defaults (${persistNote(where)})`;
@@ -755,7 +92,7 @@ function actionResetMode(mode: GuardMode, ctx: ExtensionCommandContext): string 
 
 /** Clear all rule overrides for every mode. */
 function actionResetAllRules(ctx: ExtensionCommandContext): string {
-	config.rules = {};
+	getConfig().rules = {};
 	clearSessionPass();
 	const where = persistConfig(ctx.cwd);
 	return `Path Guard: cleared all rule overrides (${persistNote(where)})`;
@@ -848,10 +185,10 @@ function pathsActionsMenu(kind: PathKind): string[] {
 async function runModePicker(ctx: ExtensionCommandContext): Promise<boolean> {
 	const choices = GUARD_MODES.map(
 		(mo) =>
-			`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === currentMode ? " (current)" : ""}`,
+			`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === getMode() ? " (current)" : ""}`,
 	);
 	const chosen = await ctx.ui.select(
-		`${rulesMatrix()}\n\nCurrent mode: ${currentMode} — choose one:`,
+		`${rulesMatrix()}\n\nCurrent mode: ${getMode()} — choose one:`,
 		choices,
 	);
 	if (!chosen) {
@@ -1028,7 +365,7 @@ function rulesMatrix(): string {
 	// Surface confirm-dialog session passes — they are not in `config.rules`.
 	const session: string[] = [];
 	for (const mo of GUARD_MODES) {
-		for (const r of sessionPass[mo] ?? []) session.push(`${mo}.${r}`);
+		for (const r of sessionPassList(mo)) session.push(`${mo}.${r}`);
 	}
 	const note = session.length
 		? `\n\nSession-only pass (not persisted): ${session.sort().join(", ")}`
@@ -1040,7 +377,7 @@ function rulesMatrix(): string {
 function rulesSummary(): string {
 	const out: string[] = [];
 	for (const mo of GUARD_MODES) {
-		const ov = config.rules[mo];
+		const ov = getConfig().rules[mo];
 		if (!ov) continue;
 		for (const r of RULE_IDS) {
 			if (ov[r] !== undefined) out.push(`${mo}.${r} = ${ov[r]}`);
@@ -1137,8 +474,8 @@ async function runModeSubmenu(ctx: ExtensionCommandContext): Promise<void> {
 	while (true) {
 		const options = [
 			...GUARD_MODES.map((mo) => {
-				const n = Object.keys(config.rules[mo] ?? {}).length;
-				return `${mo} — ${MODE_DESCRIPTIONS[mo]}${n ? ` (${n} overrides)` : ""}${mo === currentMode ? " (current)" : ""}`;
+				const n = Object.keys(getConfig().rules[mo] ?? {}).length;
+				return `${mo} — ${MODE_DESCRIPTIONS[mo]}${n ? ` (${n} overrides)` : ""}${mo === getMode() ? " (current)" : ""}`;
 			}),
 			"reset — Reset a mode to built-in defaults (恢复某模式默认)",
 			"back — Back to rules menu (返回)",
@@ -1253,15 +590,15 @@ function panelOptions(s: PanelScreen): string[] {
 		case "mode":
 			return GUARD_MODES.map(
 				(mo) =>
-					`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === currentMode ? " (current)" : ""}`,
+					`${mo} — ${MODE_DESCRIPTIONS[mo]}${mo === getMode() ? " (current)" : ""}`,
 			);
 		case "rules":
 			return GUARD_RULES_MENU;
 		case "ruleMode":
 			return [
 				...GUARD_MODES.map((mo) => {
-					const n = Object.keys(config.rules[mo] ?? {}).length;
-					return `${mo} — ${MODE_DESCRIPTIONS[mo]}${n ? ` (${n} overrides)` : ""}${mo === currentMode ? " (current)" : ""}`;
+					const n = Object.keys(getConfig().rules[mo] ?? {}).length;
+					return `${mo} — ${MODE_DESCRIPTIONS[mo]}${n ? ` (${n} overrides)` : ""}${mo === getMode() ? " (current)" : ""}`;
 				}),
 				"reset — Reset a mode to built-in defaults (恢复某模式默认)",
 				"back — Back to rules menu (返回)",
@@ -1691,7 +1028,7 @@ class GuardPanel implements Component, Focusable {
 				break;
 			case "mode":
 				out.push(...rulesMatrix().split("\n"), "");
-				out.push(`Current mode: ${currentMode} — choose one:`);
+				out.push(`Current mode: ${getMode()} — choose one:`);
 				out.push(...this.listLines(panelOptions(s), s.idx));
 				break;
 			case "rules":
@@ -1769,7 +1106,7 @@ class GuardPanel implements Component, Focusable {
 			}
 		};
 		const inner: string[] = [
-			fg("accent", `Path Guard  ·  mode: ${currentMode}`),
+			fg("accent", `Path Guard  ·  mode: ${getMode()}`),
 			"",
 		];
 		if (this.confirmState) {
@@ -1812,24 +1149,90 @@ async function runGuardPanel(ctx: ExtensionCommandContext): Promise<void> {
 	);
 }
 
+/** Path Guard paths usage message. */
+const PATHS_USAGE =
+	"Path Guard paths usage:\n" +
+	"  /guard paths list | add <path> | rm <path> | clear\n" +
+	"  /guard paths protected … (same, explicit — this is the default)\n" +
+	"  /guard paths trusted … manage trusted (always-allowed) paths\n\n" +
+	"Protected paths are guarded in EVERY mode (including naked).\n" +
+	"Trusted paths are ALWAYS allowed (trusted-mode protection for that path);\n" +
+	"system-important protected paths (.env/.ssh/keys/…) cannot be trusted.";
+async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
+	let rest = raw.replace(/^paths\s*/i, "").trim();
+	let kind: PathKind = "protected";
+	const cat = rest.match(/^(protected|trusted)\b/i);
+	if (cat) {
+		kind = cat[1].toLowerCase() as PathKind;
+		rest = rest.slice(cat[0].length).trim();
+	}
+	const spaceIdx = rest.indexOf(" ");
+	const sub = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).toLowerCase();
+	const arg = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).trim();
+	const show = (msg: string) => ctx.ui.notify(msg, "info");
+	const list = pathList(kind);
+
+	switch (sub) {
+		case "list":
+		case "show":
+			if (list.length === 0) {
+				return show(`Path Guard: no ${kind} paths configured`);
+			}
+			return show(
+				`Path Guard ${kind} paths (${list.length}):\n` +
+					list.map((p) => `· ${p}`).join("\n"),
+			);
+		case "add": {
+			if (!arg) return show(`Usage: /guard paths ${kind} add <path>`);
+			const norm = normalizeProtectedEntry(arg, ctx.cwd);
+			if (kind === "trusted") {
+				const denied = untrustableReason(norm);
+				if (denied) {
+					return show(`Path Guard: cannot trust ${norm} — ${denied}`);
+				}
+				if (!(await confirmTrustPath(ctx))) {
+					return show(
+						`Path Guard: not added — trusting ${norm} requires confirmation`,
+					);
+				}
+			}
+			if (list.includes(norm)) {
+				return show(`Path Guard: already ${kind} — ${norm}`);
+			}
+			return show(actionAddPath(kind, arg, ctx));
+		}
+		case "rm":
+		case "remove": {
+			if (!arg) return show(`Usage: /guard paths ${kind} rm <path>`);
+			const norm = normalizeProtectedEntry(arg, ctx.cwd);
+			return show(actionRemovePath(kind, norm, ctx));
+		}
+		case "clear":
+			return show(actionClearPaths(kind, ctx));
+		default:
+			return show(PATHS_USAGE);
+	}
+}
+
+
+/** Entry point: register event handlers and the /guard command. */
 export default function (pi: ExtensionAPI) {
 	// Restore the persisted config on every new session (startup, /new, /resume all
 	// fire session_start): active mode + user protected paths + rule overrides.
 	pi.on("session_start", (_event, ctx) => {
-		config = readSavedConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+		const cfg = readSavedConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
+		applyConfig(cfg);
 		clearSessionPass();
-		extraProtected = config.extraProtected;
-		trustedPaths = config.trustedPaths;
-		setMode(config.mode, ctx.ui);
+		setMode(cfg.mode, ctx.ui);
 		// A persisted loose mode survives into every new session; surface it so the
 		// user never runs unprotected without noticing (naked in particular).
-		if (config.mode === "naked") {
+		if (cfg.mode === "naked") {
 			ctx.ui.notify(
 				"⚠️ Path Guard restored in NAKED mode — nearly all protection is OFF " +
 					"(persisted from a previous session). Use /guard normal to re-enable.",
 				"warning",
 			);
-		} else if (config.mode === "trusted") {
+		} else if (cfg.mode === "trusted") {
 			ctx.ui.notify(
 				"⚠️ Path Guard restored in trusted mode (persisted from a previous session): " +
 					"in-project deletes and outside overwrites are no longer prompted. " +
@@ -1842,7 +1245,7 @@ export default function (pi: ExtensionAPI) {
 	// /guard slash command: view / switch mode, and manage custom protected paths
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> add|rm|list|clear <path> manages paths",
+			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> list|add|rm|clear",
 		handler: async (args, ctx) => {
 			const raw = args?.trim() ?? "";
 			const m = raw.toLowerCase();
@@ -1861,7 +1264,7 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
-				config.mode = m;
+				getConfig().mode = m;
 				setMode(m, ctx.ui);
 				const where = persistConfig(ctx.cwd);
 				ctx.ui.notify(
@@ -1873,7 +1276,7 @@ export default function (pi: ExtensionAPI) {
 
 			// No UI → cannot interact; just show the current mode
 			if (!ctx.hasUI) {
-				ctx.ui.notify(`Path Guard current mode: ${currentMode}`, "info");
+				ctx.ui.notify(`Path Guard current mode: ${getMode()}`, "info");
 				return;
 			}
 
@@ -1889,7 +1292,7 @@ export default function (pi: ExtensionAPI) {
 			// here on "back"; only cancelling at this top level exits the command.
 			while (true) {
 				const main = await ctx.ui.select(
-					`Path Guard — current mode: ${currentMode} — choose an action:`,
+					`Path Guard — current mode: ${getMode()} — choose an action:`,
 					GUARD_MAIN_MENU,
 				);
 				if (!main) {
@@ -1917,7 +1320,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-/** write/edit guard: protected → block; outside project / cwd is HOME → confirm */
+
 function checkWriteEdit(
 	input: WriteToolInput | EditToolInput,
 	ctx: ExtensionContext,
@@ -1939,7 +1342,7 @@ function checkWriteEdit(
 	}
 
 	// ② naked passes everything else (built-in protected paths & the write/edit tools).
-	if (currentMode === "naked") return;
+	if (getMode() === "naked") return;
 
 	// ③ Built-in protected path (incl. HOME-level credentials/config, inside or outside project) → block
 	if (matchesProtectedPath(real)) {
@@ -2122,14 +1525,14 @@ function unresolvedScriptTail(target: string): string {
  * entries' basenames. Conservative direction: a same-named directory blocks too.
  */
 function tailLooksUserProtected(tail: string): boolean {
-	if (extraProtected.length === 0) return false;
+	if (pathList("protected").length === 0) return false;
 	const segs = normalize("/x" + tail)
 		.toLowerCase()
 		.split(sep)
 		.filter(Boolean);
 	if (segs.length === 0) return false;
 	const names = new Set<string>();
-	for (const entry of extraProtected) {
+	for (const entry of pathList("protected")) {
 		const parts = normalize(resolveReal(entry))
 			.toLowerCase()
 			.split(sep)
@@ -3654,11 +3057,6 @@ async function confirmModeSwitch(
 	return true;
 }
 
-/**
- * Tunable rules never offered the confirm dialog's session-pass shortcut:
- * `confirmGroup` (sudo/ssh/chmod 777) and `blockGroup` (system-destructive).
- */
-const SESSION_PASS_EXCLUDED = new Set<RuleId>(["confirmGroup", "blockGroup"]);
 
 async function askConfirm(
 	ctx: ExtensionContext,
@@ -3676,7 +3074,7 @@ async function askConfirm(
 	// only outside naked (where a confirm already means "very dangerous") and never
 	// for an excluded rule.
 	const eligible =
-		currentMode === "naked"
+		getMode() === "naked"
 			? []
 			: [...new Set(confirmRules)].filter((r) => !SESSION_PASS_EXCLUDED.has(r));
 	const options = ["✅ Allow", "❌ Deny"];
@@ -3691,7 +3089,7 @@ async function askConfirm(
 	const choice = await ctx.ui.select(message, options);
 
 	if (passChoice && choice === passChoice) {
-		for (const r of eligible) sessionPassRule(currentMode, r);
+		for (const r of eligible) sessionPassRule(getMode(), r);
 		ctx.ui.notify(
 			`Path Guard: ${eligible.join(", ")} = pass for this session (not persisted)`,
 			"info",

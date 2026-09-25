@@ -23,7 +23,6 @@ import {
 	basename,
 	sep,
 } from "node:path";
-import { homedir } from "node:os";
 import {
 	Input,
 	matchesKey,
@@ -39,187 +38,9 @@ import {
 	readFileSync,
 	writeFileSync,
 } from "node:fs";
+import { BLOCK_DANGEROUS_PATTERNS, CONFIG_DIR, CONFIRM_DANGEROUS_PATTERNS, DELETE_COMMANDS, DEVICE_TARGETS, EXACT_ONLY_PATTERNS, FLAGS_WITH_ARG, HOME, INPLACE_EDITORS, NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, OVERWRITE_COMMANDS, PIPE_TO_SHELL_SOURCES, PREFIX_COMMANDS, PROTECTED_PATH_PATTERNS, SAFE_CREDENTIAL_SUFFIXES, SHELL_INTERPRETERS, SHELL_WRAPPERS, TRUSTED_SWITCH_WARNING, TRUST_PATH_WARNING } from "./constants.ts";
+import { tagged, withEscapeHints } from "./escape.ts";
 
-// ─── Configuration ──────────────────────────────────────────────────────
-
-/** Protected path fragments — matching paths block writes/edits */
-const PROTECTED_PATH_PATTERNS = [
-	".env",
-	".envrc", // direnv config (can load arbitrary commands / credentials)
-	".git/",
-	".ssh/", // SSH config & keys
-	// HOME-level credentials/config (intercepted for bash redirects, overwrites, and the write tool)
-	".aws/", // AWS credentials
-	".kube/", // Kubernetes admin config
-	".docker/", // Docker login credentials
-	".gnupg/", // GPG keys
-	".git-credentials", // plaintext git credentials
-	".npmrc", // npm tokens
-	".pypirc", // PyPI tokens
-	".netrc", // generic login credentials
-	".bashrc", // shell config (persistence/backdoor vector)
-	".zshrc",
-	".profile",
-	".bash_profile",
-	".secrets/", // secrets dir (also covers a bare `.secrets` file)
-	"credentials", // in-project credential files
-	"id_rsa", // private keys that may live outside .ssh/
-	"id_ed25519",
-	"id_ecdsa",
-	"id_dsa",
-	"*.pem", // private keys (suffix match)
-	"*.key", // private keys (suffix match)
-	"*.p12", // PKCS#12 keystores
-	"*.pfx", // PKCS#12 keystores (Windows)
-	"node_modules/",
-	".next/",
-	".nuxt/",
-	".cache/",
-	"dist/",
-	"build/",
-	"coverage/",
-	"__pycache__/",
-	".pytest_cache/",
-	"target/",
-	"vendor/", // Go vendor / PHP composer
-];
-
-/**
- * File patterns that must match the last path segment exactly and never a
- * `<name>.<suffix>` variant — `id_rsa.pub` is the public key, not the private one.
- */
-const EXACT_ONLY_PATTERNS = new Set([
-	"id_rsa",
-	"id_ed25519",
-	"id_ecdsa",
-	"id_dsa",
-]);
-
-/**
- * `credentials.<ext>` extensions that clearly mark a non-secret template/example.
- * The bare `credentials` pattern blocks the exact name and sensitive variants
- * (`credentials.json`), but must not fire on these (issue: false positives).
- */
-const SAFE_CREDENTIAL_SUFFIXES = new Set([
-	".example",
-	".sample",
-	".template",
-	".tmpl",
-	".dist",
-	".md",
-	".txt",
-]);
-
-/** Block group — system-destructive; blocked in every mode (no confirmation opportunity) */
-const BLOCK_DANGEROUS_PATTERNS: RegExp[] = [
-	/\bmkfs\./,
-	/\bmkswap\b/,
-	/\bpoweroff\b/,
-	/\breboot\b/,
-	/\bshutdown\b/,
-	/\binit\s+0\b/,
-	/\binit\s+6\b/,
-	// dd writing directly to a block device (ordinary files handled by judgeDd);
-	// generic /dev/<dev> with fixed exclusions for harmless pseudo-devices
-	/\bdd\b[^;|&]*\bof=\s*\/dev\/(?!null\b|zero\b|tty\b|stdin\b|stdout\b|stderr\b|pts\b|ptmx\b|full\b|random\b|urandom\b|fuse\b|shm\b)[a-z0-9]+/,
-	// direct write to a block device (note: no \b — > is often preceded by a space)
-	/(>|>>)\s*\/dev\/(?!null\b|zero\b|tty\b|stdin\b|stdout\b|stderr\b|pts\b|ptmx\b|full\b|random\b|urandom\b|fuse\b|shm\b)[a-z0-9]+/,
-	/\bfind\b[^;|&]*-delete\b/, // find ... -delete bulk delete
-	/\bfind\b[^;|&]*-exec(dir)?\b[^;|&]*\brm\b/, // find ... -exec rm bulk delete
-	/\bxargs\b[^;|&]*\brm\b/, // xargs rm bulk delete (backup beyond judgeGit)
-];
-
-/** Confirm group — privilege escalation / remote / risky permissions: blocked in strict, confirmed otherwise */
-const CONFIRM_DANGEROUS_PATTERNS: RegExp[] = [
-	/\bsudo\b/,
-	/\b(doas|pkexec)\b/,
-	/\b(chmod|chown)\b.*777/,
-	/(?<!\.)\b(ssh|scp|sftp|rsh|telnet)\b/, // remote execution/operation (lookbehind avoids false hits on ~/.ssh/ etc.)
-	/\bwget\s+-O\s+\/dev\/null\b/, // download discarded directly (harmless but conservative)
-];
-
-/** Delete commands requiring special handling */
-const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink", "shred", "wipe"]);
-
-/** Overwrite commands — overwrite existing targets by default (ln needs -f/--force; handled separately) */
-const OVERWRITE_COMMANDS = new Set([
-	"mv",
-	"cp",
-	"install",
-	"tee",
-	"ln",
-	"rsync",
-]);
-
-/** In-place edit commands (-i rewrites in place) */
-const INPLACE_EDITORS = new Set(["sed", "perl", "ruby"]);
-
-/** Shell wrappers: the -c argument is inline code that needs recursive checking */
-const SHELL_WRAPPERS = new Set([
-	"bash",
-	"sh",
-	"zsh",
-	"ksh",
-	"dash",
-	"fish",
-	"csh",
-	"tcsh",
-]);
-
-/**
- * Sources whose output piped into a shell is risky (remote fetch / inline-generated
- * code): `curl … | bash`, `wget -qO- … | sh`, `python -c '…' | sh`, etc.
- */
-const PIPE_TO_SHELL_SOURCES = new Set([
-	"curl",
-	"wget",
-	"python",
-	"python3",
-	"perl",
-	"node",
-	"ruby",
-	"php",
-]);
-
-/** Prefix commands: strip before checking the real command */
-const PREFIX_COMMANDS = new Set([
-	"sudo",
-	"doas",
-	"pkexec",
-	"env",
-	"nohup",
-	"command",
-	"builtin",
-	"time",
-	"nice",
-	"xargs",
-	"timeout",
-	"setsid",
-	"stdbuf",
-	"ionice",
-	"chroot",
-	"watch",
-	"exec",
-]);
-
-/** Prefix flags that take a value (skip one extra token when stripping) */
-const FLAGS_WITH_ARG = new Set(["-u", "--user", "-g", "--group"]);
-
-/** Redirecting to these devices is not a destructive truncate */
-const DEVICE_TARGETS = new Set([
-	"/dev/null",
-	"/dev/stdout",
-	"/dev/stderr",
-	"/dev/tty",
-	"/dev/zero",
-]);
-
-const HOME = homedir();
-
-/** Global settings.json path (default pi agent dir; PI_CODING_AGENT_DIR overrides, per pi docs). */
-
-/** pi project config dir name — fixed by pi (no override mechanism), see docs/configuration.md. */
-const CONFIG_DIR = ".pi";
 
 // ─── Guard Modes ─────────────────────────────────────────────────────
 
@@ -2257,8 +2078,6 @@ type SegmentVerdict =
 	| { kind: "pass" };
 
 /** Per-segment check: protected redirect → block; dangerous commands → confirm/block; the rest to sub-judges / wrapper recursion */
-/** Shell interpreters whose `<interp> [flags] script.sh` form executes a script file. */
-const SHELL_INTERPRETERS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 
 /**
  * The script-file target of a `source`/`.` or `<shell-interpreter> script` command,
@@ -3917,22 +3736,6 @@ function resolveReal(p: string): string {
 
 // ─── Warning copy (shared by the host confirm dialogs and the /guard overlay) ──
 
-/** Body of the trusted-path warning (used by both confirm paths). */
-const TRUST_PATH_WARNING =
-	"A trusted path is ALWAYS allowed: path-guard will not block or prompt for writes/edits/deletes/overwrites/truncates inside it, in ANY mode (like trusted mode for just that path).\n\nOnly protected paths (which can never be trusted) still apply. Confirm trusting it?";
-
-/** Body of the single trusted-mode switch warning. */
-const TRUSTED_SWITCH_WARNING =
-	"trusted is the most permissive mode: in-project deletes and outside overwrites/deletes of\nordinary files are no longer prompted. Only protected paths and system-destructive commands\nremain blocked.\n\npi's behavior boundary is very loose in this mode — please confirm the switch.";
-
-/** First of the two naked-mode switch warnings. */
-const NAKED_SWITCH_WARNING_1 =
-	"naked passes nearly everything: protected paths (.env/.ssh/keys), write/edit tool checks, git\ndestructive ops, truncation, and outside deletes/overwrites are no longer blocked or prompted.\nOnly system-destructive commands (mkfs/reboot/bulk-delete/block-device writes) are still\nconfirmed — everything else is allowed without a prompt.";
-
-/** Second, final naked-mode switch warning. */
-const NAKED_SWITCH_WARNING_2 =
-	"This is the final step. After this, path-guard passes nearly every operation with no blocking and\nno confirmation, including writes to protected paths and git destructive / truncate / outside\ndelete operations. Only system-destructive commands (mkfs/reboot/bulk-delete/block-device\nwrites) will still prompt for confirmation.\n\nOnly switch if you are certain you want minimal protection.";
-
 /** Warning confirmation before adding a trusted path: that path bypasses all path-guard prompts in every mode */
 async function confirmTrustPath(
 	ctx: ExtensionCommandContext,
@@ -4027,91 +3830,4 @@ async function askConfirm(
 		return { block: true, reason: "User denied the operation" };
 	}
 	return undefined; // allow
-}
-
-// ─── Block escape hints ────────────────────────────────────────────────
-// A block is opaque without guidance on how to actually run the thing. Each
-// blocked line is classified into one escape category and a short, honest
-// hint (English + brief Chinese) is appended for every category present, so
-// the advice always matches why it was blocked.
-
-type EscapeCat =
-	| "userPath" // user-configured protected path → blocked in EVERY mode (incl. naked)
-	| "protectedPath" // built-in protected path → only naked bypasses
-	| "systemDestructive" // mkfs/reboot/bulk-delete/block-device → naked still prompts
-	| "noUi" // a confirm-grade op blocked because there is no interactive UI
-	| "rule"; // some rule is set to block at the current level → loosen it
-
-const ESCAPE_HINTS: Record<EscapeCat, { en: string; zh: string }> = {
-	userPath: {
-		en: "user-configured protected path — blocked in every mode; remove it with /guard paths rm <path>",
-		zh: "自定义保护路径，所有模式强制拦截；请先用 /guard paths rm 移除",
-	},
-	protectedPath: {
-		en: "built-in protected path — only /guard naked bypasses it",
-		zh: "内置保护路径，仅 /guard naked 会放行",
-	},
-	systemDestructive: {
-		en: "system-destructive command — /guard naked still prompts once before running it",
-		zh: "系统级破坏命令，/guard naked 后仍会再向你确认一次",
-	},
-	noUi: {
-		en: "needs an interactive confirm — run it in the TUI, or loosen this rule to pass",
-		zh: "需要交互确认，请在 TUI 里运行，或把该规则调为 pass",
-	},
-	rule: {
-		en: "rule-level block — loosen the mode (/guard loose|trusted|naked) or tune just this rule (/guard rules)",
-		zh: "规则级拦截，可切换 /guard loose 或 /guard rules 调整该条规则",
-	},
-};
-
-/** Prefix a reason with its structural escape category (stripped on display). */
-function tagged(cat: EscapeCat, reason: string): string {
-	return `[cat:${cat}] ${reason}`;
-}
-
-const CAT_TAG_RE = /\[cat:([A-Za-z]+)\]/;
-
-/** Pick the single most specific category for one blocked-reason line. */
-function escapeCatOf(line: string): EscapeCat {
-	const m = line.match(CAT_TAG_RE);
-	if (m && m[1] in ESCAPE_HINTS) return m[1] as EscapeCat;
-	// legacy fallback for untagged lines
-	if (/user-protected/i.test(line)) return "userPath";
-	if (/system-destructive/i.test(line)) return "systemDestructive";
-	if (/protected\b/i.test(line)) return "protectedPath";
-	if (/no interactive ui/i.test(line)) return "noUi";
-	return "rule";
-}
-
-/**
- * Append per-category "how to run this" hints to a block message.
- * Structural header lines (ending in ':') and blanks are skipped, so nested
- * multi-line reasons are still classified by their individual detail lines.
- */
-function withEscapeHints(reason: string): string {
-	const cats = new Set<EscapeCat>();
-	for (const line of reason.split("\n")) {
-		const t = line.trim();
-		if (!t) continue;
-		if (t.endsWith(":")) continue; // "Command blocked:" / "Inner command blocked:"
-		cats.add(escapeCatOf(t));
-	}
-	if (cats.size === 0) return reason.replace(CAT_TAG_RE, "");
-	const clean = reason.replace(/\[cat:[A-Za-z]+\] /g, "");
-	const order: EscapeCat[] = [
-		"systemDestructive",
-		"protectedPath",
-		"userPath",
-		"noUi",
-		"rule",
-	];
-	const hintLines: string[] = [];
-	for (const cat of order) {
-		if (cats.has(cat)) {
-			// English and Chinese on separate lines so long hints stay readable.
-			hintLines.push(`· ${ESCAPE_HINTS[cat].en}\n  ${ESCAPE_HINTS[cat].zh}`);
-		}
-	}
-	return `${clean}\n\nTo run anyway / 如需执行:\n${hintLines.join("\n")}`;
 }

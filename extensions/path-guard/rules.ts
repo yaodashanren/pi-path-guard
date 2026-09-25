@@ -623,5 +623,8 @@ export function sessionPassList(mode: GuardMode): RuleId[] {
 	return [...(sessionPass[mode] ?? [])];
 }
 
-/** Tunable rules never offered the confirm dialog's session-pass shortcut. */
+/**
+ * Tunable rules never offered the confirm dialog's session-pass shortcut:
+ * `confirmGroup` (sudo/ssh/chmod 777) and `blockGroup` (system-destructive).
+ */
 export const SESSION_PASS_EXCLUDED = new Set<RuleId>(["confirmGroup", "blockGroup"]);

@@ -40,7 +40,7 @@ export default function (pi: ExtensionAPI) {
 	// /guard slash command: view / switch mode, and manage custom protected paths
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> list|add|rm|clear",
+			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> add|rm|list|clear <path> manages paths",
 		handler: async (args, ctx) => {
 			const raw = args?.trim() ?? "";
 			const m = raw.toLowerCase();

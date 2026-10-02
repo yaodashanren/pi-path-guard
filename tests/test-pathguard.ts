@@ -953,6 +953,33 @@ for (const mode of ["normal", "loose", "trusted"]) {
 	);
 }
 
+// ── regression (v1.7.0 module split): prefix flags that take a value ──
+// `sudo -u`, `sudo -g`, `env -u` etc. silently threw ReferenceError
+// (FLAGS_WITH_ARG used but not imported in shell-parse.ts), aborting every
+// bash tool_call the guard inspected.
+await setMode("normal");
+check(
+	"normal sudo -u (flag with value) → confirm",
+	(await runCmd("sudo -u root ls /root", PROJ)).verdict,
+	"confirm",
+);
+check(
+	"normal env -u (flag with value) → pass",
+	(await runCmd("env -u FOO ls", PROJ)).verdict,
+	"pass",
+);
+check(
+	"normal sudo --user=root → confirm",
+	(await runCmd("sudo --user=root ls /root", PROJ)).verdict,
+	"confirm",
+);
+await setMode("strict");
+check(
+	"strict sudo -u (flag with value) → block",
+	(await runCmd("sudo -u root ls /root", PROJ)).verdict,
+	"block",
+);
+
 // ── in-project write/edit: strict confirm, others pass ──────
 await setMode("strict");
 check(

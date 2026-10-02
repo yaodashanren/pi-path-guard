@@ -8,41 +8,100 @@
 // Usage: node --import ./pi-modules-hook.mjs ...  (registers itself)
 
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 
-// Locate the pi install's @earendil-works scope. Prefer the running pi, then
-// fall back to well-known install roots.
+const PI_SCOPE = "@earendil-works";
+const PI_CORE_PKG = "pi-coding-agent";
+
+/** True when `p` is a directory holding the @earendil-works scope. */
+function isScopeDir(p) {
+	return typeof p === "string" && existsSync(join(p, PI_CORE_PKG));
+}
+
+/**
+ * Walk upward from a file or directory path and return the nearest
+ * `.../node_modules/@earendil-works` directory, or null.
+ * Handles both hoisted (`<dir>/node_modules/@earendil-works`) and standalone
+ * Node layouts (`<dir>/lib/node_modules/@earendil-works`), and a path that
+ * already points inside the scope.
+ */
+function scopeFromPath(start) {
+	let dir = resolvePath(start);
+	if (!existsSync(dir)) dir = dirname(dir);
+	while (true) {
+		// The ancestor itself is the scope, e.g. a realpathed pi binary inside
+		// .../lib/node_modules/@earendil-works/pi-coding-agent/dist/...
+		if (basename(dir) === PI_SCOPE && basename(dirname(dir)) === "node_modules") {
+			if (isScopeDir(dir)) return dir;
+		}
+		for (const candidate of [
+			join(dir, "node_modules", PI_SCOPE),
+			join(dir, "lib", "node_modules", PI_SCOPE),
+		]) {
+			if (isScopeDir(candidate)) return candidate;
+		}
+		const parent = dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+/** Locate an executable named `name` on PATH. */
+function which(name) {
+	const pathEnv = process.env.PATH;
+	if (!pathEnv) return null;
+	for (const dir of pathEnv.split(":")) {
+		if (!dir) continue;
+		const candidate = join(dir, name);
+		if (existsSync(candidate)) return candidate;
+	}
+	return null;
+}
+
+/** Any `node-*` install under the common standalone pi-node root. */
+function scanStandaloneRoots() {
+	const home = process.env.HOME;
+	if (!home) return null;
+	const root = join(home, ".local", "share", "pi-node");
+	if (!existsSync(root)) return null;
+	let entries;
+	try {
+		entries = readdirSync(root);
+	} catch {
+		return null;
+	}
+	for (const entry of entries) {
+		const scope = join(root, entry, "lib", "node_modules", PI_SCOPE);
+		if (isScopeDir(scope)) return scope;
+	}
+	return null;
+}
+
+// Locate the pi install's @earendil-works scope, preferring an explicit
+// override, then the running pi/node executables, then the standalone layout.
 function findPiScope() {
 	const fromEnv = process.env.PI_PACKAGES_ROOT;
 	if (fromEnv && existsSync(fromEnv)) return fromEnv;
-	const roots = [
-		process.execPath, // node binary inside the pi node install
-		// Common standalone pi install layout:
-		"/Users/aicoding/.local/share/pi-node",
-	];
-	for (const r of roots) {
-		if (!r) continue;
-		// node-vX/lib/node_modules/@earendil-works
-		const base = r.includes("node_modules/@earendil-works") ? r : null;
-		if (base && existsSync(base)) return base;
+
+	const executables = [process.execPath, which("pi")].filter(Boolean);
+	for (const exe of executables) {
+		const scope = scopeFromPath(exe);
+		if (scope) return scope;
 	}
-	// Fall back: search a couple of known candidates directly.
-	const candidates = [
-		"/Users/aicoding/.local/share/pi-node/node-v22.23.1-darwin-arm64/lib/node_modules/@earendil-works",
-	];
-	for (const c of candidates) if (existsSync(c)) return c;
-	return null;
+
+	return scanStandaloneRoots();
 }
 
 const scope = findPiScope();
 const require =
 	scope &&
-	(() => createRequire(pathToFileURL(`${scope}/pi-coding-agent/index.js`)))();
+	(() => createRequire(pathToFileURL(join(scope, PI_CORE_PKG, "index.js"))))();
 
 /** Resolve a bare "@earendil-works/<pkg>" to its real file URL, or null. */
 function resolveBare(specifier) {
-	if (!scope) return null;
+	if (!scope || !require) return null;
 	try {
 		return pathToFileURL(require.resolve(specifier)).href;
 	} catch {

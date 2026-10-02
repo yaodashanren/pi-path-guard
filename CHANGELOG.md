@@ -4,6 +4,17 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] — fix: prefix-flag crash from the v1.7.0 split
+
+### Fixed
+- `shell-parse.ts` used `FLAGS_WITH_ARG` without importing it (the constant moved to `constants.ts` in the v1.7.0 split, but the new `shell-parse.ts` only imported `PREFIX_COMMANDS, DELETE_COMMANDS`). Any bash command whose **prefix command** (`sudo`/`doas`/`env`/`exec`/…) was followed by a **value-taking flag** (`-u`, `--user`, `-g`, `--group`) threw `ReferenceError: FLAGS_WITH_ARG is not defined`, which aborted the `tool_call` check for that command — e.g. `sudo -u root …`, `sudo -g …`, `sudo --user=…`, `env -u FOO …`. Restored the missing import from `constants.ts`.
+
+### Tests
+- +4 regression assertions (**332 passing**): `sudo -u` / `sudo --user=` / `env -u` in normal and strict mode. The previous suite only used flag-less forms (`sudo ls`, `sudo true`), which is why this regression slipped through the v1.7.0 split.
+
+### Dev tooling
+- `tests/pi-modules-hook.mjs` no longer hardcodes the `node-v22.23.1-darwin-arm64` install path; it now discovers the pi `@earendil-works` scope dynamically (`PI_PACKAGES_ROOT` override → walk up from `process.execPath` and `pi` on `PATH` → scan `~/.local/share/pi-node/node-*`), so the tests keep working across pi/Node upgrades.
+
 ## [1.7.0] — split into modules (no behavior change)
 
 ### Directory-form extension

@@ -3,7 +3,7 @@
 // extraction. Pure functions, no judging logic.
 
 import { resolve } from "node:path";
-import { PREFIX_COMMANDS, DELETE_COMMANDS } from "./constants.ts";
+import { PREFIX_COMMANDS, DELETE_COMMANDS, FLAGS_WITH_ARG } from "./constants.ts";
 import { expandHome, isOutsideCwd, resolveReal } from "./paths.ts";
 
 /**

@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
-released entry below. Versions follow [Semantic Versioning](https://semver.org/). ## [Unreleased] — tunable `archiveExtract` rule ### Added
+released entry below. Versions follow [Semantic Versioning](https://semver.org/). ## [1.7.2] — 2026-10-24: tunable `archiveExtract` rule ### Added
 - Archive extraction (`unzip`, `tar -x`/`--extract`) is no longer a hardcoded
   conservative confirm: it is now the **21st tunable rule `archiveExtract`**.
   Built-in defaults: strict/normal/loose `confirm`, trusted/naked `pass` — so

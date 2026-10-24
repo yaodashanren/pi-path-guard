@@ -74,6 +74,7 @@ export type RuleId =
 	| "runScriptProtected" // … targeting a built-in protected path
 	| "scriptUnresolved" // … a `$VAR`/glob target that cannot be resolved statically
 	| "redirectUnresolved" // … a `$VAR`/glob redirect target that cannot be resolved statically
+	| "archiveExtract" // unzip / tar -x: archive contents unknowable, may overwrite anything
 	| "commandNameUnresolved"; // … the command NAME itself is `$VAR`/`$(…)` and cannot be resolved statically
 
 export const RULE_IDS: readonly RuleId[] = [
@@ -97,6 +98,7 @@ export const RULE_IDS: readonly RuleId[] = [
 	"runScriptProtected",
 	"scriptUnresolved",
 	"redirectUnresolved",
+	"archiveExtract",
 	"commandNameUnresolved",
 ];
 
@@ -127,6 +129,8 @@ export const RULE_DESCRIPTIONS: Record<RuleId, string> = {
 		"redirect target with a $VAR/glob that cannot be resolved (重定向目标不可静态解析)",
 	commandNameUnresolved:
 		"command name itself is $VAR/$(…) and cannot be resolved (命令名不可静态解析)",
+	archiveExtract:
+		"unzip / tar -x archive extraction, contents unknowable (解压归档·内容不可知)",
 };
 
 export const RULE_LEVELS: readonly RuleLevel[] = ["block", "confirm", "pass"];
@@ -164,9 +168,10 @@ export const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "block",
 		scriptUnresolved: "block",
 		redirectUnresolved: "block",
+		archiveExtract: "confirm",
 		commandNameUnresolved: "block",
-	},
-	normal: {
+},
+normal: {
 		blockGroup: "block",
 		confirmGroup: "confirm",
 		writeOutside: "confirm",
@@ -187,9 +192,10 @@ export const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "confirm",
 		scriptUnresolved: "confirm",
 		redirectUnresolved: "confirm",
+		archiveExtract: "confirm",
 		commandNameUnresolved: "confirm",
-	},
-	loose: {
+},
+loose: {
 		blockGroup: "block",
 		confirmGroup: "confirm",
 		writeOutside: "pass",
@@ -210,9 +216,10 @@ export const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "confirm",
 		scriptUnresolved: "confirm",
 		redirectUnresolved: "confirm",
+		archiveExtract: "confirm",
 		commandNameUnresolved: "confirm",
-	},
-	trusted: {
+},
+trusted: {
 		blockGroup: "block",
 		confirmGroup: "confirm",
 		writeOutside: "pass",
@@ -233,9 +240,10 @@ export const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "pass",
 		scriptUnresolved: "pass",
 		redirectUnresolved: "pass",
+		archiveExtract: "pass",
 		commandNameUnresolved: "pass",
-	},
-	naked: {
+},
+naked: {
 		blockGroup: "confirm",
 		confirmGroup: "pass",
 		writeOutside: "pass",
@@ -256,8 +264,9 @@ export const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		runScriptProtected: "pass",
 		scriptUnresolved: "pass",
 		redirectUnresolved: "pass",
+		archiveExtract: "pass",
 		commandNameUnresolved: "pass",
-	},
+},
 };
 
 /** Effective rule level for the current mode (settings override ?? built-in default). */

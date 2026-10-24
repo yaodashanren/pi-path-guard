@@ -38,6 +38,9 @@ const fakePi = {
 };
 
 const mod = await import(EXT);
+const panelMod = await import(
+	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
+);
 mod.default(fakePi);
 
 // ── test helpers ────────────────────────────────────────────
@@ -3086,6 +3089,40 @@ await setMode("normal");
 		"tar -xf naked → pass",
 		(await runCmd("tar -xf a.tar.gz", PROJ)).verdict,
 		"pass",
+	);
+
+	// 8b) archiveExtract is a tunable rule: trusted passes by default, and a
+	// per-mode override (normal → pass) is honored via the rule editor.
+	await setMode("trusted");
+	check(
+		"tar -xf trusted → pass (archiveExtract default)",
+		(await runCmd("tar -xf a.tar.gz", PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"unzip trusted → pass (archiveExtract default)",
+		(await runCmd("unzip a.zip", PROJ)).verdict,
+		"pass",
+	);
+	await setMode("strict");
+	check(
+		"tar -xf strict → confirm (archiveExtract default)",
+		(await runCmd("tar -xf a.tar.gz", PROJ)).verdict,
+		"confirm",
+	);
+	const rctx = { cwd: PROJ, ui: { notify: () => {}, confirm: async () => true, theme: themeMock, setStatus: () => {} } };
+	panelMod.actionSetRule("normal", "archiveExtract", "pass", rctx);
+	await setMode("normal");
+	check(
+		"tar -xf normal + override pass → pass",
+		(await runCmd("tar -xf a.tar.gz", PROJ)).verdict,
+		"pass",
+	);
+	panelMod.actionResetRule("normal", "archiveExtract", rctx);
+	check(
+		"tar -xf normal after reset → confirm",
+		(await runCmd("tar -xf a.tar.gz", PROJ)).verdict,
+		"confirm",
 	);
 
 	// 9) git history rewrite / stash clear

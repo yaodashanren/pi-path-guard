@@ -9,7 +9,7 @@ Intercepts destructive operations in tool calls (`bash`, `write`, `edit`): prote
 
 ## Feature highlights
 
-- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 20 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 20 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 20 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，19 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
+- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 21 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 21 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 20 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，21 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
 - **📁 Protected & trusted paths** — `/guard → paths` splits into two categories: **protected paths** (`/guard paths protected …`, the default) are guarded in **every** mode (incl. naked); **trusted paths** (`/guard paths trusted …`) are **always allowed** — operations on them pass like trusted mode, in any mode. System-important paths can never be trusted (see below). 管理**受保护路径**与**信任路径**两类路径。
 - **🔒 Three-way verdict** — every intercepted operation resolves to **block / confirm / pass**: block refuses outright, confirm asks you, pass executes. How strict the guard is depends entirely on your rules.
 
@@ -38,7 +38,7 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 ### `/guard` command
 
 - `/guard` — interactive main menu with three actions: **Switch mode** (title shows the full decision matrix; choices are bilingual), **Customize per-mode guard rules**, and **Manage custom protected paths**. When the host supports custom components the whole interactive flow opens as a **single floating popup (overlay)** — navigate with ↑/↓, ⏎ select, esc back, `q` quit at the main menu; all confirmations (incl. the naked double-confirm) and the add-path text input are drawn inside the popup. The main menu loops: a sub-menu's **back** returns to the previous menu, and eventually back to this main menu; only cancelling at the top level (no selection) exits the command. 交互式主菜单，三个动作：**切换防护模式**（标题展示完整判定矩阵，选项中英双语）、**定制每模式守护规则**、**管理自定义受保护路径**。宿主支持自定义组件时，整个交互流程以一个**浮动弹窗（overlay）**打开——↑/↓ 移动、⏎ 选择、esc 返回、主菜单 `q` 退出；所有确认（含 naked 两级确认）与添加路径的文本输入都在弹窗内完成。主菜单为循环：子菜单的 **back** 逐级返回上一级，最终回到本主菜单；只有顶层取消（不选）才退出命令
-- `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 19 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 20 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
+- `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 21 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 21 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - Invalid argument → falls back to the interactive main menu 非法参数 → 兜底弹出交互主菜单
 - The active mode persists across sessions via **global** settings.json (`pathGuard.mode` in `~/.pi/agent/settings.json`), falling back to `normal`. `/guard <mode>` writes it back there. Persistence is intentionally **global-only**, never project-scoped: writing a project `.pi/settings.json` would make the project "trust-requiring", so pi would start asking for trust on the next launch (`defaultProjectTrust=ask`) and a declined/untrusted launch would silently ignore the saved mode — the old behavior that made a saved mode revert to normal. Global settings are never trust-gated, so the mode always survives. 模式跨会话持久化到**全局** settings.json（`~/.pi/agent/settings.json` 的 `pathGuard.mode`），缺省回 `normal`；`/guard <mode>` 切换时回写到该文件。持久化刻意只写**全局**、不写项目：写入项目 `.pi/settings.json` 会让项目变为需信任项目，导致下次启动 pi 弹出信任询问，若项目被拒/未信任则保存的模式会被静默忽略（这正是旧版模式重置为 normal 的根因）。全局设置不受信任判定门控，模式必然保留
@@ -85,8 +85,8 @@ Also settable statically:
 
 ### Tunable rules / 可调规则
 
-Each mode's judgement is a set of 20 rules; override any per mode in settings.json (`rule = "block" | "confirm" | "pass"`; invalid values are ignored):
-每个模式的判定由 20 条规则组成；可在 settings.json 里按模式覆盖（`rule` 取 `"block"|"confirm"|"pass"`，非法值忽略）：
+Each mode's judgement is a set of 21 rules; override any per mode in settings.json (`rule = "block" | "confirm" | "pass"`; invalid values are ignored):
+每个模式的判定由 21 条规则组成；可在 settings.json 里按模式覆盖（`rule` 取 `"block"|"confirm"|"pass"`，非法值忽略）：
 
 ```jsonc
 "pathGuard": {
@@ -98,7 +98,7 @@ Each mode's judgement is a set of 20 rules; override any per mode in settings.js
 }
 ```
 
-Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInProject`, `deleteOutside`, `deleteInProject`, `overwriteOutsideExisting`, `overwriteOutsideNew`, `overwriteInProject`, `truncateInProject`, `truncateOutside`, `gitDestructive`, `pipeToShellInProject`, `pipeToShellOutside`, `runScriptInProject`, `runScriptOutside`, `runScriptProtected`, `scriptUnresolved`, `redirectUnresolved`, `commandNameUnresolved`. Defaults reproduce the matrix above exactly.
+Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInProject`, `deleteOutside`, `deleteInProject`, `overwriteOutsideExisting`, `overwriteOutsideNew`, `overwriteInProject`, `truncateInProject`, `truncateOutside`, `gitDestructive`, `pipeToShellInProject`, `pipeToShellOutside`, `runScriptInProject`, `runScriptOutside`, `runScriptProtected`, `scriptUnresolved`, `redirectUnresolved`, `archiveExtract`, `commandNameUnresolved`. Defaults reproduce the matrix above exactly.
 
 ### Guard mode matrix / 防护模式矩阵
 
@@ -122,6 +122,7 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 | Run script of built-in protected path / 运行脚本·内置保护 | block | confirm | confirm | pass | pass |
 | Run script with an unresolvable `$VAR`/glob target / 运行脚本·路径不可解析 | block | confirm | confirm | pass | pass |
 | `>` redirect with an unresolvable `$VAR`/glob target / 重定向·目标不可解析 | block | confirm | confirm | pass | pass |
+| Archive extraction (unzip / tar -x) / 解压归档·内容不可知 | confirm | confirm | confirm | pass | pass |
 | Command name is an unresolvable `$VAR`/`$(…)` / 命令名不可解析 | block | confirm | confirm | pass | pass |
 | cwd=HOME write / HOME 目录写 | confirm | confirm | pass | pass | pass |
 | No UI (headless) / 无交互界面 | block* | block* | block* | block* | pass |

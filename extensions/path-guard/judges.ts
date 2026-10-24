@@ -528,14 +528,18 @@ export function judgeWriters(
 		if (v.kind !== "pass") return v;
 	}
 	// Archive extraction (unzip / tar -x): archive contents are unknowable, so
-	// anything it lands on may be overwritten → conservative confirm (pass in
-	// naked). unzip without -o would prompt interactively and stall a
-	// non-interactive run — same treatment.
+	// anything it lands on may be overwritten → tunable archiveExtract rule
+	// (strict/normal/loose confirm, trusted/naked pass by default). unzip
+	// without -o would prompt interactively and stall a non-interactive run —
+	// same treatment.
 	if (
 		cmdInfo.command === "unzip" ||
 		(cmdInfo.command === "tar" && tarIsExtraction(cmdInfo.args))
 	) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+		return ruleVerdict(
+			"archiveExtract",
+			`Archive extraction may overwrite anything (archiveExtract): ${trimmed}`,
+		);
 	}
 	return { kind: "pass" };
 }

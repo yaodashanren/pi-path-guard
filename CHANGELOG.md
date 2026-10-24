@@ -2,7 +2,16 @@
 
 All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
-released entry below. Versions follow [Semantic Versioning](https://semver.org/).
+released entry below. Versions follow [Semantic Versioning](https://semver.org/). ## [Unreleased] — tunable `archiveExtract` rule ### Added
+- Archive extraction (`unzip`, `tar -x`/`--extract`) is no longer a hardcoded
+  conservative confirm: it is now the **21st tunable rule `archiveExtract`**.
+  Built-in defaults: strict/normal/loose `confirm`, trusted/naked `pass` — so
+  `tar -xf …` in trusted mode no longer prompts (previously only naked passed).
+  Tunable per mode via `/guard → rules` or `pathGuard.rules.{mode}.{archiveExtract}`;
+  `tar -c`/`tar -t` (create/list) are unaffected. ### Tests
+- +5 assertions (**337 passing**): tar/unzip in trusted & strict defaults, per-mode
+  override to pass, reset back to default confirm.
+
 
 ## [1.7.1] — fix: prefix-flag crash from the v1.7.0 split
 

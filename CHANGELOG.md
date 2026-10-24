@@ -2,7 +2,23 @@
 
 All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
-released entry below. Versions follow [Semantic Versioning](https://semver.org/). ## [1.7.2] — 2026-10-24: tunable `archiveExtract` rule ### Added
+released entry below. Versions follow [Semantic Versioning](https://semver.org/). ## [1.7.3] — 2026-10-24: tunable `targetUnresolved` rule
+
+### Added
+- Write targets that cannot be resolved statically (`$VAR` / glob — shared by
+  mv/cp/install/tee/ln -f/rsync, `dd of=`, curl/wget `-o`, truncate, in-place
+  edit) are no longer a hardcoded confirm: they now follow the **22nd tunable
+  rule `targetUnresolved`**. Built-in defaults: strict/normal/loose `confirm`,
+  trusted/naked `pass` — so `mv file "$MD/"` in trusted mode no longer prompts.
+  Protected-path literal tails are still hard-blocked first. Tunable per mode
+  via `/guard → rules` or `pathGuard.rules.{mode}.{targetUnresolved}`.
+
+### Tests
+- +7 assertions (**344 passing**): mv to `$VAR` target across strict/normal/
+  trusted/naked defaults, per-mode override to pass, reset back to default
+  confirm, sed -i with `$VAR` file in trusted.
+
+## [1.7.2] — 2026-10-24: tunable `archiveExtract` rule ### Added
 - Archive extraction (`unzip`, `tar -x`/`--extract`) is no longer a hardcoded
   conservative confirm: it is now the **21st tunable rule `archiveExtract`**.
   Built-in defaults: strict/normal/loose `confirm`, trusted/naked `pass` — so

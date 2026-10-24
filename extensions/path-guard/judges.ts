@@ -892,8 +892,15 @@ export function judgeDownload(
 }
 
 /** Shared: unresolved target → conservative confirm (pass in naked) */
+/** Shared verdict for write targets that cannot be resolved statically
+ * (`$VAR` / glob): mv/cp/install/tee/ln -f/rsync, dd of=, curl/wget -o,
+ * truncate, in-place edit. Tunable targetUnresolved rule — strict/normal/loose
+ * confirm, trusted/naked pass by default. */
 export function unresolvedTargetVerdict(): SegmentVerdict {
-	return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+	return ruleVerdict(
+		"targetUnresolved",
+		"Write target cannot be resolved statically ($VAR/glob) — rule (targetUnresolved)",
+	);
 }
 
 /** Shared first legs of the per-target verdict chain: user-protected → block in

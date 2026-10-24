@@ -3145,6 +3145,61 @@ await setMode("normal");
 	rmSync(join(PROJ, "out.tgz"), { force: true });
 }
 
+// ── #16 targetUnresolved: mv/cp/dd/curl/… write target is a $VAR/glob ──
+{
+	writeFileSync(join(PROJ, "victim.txt"), "x");
+	// strict/normal defaults: confirm (unchanged behavior)
+	await setMode("strict");
+	check(
+		"mv to $VAR target strict → confirm (targetUnresolved default)",
+		(await runCmd('mv victim.txt "$MD/"', PROJ)).verdict,
+		"confirm",
+	);
+	await setMode("normal");
+	check(
+		"mv to $VAR target normal → confirm (targetUnresolved default)",
+		(await runCmd('mv victim.txt "$MD/"', PROJ)).verdict,
+		"confirm",
+	);
+	// trusted/naked defaults: pass
+	await setMode("trusted");
+	check(
+		"mv to $VAR target trusted → pass (targetUnresolved default)",
+		(await runCmd('mv victim.txt "$MD/"', PROJ)).verdict,
+		"pass",
+	);
+	await setMode("naked");
+	check(
+		"mv to $VAR target naked → pass",
+		(await runCmd('mv victim.txt "$MD/"', PROJ)).verdict,
+		"pass",
+	);
+	// per-mode override honored, reset back to default
+	const rctx = { cwd: PROJ, ui: { notify: () => {}, confirm: async () => true, theme: themeMock, setStatus: () => {} } };
+	panelMod.actionSetRule("normal", "targetUnresolved", "pass", rctx);
+	await setMode("normal");
+	check(
+		"mv to $VAR target normal + override pass → pass",
+		(await runCmd('mv victim.txt "$MD/"', PROJ)).verdict,
+		"pass",
+	);
+	panelMod.actionResetRule("normal", "targetUnresolved", rctx);
+	check(
+		"mv to $VAR target normal after reset → confirm",
+		(await runCmd('mv victim.txt "$MD/"', PROJ)).verdict,
+		"confirm",
+	);
+	// in-place edit / download share the same rule via unresolvedTargetVerdict
+	await setMode("trusted");
+	check(
+		"sed -i with $VAR file trusted → pass (targetUnresolved default)",
+		(await runCmd('sed -i "s/a/b/" "$F.txt"', PROJ)).verdict,
+		"pass",
+	);
+	await setMode("normal");
+	rmSync(join(PROJ, "victim.txt"), { force: true });
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

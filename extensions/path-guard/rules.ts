@@ -75,6 +75,7 @@ export type RuleId =
 	| "scriptUnresolved" // … a `$VAR`/glob target that cannot be resolved statically
 	| "redirectUnresolved" // … a `$VAR`/glob redirect target that cannot be resolved statically
 	| "archiveExtract" // unzip / tar -x: archive contents unknowable, may overwrite anything
+	| "targetUnresolved" // mv/cp/dd/curl/… write target is a $VAR/glob, not statically resolvable
 	| "commandNameUnresolved"; // … the command NAME itself is `$VAR`/`$(…)` and cannot be resolved statically
 
 export const RULE_IDS: readonly RuleId[] = [
@@ -99,6 +100,7 @@ export const RULE_IDS: readonly RuleId[] = [
 	"scriptUnresolved",
 	"redirectUnresolved",
 	"archiveExtract",
+	"targetUnresolved",
 	"commandNameUnresolved",
 ];
 
@@ -131,6 +133,8 @@ export const RULE_DESCRIPTIONS: Record<RuleId, string> = {
 		"command name itself is $VAR/$(…) and cannot be resolved (命令名不可静态解析)",
 	archiveExtract:
 		"unzip / tar -x archive extraction, contents unknowable (解压归档·内容不可知)",
+	targetUnresolved:
+		"write target is a $VAR/glob that cannot be resolved (写目标不可静态解析)",
 };
 
 export const RULE_LEVELS: readonly RuleLevel[] = ["block", "confirm", "pass"];
@@ -169,6 +173,7 @@ export const DEFAULT_MODES: Record<GuardMode, Record<RuleId, RuleLevel>> = {
 		scriptUnresolved: "block",
 		redirectUnresolved: "block",
 		archiveExtract: "confirm",
+	targetUnresolved: "confirm",
 		commandNameUnresolved: "block",
 },
 normal: {
@@ -193,6 +198,7 @@ normal: {
 		scriptUnresolved: "confirm",
 		redirectUnresolved: "confirm",
 		archiveExtract: "confirm",
+	targetUnresolved: "confirm",
 		commandNameUnresolved: "confirm",
 },
 loose: {
@@ -217,6 +223,7 @@ loose: {
 		scriptUnresolved: "confirm",
 		redirectUnresolved: "confirm",
 		archiveExtract: "confirm",
+	targetUnresolved: "confirm",
 		commandNameUnresolved: "confirm",
 },
 trusted: {
@@ -241,6 +248,7 @@ trusted: {
 		scriptUnresolved: "pass",
 		redirectUnresolved: "pass",
 		archiveExtract: "pass",
+	targetUnresolved: "pass",
 		commandNameUnresolved: "pass",
 },
 naked: {
@@ -265,6 +273,7 @@ naked: {
 		scriptUnresolved: "pass",
 		redirectUnresolved: "pass",
 		archiveExtract: "pass",
+	targetUnresolved: "pass",
 		commandNameUnresolved: "pass",
 },
 };

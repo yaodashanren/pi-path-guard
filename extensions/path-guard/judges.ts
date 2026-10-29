@@ -13,7 +13,7 @@ import { expandHome, isDirectory, isOutsideCwd, isUnresolvedTarget, isRemoteTarg
 	matchesProtectedPath, resolveReal } from "./paths.ts";
 import { inNaked, isSessionPassed, isTrustedPath, isUserProtectedPath, pathList, rl, rlFor,
 	ruleVerdict } from "./rules.ts";
-import { extractCommandSubstitutions, extractHeredocs, extractPathArgs, extractRedirectTarget,
+import { extractCommandSubstitutions, extractHeredocs, extractPathArgs, extractRedirectTargets,
 	hasForceFlag, hasShortFlag, hasLongFlag, isDeleteCommand,
 	isTruncatingOp, lastDestArg, parseCommand, splitSegments, splitShellTokens,
 	type CmdInfo } from "./shell-parse.ts";
@@ -348,6 +348,63 @@ export function classifySegment(
 	return { kind: "pass" };
 }
 
+/** Judge one output redirect without allowing one target to hide later targets. */
+function judgeRedirect(
+	trimmed: string,
+	redirect: { op: string; target: string },
+	realCwd: string,
+): SegmentVerdict {
+	if (isUnresolvedTarget(redirect.target)) {
+		return judgeUnresolvedRedirectTarget(redirect.target);
+	}
+	if (
+		/^\/dev\/(?!null\b|zero\b|tty\b|stdin\b|stdout\b|stderr\b|pts\b|ptmx\b|full\b|random\b|urandom\b|fuse\b|shm\b)[a-z0-9]+/.test(
+			redirect.target,
+		)
+	) {
+		return ruleVerdict(
+			"blockGroup",
+			`Direct write to a block device blocked: ${trimmed}`,
+		);
+	}
+	const real = resolveReal(resolve(realCwd, expandHome(redirect.target)));
+	if (isUserProtectedPath(real)) {
+		return {
+			kind: "block",
+			reason: tagged("userPath", `Redirect writes to user-protected path: ${trimmed}`),
+		};
+	}
+	if (!inNaked() && matchesProtectedPath(real)) {
+		return {
+			kind: "block",
+			reason: tagged("protectedPath", `Redirect writes to protected path: ${trimmed}`),
+		};
+	}
+	if (isTrustedPath(real)) return { kind: "pass" };
+	if (
+		isTruncatingOp(redirect.op) &&
+		!DEVICE_TARGETS.has(redirect.target) &&
+		existsSync(real)
+	) {
+		const rule =
+			isOutsideCwd(real, realCwd) || realCwd === HOME
+				? "truncateOutside"
+				: "truncateInProject";
+		return ruleVerdict(rule, `Truncate blocked by rule: ${trimmed}`);
+	}
+	if (!DEVICE_TARGETS.has(redirect.target)) {
+		const outside = isOutsideCwd(real, realCwd);
+		if (outside || realCwd === HOME) {
+			const rule = outside ? "writeOutside" : "writeHome";
+			return ruleVerdict(
+				rule,
+				`Redirect writes outside the project blocked by rule: ${trimmed}`,
+			);
+		}
+	}
+	return { kind: "pass" };
+}
+
 /** Judge one command segment (redirect / danger / wrapper / script / writers). */
 export function classifySegmentOuter(
 	trimmed: string,
@@ -355,66 +412,23 @@ export function classifySegmentOuter(
 	hasUI: boolean,
 	depth = 0,
 ): SegmentVerdict {
-	// ① Redirect check:
-	//    - Write to a protected path (echo x > .env etc.) → block in every mode (user paths too)
-	//    - "> existing file" (truncate, not >> append, not a device) → per truncate rule
-	const redirect = extractRedirectTarget(trimmed);
-	if (redirect) {
-		// Variable/glob target can't be statically resolved (echo x > $F): inspect
-		// the literal tail, then follow the redirectUnresolved rule (per-mode).
-		if (isUnresolvedTarget(redirect.target)) {
-			return judgeUnresolvedRedirectTarget(redirect.target);
+	// ① Judge every output redirect; no safe first target may hide a later one.
+	const redirectBlocks: string[] = [];
+	const redirectRules = new Set<RuleId>();
+	let redirectConfirm = false;
+	for (const redirect of extractRedirectTargets(trimmed)) {
+		const verdict = judgeRedirect(trimmed, redirect, realCwd);
+		if (verdict.kind === "block") redirectBlocks.push(verdict.reason);
+		else if (verdict.kind === "confirm") {
+			redirectConfirm = true;
+			for (const rule of verdict.rules ?? []) redirectRules.add(rule);
 		}
-		// Direct write to a block device (/dev/sda, /dev/rdiskN, …) — system-
-		// destructive, must outrank the writeOutside ladder below (which would
-		// only confirm).
-		if (
-			/^\/dev\/(?!null\b|zero\b|tty\b|stdin\b|stdout\b|stderr\b|pts\b|ptmx\b|full\b|random\b|urandom\b|fuse\b|shm\b)[a-z0-9]+/.test(
-				redirect.target,
-			)
-		) {
-			return ruleVerdict(
-				"blockGroup",
-				`Direct write to a block device blocked: ${trimmed}`,
-			);
-		}
-		const real = resolveReal(resolve(realCwd, expandHome(redirect.target)));
-		if (isUserProtectedPath(real)) {
-			return {
-				kind: "block",
-				reason: tagged("userPath", `Redirect writes to user-protected path: ${trimmed}`),
-			};
-		}
-		if (!inNaked() && matchesProtectedPath(real)) {
-			return {
-				kind: "block",
-				reason: tagged("protectedPath", `Redirect writes to protected path: ${trimmed}`),
-			};
-		}
-		// Redirect into a trusted path (incl. truncating it) → pass in every mode.
-		if (isTrustedPath(real)) return { kind: "pass" };
-		if (
-			isTruncatingOp(redirect.op) &&
-			!DEVICE_TARGETS.has(redirect.target) &&
-			existsSync(real)
-		) {
-			const rule =
-				isOutsideCwd(real, realCwd) || realCwd === HOME
-					? "truncateOutside"
-					: "truncateInProject";
-			return ruleVerdict(rule, `Truncate blocked by rule: ${trimmed}`);
-		}
-		// New/append target outside the project (or cwd is HOME) → per writeOutside / writeHome
-		if (!DEVICE_TARGETS.has(redirect.target)) {
-			const outside = isOutsideCwd(real, realCwd);
-			if (outside || realCwd === HOME) {
-				const rule = outside ? "writeOutside" : "writeHome";
-				return ruleVerdict(
-					rule,
-					`Redirect writes outside the project blocked by rule: ${trimmed}`,
-				);
-			}
-		}
+	}
+	if (redirectBlocks.length > 0) {
+		return { kind: "block", reason: redirectBlocks.join("\n") };
+	}
+	if (redirectConfirm) {
+		return { kind: "confirm", rules: [...redirectRules] };
 	}
 
 	// ② Dangerous commands → per blockGroup / confirmGroup rule

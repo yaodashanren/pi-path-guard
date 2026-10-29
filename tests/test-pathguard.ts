@@ -1195,7 +1195,48 @@ check(
 	(await runCmd(`truncate -s 0 ${OUT}/trunc_cmd.txt`, PROJ)).verdict,
 	"pass",
 );
+// ── all real redirect targets are checked; quoted/escaped text is not an operator ──
+await setMode("normal");
+check(
+	"second protected redirect normal → block",
+	(await runCmd("echo x > harmless.txt > .env", PROJ)).verdict,
+	"block",
+);
+for (const command of ["echo '>.env'", 'echo ">.env"', "echo \\>.env"]) {
+	check(
+		`quoted/escaped redirect text passes: ${command}`,
+		(await runCmd(command, PROJ)).verdict,
+		"pass",
+	);
+}
+check(
+	"extract all redirect forms and skip fd duplication",
+	JSON.stringify(
+		shellParseMod.extractRedirectTargets?.(
+			"echo x >one 2>> two 3>|three 2>&1 &>four",
+		) ?? [],
+	),
+	JSON.stringify([
+		{ op: ">", target: "one" },
+		{ op: "2>>", target: "two" },
+		{ op: "3>|", target: "three" },
+		{ op: "&>", target: "four" },
+	]),
+);
+writeFileSync(join(PROJ, "redirect-multi-in.txt"), "x");
+writeFileSync(join(OUT, "redirect-multi-out.txt"), "x");
+await runCmd(
+	`echo x > ${OUT}/redirect-multi-out.txt > ${PROJ}/redirect-multi-in.txt`,
+	PROJ,
+);
+check(
+	"multiple redirect rules aggregate into one two-rule prompt",
+	selectOptions[0]?.some((o) => o.includes("2 rules")) ? "yes" : "no",
+	"yes",
+);
+
 // trusted now passes in-project overwrites too (matches its "pass overwrites" description)
+await setMode("trusted");
 writeFileSync(join(PROJ, "ow_in.txt"), "x");
 writeFileSync(join(PROJ, "ow_dst.txt"), "x");
 check(

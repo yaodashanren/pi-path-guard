@@ -269,23 +269,71 @@ export interface RedirectTarget {
 	target: string; // target path
 }
 
-export function extractRedirectTarget(fullCommand: string): RedirectTarget | null {
-	const tokens = splitShellTokens(fullCommand);
-	const REDIR = /^([0-9]*&?>>?\|?)(.*)$/;
-	for (let i = 0; i < tokens.length; i++) {
-		const m = REDIR.exec(tokens[i]);
-		if (!m) continue;
-		// Target glued to the same token (echo hi >.env)
-		if (m[2]) {
-			// fd duplication like 2>&1 → skip
-			if (!m[2].startsWith("&")) return { op: m[1], target: m[2] };
+export function extractRedirectTargets(fullCommand: string): RedirectTarget[] {
+	const targets: RedirectTarget[] = [];
+	let inSingle = false;
+	let inDouble = false;
+
+	for (let i = 0; i < fullCommand.length; i++) {
+		const ch = fullCommand[i];
+		if (ch === "\\") {
+			i++; // Escaped operators are literal text.
 			continue;
 		}
-		// Target in the next token (> /dev/sda)
-		const next = tokens[i + 1];
-		if (next && !next.startsWith("&")) return { op: m[1], target: next };
+		if (ch === "'" && !inDouble) {
+			inSingle = !inSingle;
+			continue;
+		}
+		if (ch === '"' && !inSingle) {
+			inDouble = !inDouble;
+			continue;
+		}
+		if (inSingle || inDouble) continue;
+
+		let opStart = i;
+		if (ch === "&" && fullCommand[i + 1] === ">") {
+			i++;
+		} else if (ch !== ">") {
+			continue;
+		}
+		if (fullCommand[i + 1] === "(") continue; // process substitution
+
+		// Include an immediately preceding file descriptor in the operator.
+		if (ch === ">") {
+			while (opStart > 0 && /[0-9]/.test(fullCommand[opStart - 1])) opStart--;
+		}
+		let opEnd = i + 1;
+		if (fullCommand[opEnd] === ">" || fullCommand[opEnd] === "|") opEnd++;
+		const op = fullCommand.slice(opStart, opEnd);
+
+		// Read the target with shell-like quote and escape removal.
+		let j = opEnd;
+		while (/\s/.test(fullCommand[j] ?? "")) j++;
+		let target = "";
+		let targetSingle = false;
+		let targetDouble = false;
+		for (; j < fullCommand.length; j++) {
+			const c = fullCommand[j];
+			if (c === "\\") {
+				if (j + 1 < fullCommand.length) target += fullCommand[++j];
+				continue;
+			}
+			if (c === "'" && !targetDouble) {
+				targetSingle = !targetSingle;
+				continue;
+			}
+			if (c === '"' && !targetSingle) {
+				targetDouble = !targetDouble;
+				continue;
+			}
+			if (!targetSingle && !targetDouble && /[\s;&|<>]/.test(c)) break;
+			target += c;
+		}
+		// File-descriptor duplication (2>&1, >&-) writes no path.
+		if (target && !target.startsWith("&")) targets.push({ op, target });
+		i = Math.max(i, j - 1);
 	}
-	return null;
+	return targets;
 }
 
 /** Whether the operator is truncating (single >, or the >| noclobber override — not >> append) */

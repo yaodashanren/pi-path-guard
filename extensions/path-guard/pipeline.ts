@@ -167,7 +167,7 @@ export function checkBashCommand(
 
 export async function askConfirm(
 	ctx: ExtensionContext,
-	message: string,
+	msg: string,
 	confirmRules: RuleId[] = [],
 ): Promise<ToolCallEventResult | undefined> {
 	if (!ctx.hasUI) {
@@ -192,6 +192,17 @@ export async function askConfirm(
 		passChoice = `🔓 Allow & set ${eligible.length} rules = pass (session)`;
 	}
 	if (passChoice) options.push(passChoice);
+	// Mutually exclusive by construction: passChoice exists iff eligible is non-empty.
+	let message = msg;
+	if (passChoice) {
+		message +=
+			"\n\nAllow = only this once · Allow & set … = pass for the rest of this session (not persisted)";
+	} else if (confirmRules.length > 0) {
+		// All rules excluded (sudo/ssh-class confirmGroup), or naked mode (confirm ⇒
+		// very dangerous). Same explanation is acceptable in both cases.
+		message +=
+			"\n\nsudo/ssh-class rules never offer a session pass — they will ask again every time (by design)";
+	}
 
 	const choice = await ctx.ui.select(message, options);
 

@@ -75,6 +75,7 @@ mod.default(fakePi);
 // ── test helpers ────────────────────────────────────────────
 let selectCalls = 0;
 const selectOptions: string[][] = [];
+const selectMessages: string[] = [];
 const themeMock = { fg: (_color: string, s: string) => s };
 async function runTool(
 	toolName: string,
@@ -91,13 +92,15 @@ async function runTool(
 }> {
 	selectCalls = 0;
 	selectOptions.length = 0;
+	selectMessages.length = 0;
 	const ctx = {
 		cwd: opts.cwd,
 		hasUI: opts.hasUI ?? true,
 		ui: {
 			notify: () => {},
-			select: async (_msg: string, choices: string[]) => {
+			select: async (msg: string, choices: string[]) => {
 				selectCalls++;
+				selectMessages.push(msg);
 				selectOptions.push([...choices]);
 				return opts.pick ? opts.pick(choices) : choices[0]; // default: user picks "Allow"
 			},
@@ -2862,6 +2865,13 @@ await setMode("strict");
 		selectOptions[0]?.some((o) => o.includes("pass (session)")) ? "yes" : "no",
 		"no",
 	);
+	check(
+		"confirmGroup message has by-design note",
+		selectMessages[0]?.includes(
+			"sudo/ssh-class rules never offer a session pass — they will ask again every time (by design)",
+		) ? "yes" : "no",
+		"yes",
+	);
 	check("confirmGroup missing option → denied", r4.verdict, "block");
 
 	// naked → no third option (only truly dangerous ops confirm there)
@@ -2899,6 +2909,8 @@ await setMode("strict");
 		r5.verdict === "block" ? "block" : "allowed",
 		"allowed",
 	);
+
+	// scope note: when a session-pass option is offered, message explains scopes
 	check(
 		"multi-rule session pass suppresses prompt",
 		(await runCmd(multi, PROJ)).verdict,
@@ -2924,6 +2936,43 @@ await setMode("strict");
 			"pass",
 		);
 	}
+
+	// scope note: when a session-pass option is offered, message explains scopes
+	// (run a fresh confirm; the recursive suppress-check above cleared the capture)
+	setGlobalMode("normal");
+	await runTool(
+		"bash",
+		{ command: "git reset --hard HEAD" },
+		{ cwd: PROJ, pick: pickSessionPass },
+	);
+	check(
+		"scope note in message when passChoice offered",
+		selectMessages[0]?.includes(
+			"Allow = only this once · Allow & set … = pass for the rest of this session (not persisted)",
+		) ? "yes" : "no",
+		"yes",
+	);
+
+	// plain single-rule confirm → fresh session, exactly 3 options (regression)
+	setGlobalMode("normal");
+	newSession();
+	await runTool(
+		"bash",
+		{ command: "git reset --hard HEAD" },
+		{ cwd: PROJ, pick: (choices: string[]) => choices[0] },
+	);
+	check(
+		"single-rule confirm keeps exactly 3 options (regression)",
+		selectOptions[0]?.length === 3 ? "yes" : "no",
+		"yes",
+	);
+	check(
+		"single-rule confirm has scope note",
+		selectMessages[0]?.includes(
+			"Allow = only this once · Allow & set … = pass for the rest of this session (not persisted)",
+		) ? "yes" : "no",
+		"yes",
+	);
 }
 
 // ── #14 redirectUnresolved: `> "$VAR/..."` targets that cannot be resolved ──

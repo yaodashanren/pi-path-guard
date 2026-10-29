@@ -468,7 +468,7 @@ function classifyCommandAfterRedirects(
 		}
 		if (lvl === "confirm") {
 			return hasUI
-				? { kind: "confirm" }
+				? { kind: "confirm", rules: ["confirmGroup"] }
 				: {
 						kind: "block",
 						reason: tagged("noUi", `Dangerous command blocked (no interactive UI): ${trimmed}`),

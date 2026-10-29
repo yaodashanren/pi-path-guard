@@ -3809,6 +3809,37 @@ await setMode("normal");
 	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
 }
 
+
+// ── stale project entries are flagged, not silently reused (Task 9) ──
+{
+	const P9 = "/tmp/pgtest-task9";
+	rmSync(P9, { recursive: true, force: true });
+	mkdirSync(P9, { recursive: true });
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(P9, "projects");
+	const goneRepo = "/tmp/pgtest-gone-repo";
+	rmSync(goneRepo, { recursive: true, force: true });
+	const goneEntry = projectEntryPath(goneRepo);
+	mkdirSync(join(goneEntry, ".."), { recursive: true });
+	writeFileSync(goneEntry, JSON.stringify({ version: 1, project: goneRepo, mode: "loose" }));
+	check("an entry pointing at a deleted project still parses", String(readProjectEntry(goneEntry).ok), "true");
+	check("the project view marks a stale entry", panelMod.projectConfigView({
+		filePath: goneEntry,
+		projectRoot: goneRepo,
+		matchedVia: "exact",
+		layer: { mode: "loose" },
+		warnings: [],
+	}).includes("stale") ? "stale" : "?", "stale");
+	check("a live project is not marked stale", panelMod.projectConfigView({
+		filePath: goneEntry,
+		projectRoot: P9,
+		matchedVia: "exact",
+		layer: { mode: "loose" },
+		warnings: [],
+	}).includes("stale") ? "stale" : "?", "?");
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

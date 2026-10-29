@@ -4,6 +4,30 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Project-scoped config.** `/guard --project <mode|paths|rules>` saves to a per-project entry file under the pi agent dir (`path-guard/projects/<slug>-<hash>.json`), created on first use. Lookup is exact-first, then nearest ancestor, so a subdirectory session inherits the repo root's config. Because the file is user-level, pi never treats it as a trust-requiring project resource — it is read with `--no-approve` and `defaultProjectTrust: "never"` too. `PI_PATH_GUARD_PROJECTS_DIR` overrides the directory.
+- `/guard project` (view), `/guard project import` (copy a hand-authored `.pi/settings.json` `pathGuard` block, source kept), `/guard project remove` (confirmation names the file, warns when it serves a whole subtree).
+- Panel scope screen + title/status indicator; inherited paths are listed as `[from global]` and cannot be removed from the project layer. Chained-menu hosts get the same picker.
+- `getConfigWarnings` / `getLayers` / `pathEntries` for diagnostics (the base for the future `/guard doctor`).
+
+### Changed
+- **Only the edited layer is persisted.** A global edit no longer freezes an inherited project `mode`/`rules`/paths into `~/.pi/agent/settings.json`.
+- **Rule overrides merge per mode AND rule** instead of the project layer replacing a whole mode's global overrides.
+- **Relative paths are anchored to their own layer:** project entries resolve against the project root; a relative entry in global settings is refused with a warning instead of resolving against each session's cwd.
+- Persistence notes always name the target file (`saved to global settings (…)` / `saved to project config (…)`).
+- `write/exit` writes are atomic (temp file + rename) and preserve the file mode and every sibling key of `settings.json`.
+
+### Fixed
+- Corrupt or partially invalid config is no longer swallowed: bad JSON, unknown modes/rule ids/levels, a mismatched `project` field and dropped relative paths each surface as a warning at session start, and the offending layer is skipped instead of silently resetting to `normal`.
+- A failed settings write leaves the previous file byte-identical and reports the path and reason.
+- Paging keys in the `/guard` overlay used `pageup`/`pagedown` (not valid `KeyId`s, so they never matched); now `pageUp`/`pageDown`.
+- Missing type imports in `judges.ts` / `rules.ts` / `index.ts` that were only latent because the suite runs through `--experimental-strip-types`.
+
+### Tests
+- +108 assertions (**494 passing**): atomic writes, structured reads, project entry encoding/lookup (incl. ancestor, HOME, symlink and mismatched-project cases), deep merge, provenance, scoped persistence (the inherit-freeze regression), relative-path bases, `--project`/`project import`/`project remove`, config warnings, panel scope screen.
+
 ## [1.7.4] — 2026-10-29: honour the rule matrix in every judgement path
 
 ### Fixed

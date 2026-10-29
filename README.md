@@ -40,6 +40,7 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 - `/guard` — interactive main menu with three actions: **Switch mode** (title shows the full decision matrix; choices are bilingual), **Customize per-mode guard rules**, and **Manage custom protected paths**. When the host supports custom components the whole interactive flow opens as a **single floating popup (overlay)** — navigate with ↑/↓, ⏎ select, esc back, `q` quit at the main menu; all confirmations (incl. the naked double-confirm) and the add-path text input are drawn inside the popup. The main menu loops: a sub-menu's **back** returns to the previous menu, and eventually back to this main menu; only cancelling at the top level (no selection) exits the command. 交互式主菜单，三个动作：**切换防护模式**（标题展示完整判定矩阵，选项中英双语）、**定制每模式守护规则**、**管理自定义受保护路径**。宿主支持自定义组件时，整个交互流程以一个**浮动弹窗（overlay）**打开——↑/↓ 移动、⏎ 选择、esc 返回、主菜单 `q` 退出；所有确认（含 naked 两级确认）与添加路径的文本输入都在弹窗内完成。主菜单为循环：子菜单的 **back** 逐级返回上一级，最终回到本主菜单；只有顶层取消（不选）才退出命令
 - `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 22 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 22 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
+- `/guard doctor` — one-shot plain-text status report (works with or without a UI): active mode and where it came from, every config layer (global settings / project entry / hand-authored block) with mode/path/rule counts, config warnings, protected & trusted paths, session-pass rules, and the current session's cwd (with a marker when cwd is HOME). See the Doctor section below. 一次性纯文本诊断报告（有无 UI 均可用）：当前模式及来源、各配置层（全局 / 项目条目 / 手写块）与计数、配置告警、受保护与信任路径、会话放行规则、当前会话 cwd（HOME 下有标记）。见下文 Doctor 小节
 - Invalid argument → falls back to the interactive main menu 非法参数 → 兜底弹出交互主菜单
 - Config is layered and persisted per layer: **global** settings.json (`~/.pi/agent/settings.json`) plus, optionally, one **project** entry file. `/guard` writes to the layer you chose (global by default; `--project` for this project) and only that layer — an inherited project value is never frozen into the global file. 配置分层持久化：**全局** settings.json 加可选的**项目**条目文件；`/guard` 只写你选定的那一层（默认全局，`--project` 为本项目），继承来的项目值绝不会被固化进全局文件
 - **Project-scoped config lives in the pi agent dir, not in the project.** `<agent dir>/path-guard/projects/<slug>-<hash>.json` (`<agent dir>` = `PI_CODING_AGENT_DIR`, default `~/.pi/agent`). Because that file is user-level, pi never treats it as a trust-requiring project resource: `defaultProjectTrust: "never"`, `--no-approve` and print/JSON/RPC sessions all read it normally. The lookup is exact-first, then the nearest ancestor directory (a subdirectory session inherits the repo root's config, and writes that same file). `PI_PATH_GUARD_PROJECTS_DIR` overrides the whole directory (tests use it). 项目级配置存放在 pi agent 目录下的 `path-guard/projects/`，不在项目内：因此 pi 不会把它当作需信任的项目资源，`--no-approve`、`defaultProjectTrust: "never"`、无 UI 会话都能正常读取；查找为先精确匹配、再找最近的祖先目录。`PI_PATH_GUARD_PROJECTS_DIR` 可覆盖整个目录
@@ -157,6 +158,27 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 - **Session pass from the confirm dialog / 弹窗内会话级放行**: every confirm prompt offers a third option `🔓 Allow & set <rule> = pass (session)` (multiple rules → `N rules`), so a repeated prompt can be answered in place without opening `/guard rules`; the pass is in-memory only (never persisted, cleared on a new session) and is not offered for `confirmGroup` (sudo/ssh/chmod 777), system-destructive commands, or in naked mode — 确认弹窗提供会话级放行第三选项，仅内存生效（不落盘、新会话清除）；`confirmGroup`、系统级破坏命令与 naked 模式不提供
 
+### Doctor / 诊断报告
+
+`/guard doctor` prints a layered status report in one `info` notification — pure text, so it works even in headless (no-UI) sessions:
+
+```text
+/guard doctor
+```
+
+Sections (each shows `(none)` when empty):
+
+- **Mode** — the active mode and where it comes from: project layer → hand-authored `.pi/settings.json` block (only when no project entry matched) → global settings → built-in default.
+- **Layers** — the global settings path and the project entry file (with how it matched, `exact` / `ancestor`) plus per-layer mode/path/rule counts; a hand-authored block is shown as a read-only fallback; a HOME-cwd session says so.
+- **Config warnings** — one line per problem, `file [field]: message` (corrupt JSON, unknown rule ids/levels, mismatched fields, dropped relative paths).
+- **Protected paths / Trusted paths** — `raw → normalized [layer]`.
+- **Session-pass rules** — rules temporarily set to `pass` from a confirm dialog; labelled `(cleared on new session, never persisted)`.
+- **Session** — cwd, with an explicit marker when cwd is HOME.
+
+Confirm-dialog scopes: when a prompt offers the 🔓 option, choosing plain **Allow** releases only that one operation ("only this once"), while **Allow & set … = pass (session)** releases the rule for the rest of this session — in memory only, never persisted, cleared on every new session. If you want it permanent, edit the rule itself (`/guard rules`, or `pathGuard.rules.{mode}.{rule}` in settings.json). `sudo`/`ssh`-class (`confirmGroup`) prompts never offer a session pass — they explain on the dialog that they will ask again every time, by design; nothing is auto-loosened.
+
+确认弹窗的三种放行作用域：**Allow** 仅放行本次；**Allow & set … = pass (session)** 将该规则放行至本会话结束（仅内存，不落盘，新会话清除）；要永久放行请改规则本身（`/guard rules` 或 settings.json 的 `pathGuard.rules.{mode}.{rule}`）。`confirmGroup`（sudo/ssh 类）按设计从不提供会话放行，弹窗上有一句解释，每次都会再问。
+
 ### Known limitations / 已知边界
 
 - **Static heuristics, not a sandbox / 静态启发式，不是沙箱**: the guard inspects the `bash` command text and the `write`/`edit` target paths; it is meant to catch **accidental** destructive operations, not to defeat a determined adversary or prompt injection. Run untrusted code in a real sandbox / VM / container under a least-privilege account — 本扩展只检查 `bash` 命令文本与 `write`/`edit` 目标路径，用于拦截**误操作**，并非对抗恶意输入或 prompt injection 的完整沙箱；不可信代码请放到真正的沙箱/容器/虚拟机里运行。
@@ -167,7 +189,7 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 ## Development / 开发与测试
 
-Automated tests (386 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
+Automated tests (551 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
@@ -181,7 +203,7 @@ cd tests && node --experimental-strip-types test-pathguard.ts
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.8.0**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.9.0**.
 
 ## License
 

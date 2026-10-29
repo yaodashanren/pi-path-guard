@@ -4152,6 +4152,7 @@ process.env.PI_PATH_GUARD_SETTINGS = T5_GLOBAL;
 process.env.PI_PATH_GUARD_PROJECTS_DIR = T5_PROJECTS;
 writeFileSync(T5_GLOBAL, JSON.stringify({ pathGuard: { mode: "normal" } }));
 // sync the in-memory config/mode from the fresh global before asserting
+// (session_start re-reads the settings env vars and re-applies the saved config)
 handlers["session_start"](
 	{ reason: "startup" },
 	{ cwd: T5, isProjectTrusted: () => true, ui: { theme: themeMock, setStatus: () => {}, notify: () => {} } },

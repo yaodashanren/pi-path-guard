@@ -4,6 +4,24 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] — 2026-10-29: diagnostics and unblock guidance
+
+### Added
+- **`/guard doctor`** — one-shot plain-text status report (works with or without a UI): active mode and its source, every config layer (global settings / project entry / hand-authored block) with mode/path/rule counts, config warnings, protected & trusted paths, session-pass rules, and the current session's cwd (with a HOME marker). Empty sections show `(none)`; a HOME-cwd session's project section honestly says `no project config (cwd is HOME)`.
+- **Confirm-dialog scope notes.** Prompts offering the 🔓 option now explain the two scopes: Allow = only this once; Allow & set … = pass for the rest of this session (in memory only, never persisted). Prompts that cannot offer it (sudo/ssh-class `confirmGroup`, naked mode) instead show one line explaining why there is no session pass — by design, it will ask again every time. To make that possible the `confirmGroup` verdict now carries its rule id (annotation only; option sets unchanged).
+- **Confirmation before destructive config operations.** `paths <kind> clear` now asks `Clear ALL N <kind> path(s) in the <scope> layer?` with a count/scope/inherited breakdown; with no UI it refuses and points at the settings file to edit manually instead of executing silently. Reset-all-rules confirm titles now state the layer (`Clear ALL rule overrides in the <scope> layer?`).
+
+### Changed
+- **Escape hints lead with the narrowest unblock.** Rule-level blocks suggest tuning just that rule (`/guard rules`) before loosening the whole mode (`/guard loose|trusted`); built-in protected paths no longer lead with `/guard naked` (explicitly "last resort"); user-protected paths explain the remove-then-re-add escape if you really must.
+
+### Fixed
+- A failed `--project <mode>` switch at HOME no longer lies: the message says `not switched; still <mode>`.
+- The footer status indicator refreshes after `/guard project remove` (mode reverting to the global value is now shown immediately).
+- A hand-authored `.pi/settings.json` `pathGuard` block that is actually in effect (no project entry matched) surfaces a one-time hint to migrate it via `/guard project import`.
+
+### Tests
+- 551 assertions passing (was 386 at v1.8.0; +165 across Tasks 1–5).
+
 ## [1.8.0] — 2026-10-29: project-scoped config and config reliability
 
 ### Added

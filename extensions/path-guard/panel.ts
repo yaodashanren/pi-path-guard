@@ -344,7 +344,7 @@ export async function runPathCategoryMenu(
 			}
 			const inherited = list.length - own.length;
 			const ok = await ctx.ui.confirm(
-				`Clear ${own.length} ${kind} path(s) from the ${getWriteScope()} layer?`,
+				`Clear ALL ${own.length} ${kind} path(s) in the ${getWriteScope()} layer?`,
 				own.map((entry) => `· ${entry.normalized}`).join("\n") +
 					(inherited > 0
 						? `\n\n${inherited} inherited path(s) stay in effect.`

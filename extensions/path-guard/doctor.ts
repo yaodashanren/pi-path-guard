@@ -91,7 +91,7 @@ export function doctorView(cwd: string | undefined): string {
 	} else {
 		lines.push("· config warnings:");
 		for (const w of warnings) {
-			lines.push(`  · ${w.path}${w.field ? ` ${w.field}` : ""}: ${w.message}`);
+			lines.push(` · ${w.path}: ${w.field ? `${w.field}: ` : ""}${w.message}`);
 		}
 	}
 

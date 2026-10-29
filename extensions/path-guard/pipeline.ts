@@ -120,7 +120,7 @@ export function checkBashCommand(
 			if (v.kind === "block") blockReasons.push(`heredoc: ${v.reason}`);
 			else if (v.kind === "confirm") {
 				confirmNeeded.push(`(heredoc) ${t}`);
-				if (v.rule) confirmRules.add(v.rule);
+				for (const rule of v.rules ?? []) confirmRules.add(rule);
 			}
 		}
 	}
@@ -129,7 +129,7 @@ export function checkBashCommand(
 		blockReasons.push(pipeVerdict.reason);
 	} else if (pipeVerdict.kind === "confirm") {
 		confirmNeeded.push(command.trim());
-		if (pipeVerdict.rule) confirmRules.add(pipeVerdict.rule);
+		for (const rule of pipeVerdict.rules ?? []) confirmRules.add(rule);
 	}
 
 	for (const seg of splitSegments(bareCommand)) {
@@ -141,7 +141,7 @@ export function checkBashCommand(
 			blockReasons.push(verdict.reason);
 		} else if (verdict.kind === "confirm") {
 			confirmNeeded.push(trimmed);
-			if (verdict.rule) confirmRules.add(verdict.rule);
+			for (const rule of verdict.rules ?? []) confirmRules.add(rule);
 		}
 	}
 

@@ -2815,6 +2815,26 @@ await setMode("strict");
 		(await runCmd(multi, PROJ)).verdict,
 		"pass",
 	);
+
+	// Recursive wrappers must retain the same rule and session-pass behavior.
+	for (const command of [
+		'bash -c "git reset --hard HEAD"',
+		'echo "$(git reset --hard HEAD)"',
+		"bash <<EOF\ngit reset --hard HEAD\nEOF",
+	]) {
+		setGlobalMode("normal");
+		await runTool("bash", { command }, { cwd: PROJ, pick: pickSessionPass });
+		check(
+			`recursive confirm offers gitDestructive session pass: ${command}`,
+			selectOptions[0]?.some((o) => o.includes("gitDestructive")) ? "yes" : "no",
+			"yes",
+		);
+		check(
+			`recursive session pass suppresses next prompt: ${command}`,
+			(await runCmd(command, PROJ)).verdict,
+			"pass",
+		);
+	}
 }
 
 // ── #14 redirectUnresolved: `> "$VAR/..."` targets that cannot be resolved ──

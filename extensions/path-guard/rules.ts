@@ -302,7 +302,7 @@ export function ruleVerdict(rule: RuleId, blockReason: string): SegmentVerdict {
 				blockReason,
 			),
 		};
-	if (lvl === "confirm") return { kind: "confirm", rule };
+	if (lvl === "confirm") return { kind: "confirm", rules: [rule] };
 	return { kind: "pass" };
 }
 

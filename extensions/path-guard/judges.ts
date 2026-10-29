@@ -21,7 +21,7 @@ import { extractCommandSubstitutions, extractHeredocs, extractPathArgs, extractR
 export /** Verdict for a single segment */
 type SegmentVerdict =
 	| { kind: "block"; reason: string }
-	| { kind: "confirm"; rule?: RuleId }
+	| { kind: "confirm"; rules?: RuleId[] }
 	| { kind: "pass" };
 
 /**
@@ -277,6 +277,7 @@ export function classifySubstitutions(
 	depth: number,
 ): SegmentVerdict {
 	const blockReasons: string[] = [];
+	const confirmRules = new Set<RuleId>();
 	let confirm = false;
 	for (const body of substitutions) {
 		for (const seg of splitSegments(body)) {
@@ -284,13 +285,16 @@ export function classifySubstitutions(
 			if (!s) continue;
 			const v = classifySegment(s, realCwd, hasUI, depth);
 			if (v.kind === "block") blockReasons.push(v.reason);
-			else if (v.kind === "confirm") confirm = true;
+			else if (v.kind === "confirm") {
+				confirm = true;
+				for (const rule of v.rules ?? []) confirmRules.add(rule);
+			}
 		}
 	}
 	if (blockReasons.length > 0) {
 		return { kind: "block", reason: blockReasons.join("\n") };
 	}
-	if (confirm) return { kind: "confirm" };
+	if (confirm) return { kind: "confirm", rules: [...confirmRules] };
 	return { kind: "pass" };
 }
 
@@ -312,6 +316,7 @@ export function classifySegment(
 	//    too — `echo "$(rm -rf x)"` must not slip through.
 	const substitutions = extractCommandSubstitutions(trimmed);
 	let subConfirm = false;
+	const subConfirmRules = new Set<RuleId>();
 	if (substitutions.length > 0) {
 		const subVerdict = classifySubstitutions(
 			substitutions,
@@ -325,18 +330,20 @@ export function classifySegment(
 				reason: `Command substitution blocked:\n${subVerdict.reason}`,
 			};
 		}
-		if (subVerdict.kind === "confirm") subConfirm = true;
+		if (subVerdict.kind === "confirm") {
+			subConfirm = true;
+			for (const rule of subVerdict.rules ?? []) subConfirmRules.add(rule);
+		}
 	}
 
 	const outer = classifySegmentOuter(trimmed, realCwd, hasUI, depth);
 	if (outer.kind === "block") return outer;
 	if (outer.kind === "confirm" || subConfirm) {
-		// Preserve the rule id when the outer verdict is rule-driven (enables the
-		// confirm dialog's session-pass option); a substitution-only confirm has none.
-		return {
-			kind: "confirm",
-			rule: outer.kind === "confirm" ? outer.rule : undefined,
-		};
+		const rules = new Set<RuleId>(subConfirmRules);
+		if (outer.kind === "confirm") {
+			for (const rule of outer.rules ?? []) rules.add(rule);
+		}
+		return { kind: "confirm", rules: [...rules] };
 	}
 	return { kind: "pass" };
 }
@@ -493,16 +500,23 @@ export function judgeShellWrapper(
 			reason: `Inner command blocked:\n${pipeVerdict.reason}`,
 		};
 	}
-	if (pipeVerdict.kind === "confirm") return { kind: "confirm" };
 
 	const blockReasons: string[] = [];
 	const confirmNeeded: string[] = [];
+	const confirmRules = new Set<RuleId>();
+	if (pipeVerdict.kind === "confirm") {
+		confirmNeeded.push(inner);
+		for (const rule of pipeVerdict.rules ?? []) confirmRules.add(rule);
+	}
 	for (const seg of splitSegments(inner)) {
 		const s = seg.trim();
 		if (!s) continue;
 		const v = classifySegment(s, realCwd, hasUI, depth + 1);
 		if (v.kind === "block") blockReasons.push(v.reason);
-		else if (v.kind === "confirm") confirmNeeded.push(s);
+		else if (v.kind === "confirm") {
+			confirmNeeded.push(s);
+			for (const rule of v.rules ?? []) confirmRules.add(rule);
+		}
 	}
 	if (blockReasons.length > 0) {
 		return {
@@ -510,7 +524,9 @@ export function judgeShellWrapper(
 			reason: `Inner command blocked:\n${blockReasons.join("\n")}`,
 		};
 	}
-	if (confirmNeeded.length > 0) return { kind: "confirm" };
+	if (confirmNeeded.length > 0) {
+		return { kind: "confirm", rules: [...confirmRules] };
+	}
 	return { kind: "pass" };
 }
 
@@ -1133,7 +1149,7 @@ export function pipeSourceIsExternal(sourceText: string, realCwd: string): boole
 export function scanPipeToShell(text: string, realCwd: string): SegmentVerdict {
 	const groups = pipeGroups(text);
 	const anyBlock: string[] = [];
-	let confirmRule: RuleId | undefined;
+	const confirmRules = new Set<RuleId>();
 	for (let i = 1; i < groups.length; i++) {
 		const right = parseCommand(groups[i]);
 		if (!right || !SHELL_WRAPPERS.has(right.command)) continue;
@@ -1145,11 +1161,13 @@ export function scanPipeToShell(text: string, realCwd: string): SegmentVerdict {
 		const reason = `Piping ${left.command} output into ${right.command} (potentially untrusted code): ${groups[i - 1]} | ${groups[i]}`;
 		const lvl = rl(rule);
 		if (lvl === "block") anyBlock.push(reason);
-		else if (lvl === "confirm") confirmRule = rule;
+		else if (lvl === "confirm") confirmRules.add(rule);
 	}
 	if (anyBlock.length > 0) {
 		return { kind: "block", reason: anyBlock.join("\n") };
 	}
-	if (confirmRule) return { kind: "confirm", rule: confirmRule };
+	if (confirmRules.size > 0) {
+		return { kind: "confirm", rules: [...confirmRules] };
+	}
 	return { kind: "pass" };
 }

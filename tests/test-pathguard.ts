@@ -3601,6 +3601,52 @@ await setMode("normal");
 	setWriteScope("global");
 }
 
+
+// ── relative config paths are anchored to their own layer (Task 6) ────
+{
+	const REL_DIR = "/tmp/pgtest-rel";
+	const relGlobal = join(REL_DIR, "global.json");
+	rmSync(REL_DIR, { recursive: true, force: true });
+	mkdirSync(REL_DIR, { recursive: true });
+	const prevGlobalEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	process.env.PI_PATH_GUARD_SETTINGS = relGlobal;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(REL_DIR, "projects");
+
+	const relRepo = "/tmp/pgtest-rel-repo";
+	rmSync(relRepo, { recursive: true, force: true });
+	mkdirSync(join(relRepo, "sub"), { recursive: true });
+	const relEntry = projectEntryPath(relRepo);
+	mkdirSync(join(relEntry, ".."), { recursive: true });
+	writeFileSync(relEntry, JSON.stringify({ version: 1, project: realpathSync(relRepo), extraProtected: ["secrets"] }));
+	rmSync(relGlobal, { force: true });
+	writeFileSync(relGlobal, JSON.stringify({ pathGuard: { mode: "normal" } }));
+	applyConfig(readSavedConfig(join(relRepo, "sub"), true));
+	check("project relative path resolves against the project root", pathEntries("protected").filter((e) => e.layer === "project").map((e) => e.normalized).join(","), join(realpathSync(relRepo), "secrets"));
+	check("project relative entry keeps its provenance", pathEntries("protected")[0]?.raw, "secrets");
+
+	// a global relative entry is refused with a warning and never applied
+	writeFileSync(relGlobal, JSON.stringify({ pathGuard: { extraProtected: ["secrets", "/tmp/abs-ok", "~/home-ok"] } }));
+	const relRead = readSettingsFile(relGlobal);
+	check("global relative entry warns", relRead.ok && relRead.warnings.some((w) => w.field === "extraProtected[0]") ? "warn" : "?", "warn");
+	applyConfig({ global: relRead.ok ? (relRead.guard ?? {}) : {}, warnings: relRead.ok ? relRead.warnings : [] });
+	check("global relative entry is dropped", pathList("protected").sort().join(","), [join(homedir(), "home-ok"), "/tmp/abs-ok"].sort().join(","));
+	check("global absolute and ~/ entries survive", String(pathList("protected").length), "2");
+
+	// the same string means different things in different layers
+	rmSync(join(relRepo, "other"), { recursive: true, force: true });
+	mkdirSync(join(relRepo, "other"), { recursive: true });
+	const otherEntry = projectEntryPath(join(relRepo, "other"));
+	mkdirSync(join(otherEntry, ".."), { recursive: true });
+	writeFileSync(otherEntry, JSON.stringify({ version: 1, project: realpathSync(join(relRepo, "other")), extraProtected: ["secrets"] }));
+	applyConfig(readSavedConfig(join(relRepo, "other"), true));
+	check("relative entry follows its own project root", pathEntries("protected").filter((e) => e.layer === "project").map((e) => e.normalized).join(","), join(realpathSync(join(relRepo, "other")), "secrets"));
+
+	rmSync(relRepo, { recursive: true, force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

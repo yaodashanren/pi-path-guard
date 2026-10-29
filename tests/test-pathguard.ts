@@ -48,6 +48,7 @@ import {
 	clearPathsIn,
 	getConfig,
 	getLayers,
+	getMode,
 	getWriteScope,
 	pathEntries,
 	pathList,
@@ -3645,6 +3646,110 @@ await setMode("normal");
 	rmSync(relRepo, { recursive: true, force: true });
 	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
 	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+}
+
+
+// ── /guard --project + project subcommand (Task 7) ───────────────────
+{
+	const P7 = "/tmp/pgtest-task7";
+	const p7Global = join(P7, "global.json");
+	rmSync(P7, { recursive: true, force: true });
+	mkdirSync(P7, { recursive: true });
+	const prevGlobalEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	process.env.PI_PATH_GUARD_SETTINGS = p7Global;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(P7, "projects");
+	writeFileSync(p7Global, JSON.stringify({ pathGuard: { mode: "normal" } }, null, 2));
+
+	const scopeRepo = "/tmp/pgtest-scope-repo";
+	rmSync(scopeRepo, { recursive: true, force: true });
+	mkdirSync(scopeRepo, { recursive: true });
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(P7, "projects");
+
+	const newCtx = (cwd: string, notifies: string[]) => ({
+		cwd,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: (m: string) => notifies.push(m),
+			confirm: async () => true,
+			theme: themeMock,
+			setStatus: () => {},
+		},
+	});
+
+	// first use creates the entry, then saves to it
+	const scopeNotifies: string[] = [];
+	const scopeCtx = newCtx(scopeRepo, scopeNotifies);
+	await commands["guard"].handler("--project loose", scopeCtx);
+	const createdEntry = projectEntryPath(scopeRepo);
+	check("--project creates the entry on first use", String(existsSync(createdEntry)), "true");
+	check("--project switch writes the entry file", JSON.parse(readFileSync(createdEntry, "utf8")).mode, "loose");
+	check("--project entry records the project path", JSON.parse(readFileSync(createdEntry, "utf8")).project, realpathSync(scopeRepo));
+	check("--project switch leaves the global mode alone", JSON.parse(readFileSync(p7Global, "utf8")).pathGuard.mode, "normal");
+	check("--project notify names the entry file", scopeNotifies.join(" ").includes(createdEntry) ? "path" : "?", "path");
+	check("--project makes the project mode effective", getMode(), "loose");
+
+	// project view
+	scopeNotifies.length = 0;
+	await commands["guard"].handler("project", scopeCtx);
+	check("project view shows the entry path", scopeNotifies.join(" ").includes(createdEntry) ? "path" : "?", "path");
+	check("project view shows overridden fields", scopeNotifies.join(" ").includes("mode = loose") ? "mode" : "?", "mode");
+	check("project view shows the match kind", scopeNotifies.join(" ").includes("exact") ? "exact" : "?", "exact");
+
+	// a subdirectory session reports (and writes) the ancestor file
+	const subDir = join(scopeRepo, "sub");
+	mkdirSync(subDir, { recursive: true });
+	const subNotifies: string[] = [];
+	const subCtx = newCtx(subDir, subNotifies);
+	await commands["guard"].handler("project", subCtx);
+	check("ancestor hit reports the ancestor file", subNotifies.join(" ").includes(createdEntry) ? "path" : "?", "path");
+	await commands["guard"].handler("--project trusted", subCtx);
+	check("subdir write goes to the ancestor file", JSON.parse(readFileSync(createdEntry, "utf8")).mode, "trusted");
+	check("no per-subdir entry is created", String(existsSync(projectEntryPath(subDir))), "false");
+
+	// import: hand-authored block → entry file, source kept
+	const authoredRepo = "/tmp/pgtest-task7-authored";
+	rmSync(authoredRepo, { recursive: true, force: true });
+	mkdirSync(join(authoredRepo, ".pi"), { recursive: true });
+	writeFileSync(join(authoredRepo, ".pi", "settings.json"), JSON.stringify({ pathGuard: { mode: "strict", extraProtected: ["~/a"] } }));
+	const authoredNotifies: string[] = [];
+	await commands["guard"].handler("project import", newCtx(authoredRepo, authoredNotifies));
+	const importedEntry = projectEntryPath(authoredRepo);
+	const imported = JSON.parse(readFileSync(importedEntry, "utf8"));
+	check("import copies the mode", imported.mode, "strict");
+	check("import copies protected paths", (imported.extraProtected ?? []).join(","), "~/a");
+	check("import keeps the authored file", String(existsSync(join(authoredRepo, ".pi", "settings.json"))), "true");
+	check("import reports the new file", authoredNotifies.join(" ").includes(importedEntry) ? "path" : "?", "path");
+
+	// import refuses to overwrite an existing entry
+	authoredNotifies.length = 0;
+	await commands["guard"].handler("project import", newCtx(authoredRepo, authoredNotifies));
+	check("second import refuses rather than clobbering", authoredNotifies.join(" ").includes("already has an entry") ? "refused" : "?", "refused");
+
+	// remove: confirm → delete the entry file
+	authoredNotifies.length = 0;
+	await commands["guard"].handler("project remove", newCtx(authoredRepo, authoredNotifies));
+	check("project remove deletes the entry", String(existsSync(importedEntry)), "false");
+	check("remove reports the deleted file", authoredNotifies.join(" ").includes(importedEntry) ? "path" : "?", "path");
+
+	// config warnings surface at session_start
+	writeFileSync(p7Global, "{ broken json");
+	const warnNotifies: string[] = [];
+	handlers["session_start"]({ reason: "startup" }, {
+		cwd: scopeRepo,
+		isProjectTrusted: () => true,
+		ui: { theme: themeMock, setStatus: () => {}, notify: (m: string) => warnNotifies.push(m) },
+	});
+	check("corrupt global config warns at session_start", warnNotifies.join(" ").includes("config warnings") ? "warn" : "?", "warn");
+	check("the warning names the file", warnNotifies.join(" ").includes(p7Global) ? "path" : "?", "path");
+	check("corrupt global config falls back to the project mode", getMode(), "trusted");
+
+	rmSync(scopeRepo, { recursive: true, force: true });
+	rmSync(authoredRepo, { recursive: true, force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+	setWriteScope("global");
 }
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

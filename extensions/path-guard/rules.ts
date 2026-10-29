@@ -12,7 +12,7 @@ import type {
 import type { SegmentVerdict } from "./judges.ts";
 import { tagged } from "./escape.ts";
 import { expandHome, isOutsideCwd, matchesProtectedPath, resolveReal } from "./paths.ts";
-import { findProjectConfig, mergeLayers, readSettingsFile, writeFileAtomic } from "./store.ts";
+import { findProjectConfig, mergeLayers, projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
 
 
 import type {
@@ -600,6 +600,37 @@ export function clearPathsIn(
 	delete layer[key];
 	rebuildEffective();
 	return { where: persistConfig(scope, cwd) };
+}
+
+/**
+ * Make sure edits aimed at the project layer have a target. When a project entry
+ * already applies (exact or ancestor match) it is used as-is — a subdirectory
+ * session writes the ancestor's file rather than inventing a new one. Otherwise
+ * an in-memory entry for `cwd` is created; it reaches disk on the next persist.
+ */
+export function ensureProjectLayer(
+	cwd: string | undefined,
+	mode?: GuardMode,
+): boolean {
+	if (!cwd || isHomeCwd(cwd)) return false;
+	// Always resolve from cwd: reusing whatever layer a previous session left in
+	// memory could write to an unrelated project's file.
+	const found = findProjectConfig(cwd).lookup;
+	if (found) {
+		layers.project = found.layer;
+		layers.projectRoot = found.projectRoot;
+		layers.projectFile = found.filePath;
+		layers.matchedVia = found.matchedVia;
+	} else {
+		const root = resolveReal(cwd);
+		layers.project = {};
+		layers.projectRoot = root;
+		layers.projectFile = projectEntryPath(root);
+		layers.matchedVia = "exact";
+	}
+	if (mode) layers.project.mode = mode;
+	rebuildEffective();
+	return true;
 }
 
 /** Apply a loaded/saved config wholesale (session_start restore). *//** Apply a loaded/saved config wholesale (session_start restore). */

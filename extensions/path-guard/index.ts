@@ -4,8 +4,31 @@ import type {
 	ExtensionAPI,
 	WriteToolInput,
 } from "@earendil-works/pi-coding-agent";
-import { applyConfig, clearSessionPass, getWriteScope, getConfig, readSavedConfig, getMode, isGuardMode, persistNote, setMode, setModeIn } from "./rules.ts";
-import { GUARD_MAIN_MENU, confirmModeSwitch, handlePathsCommand, runGuardPanel, runModePicker, runPathsMenu, runRulesMenu } from "./panel.ts";
+import {
+	applyConfig,
+	clearSessionPass,
+	ensureProjectLayer,
+	getConfig,
+	getConfigWarnings,
+	getMode,
+	getWriteScope,
+	isGuardMode,
+	persistNote,
+	readSavedConfig,
+	setMode,
+	setModeIn,
+	setWriteScope,
+} from "./rules.ts";
+import {
+	GUARD_MAIN_MENU,
+	confirmModeSwitch,
+	handlePathsCommand,
+	handleProjectCommand,
+	runGuardPanel,
+	runModePicker,
+	runPathsMenu,
+	runRulesMenu,
+} from "./panel.ts";
 import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";
 
 /**
@@ -24,6 +47,22 @@ export default function (pi: ExtensionAPI) {
 		applyConfig(cfg);
 		clearSessionPass();
 		setMode(getConfig().mode, ctx.ui);
+		// Config problems (bad JSON, unknown fields, dropped relative paths) are
+		// surfaced once per session instead of silently falling back to defaults.
+		const configWarnings = getConfigWarnings();
+		if (configWarnings.length > 0) {
+			const shown = configWarnings.slice(0, 3).map(
+				(w) => `· ${w.path}: ${w.field ? `${w.field}: ` : ""}${w.message}`,
+			);
+			const more =
+				configWarnings.length > shown.length
+					? `\n… and ${configWarnings.length - shown.length} more (see /guard project)`
+					: "";
+			ctx.ui.notify?.(
+				`Path Guard: config warnings (${configWarnings.length})\n${shown.join("\n")}${more}`,
+				"warning",
+			);
+		}
 		// A persisted loose mode survives into every new session; surface it so the
 		// user never runs unprotected without noticing (naked in particular).
 		if (getConfig().mode === "naked") {
@@ -47,8 +86,21 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> add|rm|list|clear <path> manages paths",
 		handler: async (args, ctx) => {
-			const raw = args?.trim() ?? "";
+			let raw = args?.trim() ?? "";
+			// `/guard --project <anything>` saves the edit to this project's entry file.
+			const projectScope = /^--project(\s|$)/i.test(raw);
+			if (projectScope) raw = raw.replace(/^--project\s*/i, "").trim();
+			setWriteScope(projectScope ? "project" : "global");
 			const m = raw.toLowerCase();
+
+			// ── /guard project … : inspect/import/remove this project's config ──
+			if (m === "project" || m.startsWith("project ")) {
+				return handleProjectCommand(raw, ctx);
+			}
+			if (projectScope) {
+				// Create the entry on first use so /guard --project <mode> works from scratch.
+				ensureProjectLayer(ctx.cwd);
+			}
 
 			// ── /guard paths … : manage user-configured protected paths (any mode) ──
 			if (m === "paths" || m.startsWith("paths ")) {

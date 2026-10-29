@@ -1,7 +1,12 @@
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Component, Focusable } from "@earendil-works/pi-tui";
 import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, TRUSTED_SWITCH_WARNING, TRUST_PATH_WARNING } from "./constants.ts";
+import { projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
+import { applyConfig, getConfigWarnings, getLayers, projectSettingsPath, readSavedConfig } from "./rules.ts";
+import type { ConfigWarning, PathGuardLayer } from "./schema.ts";
 import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, getConfig, getMode, getWriteScope, isGuardMode, isRuleLevel, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
 
 // path-guard — /guard interactive UI: chained menus, actions, rules matrix,
@@ -1112,6 +1117,176 @@ export const PATHS_USAGE =
 	"Protected paths are guarded in EVERY mode (including naked).\n" +
 	"Trusted paths are ALWAYS allowed (trusted-mode protection for that path);\n" +
 	"system-important protected paths (.env/.ssh/keys/…) cannot be trusted.";
+/** Path Guard project-config usage message. */
+export const PROJECT_USAGE =
+	"Path Guard project config usage:\n" +
+	" /guard project            show this project's config (file, match, overrides, warnings)\n" +
+	" /guard project import     copy a hand-authored .pi/settings.json pathGuard block into it\n" +
+	" /guard project remove     delete this project's entry file (asks first)\n" +
+	" /guard --project <mode|paths|rules>   save edits to this project instead of globally\n\n" +
+	"Project entries live in the pi agent dir (path-guard/projects/), so they are\n" +
+	"never mistaken for a trust-requiring project resource.";
+
+/** Everything projectConfigView needs; the live session fills it in by default. */
+export interface ProjectViewInput {
+	filePath: string;
+	projectRoot: string;
+	matchedVia: "exact" | "ancestor" | "authored";
+	layer: PathGuardLayer;
+	warnings: ConfigWarning[];
+}
+
+function overrideList(layer: PathGuardLayer): string[] {
+	const out: string[] = [];
+	if (layer.mode) out.push(`mode = ${layer.mode}`);
+	(layer.extraProtected ?? []).forEach((_, i) => out.push(`extraProtected[${i}]`));
+	(layer.trustedPaths ?? []).forEach((_, i) => out.push(`trustedPaths[${i}]`));
+	for (const [mode, rules] of Object.entries(layer.rules ?? {})) {
+		for (const rule of Object.keys(rules ?? {})) out.push(`rules.${mode}.${rule}`);
+	}
+	return out;
+}
+
+/** Human-readable view of a project config (live session when no input given). */
+export function projectConfigView(entry?: ProjectViewInput): string {
+	const live = getLayers();
+	const view: ProjectViewInput | undefined =
+		entry ??
+		(live.projectFile && live.project
+			? {
+					filePath: live.projectFile,
+					projectRoot: live.projectRoot ?? "",
+					matchedVia: live.matchedVia ?? "exact",
+					layer: live.project,
+					warnings: getConfigWarnings(),
+				}
+			: live.authored
+				? {
+						filePath: live.authored.file,
+						projectRoot: live.authored.root,
+						matchedVia: "authored",
+						layer: live.authored.layer,
+						warnings: getConfigWarnings(),
+					}
+				: undefined);
+	if (!view) {
+		return "Path Guard project config\n· file: (none — using global config only)\n· create one with: /guard --project <mode>";
+	}
+	const lines = [
+		"Path Guard project config",
+		`· file: ${view.filePath}`,
+		`· match: ${view.matchedVia}`,
+		`· project root: ${view.projectRoot}`,
+	];
+	const overrides = overrideList(view.layer);
+	lines.push(
+		`· overrides: ${overrides.length > 0 ? overrides.join(", ") : "(none)"}`,
+	);
+	const warnings = view.warnings.filter((w) => w.path === view.filePath);
+	lines.push(`· warnings: ${warnings.length}`);
+	for (const warning of warnings.slice(0, 3)) {
+		lines.push(`  · ${warning.field ? `${warning.field}: ` : ""}${warning.message}`);
+	}
+	if (view.projectRoot && !existsSync(view.projectRoot)) {
+		lines.push(
+			"· stale — project directory no longer exists (kept until /guard doctor can prune in a later release)",
+		);
+	}
+	return lines.join("\n");
+}
+
+/** `/guard project [import|remove]` — manage this project's entry file. */
+export async function handleProjectCommand(
+	raw: string,
+	ctx: ExtensionCommandContext,
+): Promise<void> {
+	const rest = raw.replace(/^project\s*/i, "").trim().toLowerCase();
+	// Always answer for the current directory: a stale in-memory layer from an
+	// earlier cwd would otherwise hide (or overwrite) this project's config.
+	if (ctx.cwd) applyConfig(readSavedConfig(ctx.cwd, ctx.isProjectTrusted?.() === true));
+	const show = (msg: string) => ctx.ui.notify(msg, "info");
+	const warn = (msg: string) => ctx.ui.notify(msg, "warning");
+
+	if (rest === "" || rest === "show" || rest === "list") {
+		return show(projectConfigView());
+	}
+
+	if (rest === "import") {
+		if (!ctx.cwd) return warn("Path Guard: no working directory — nothing to import");
+		const source = projectSettingsPath(ctx.cwd) as string;
+		const read = readSettingsFile(source);
+		if (!read.ok) {
+			return warn(`Path Guard: cannot read ${source} — ${read.message}`);
+		}
+		if (!read.guard) {
+			return show(`Path Guard: no pathGuard block in ${source} — nothing to import`);
+		}
+		if (ctx.isProjectTrusted?.() !== true) {
+			return warn(
+				`Path Guard: ${source} is project config — approve this project (trust) before importing it`,
+			);
+		}
+		if (getLayers().project) {
+			return show(
+				`Path Guard: this project already has an entry (${getLayers().projectFile}) — remove it first with /guard project remove`,
+			);
+		}
+		const target = projectEntryPath(ctx.cwd);
+		try {
+			mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+			writeFileAtomic(
+				target,
+				`${JSON.stringify(
+					{ version: 1, project: ctx.cwd, ...read.guard, updatedAt: new Date().toISOString() },
+					null,
+					2,
+				)}\n`,
+			);
+		} catch (e) {
+			return warn(
+				`Path Guard: could not write ${target} — ${e instanceof Error ? e.message : String(e)}`,
+			);
+		}
+		applyConfig(readSavedConfig(ctx.cwd, true));
+		return show(
+			`Path Guard: imported the pathGuard block into ${target}\n· ${source} still exists — delete its pathGuard block when you are ready`,
+		);
+	}
+
+	if (rest === "remove") {
+		const live = getLayers();
+		if (!live.project || !live.projectFile) {
+			return show("Path Guard: this directory has no project config to remove");
+		}
+		const file = live.projectFile;
+		if (!ctx.hasUI) {
+			return warn(
+				`Path Guard: /guard project remove needs a UI to confirm — delete ${file} manually`,
+			);
+		}
+		const extra =
+			live.matchedVia === "ancestor"
+				? `\nIt was matched from a parent directory, so this file also applies to every directory under ${live.projectRoot}.`
+				: "";
+		const ok = await ctx.ui.confirm(
+			"Delete this project's config?",
+			`File: ${file}${extra}\n\nThe project goes back to the global config on the next session.`,
+		);
+		if (!ok) return show("Cancelled, project config kept");
+		try {
+			rmSync(file, { force: true });
+		} catch (e) {
+			return warn(
+				`Path Guard: could not delete ${file} — ${e instanceof Error ? e.message : String(e)}`,
+			);
+		}
+		if (ctx.cwd) applyConfig(readSavedConfig(ctx.cwd, true));
+		return show(`Path Guard: removed project config ${file}`);
+	}
+
+	return show(PROJECT_USAGE);
+}
+
 export async function handlePathsCommand(raw: string, ctx: ExtensionCommandContext) {
 	let rest = raw.replace(/^paths\s*/i, "").trim();
 	let kind: PathKind = "protected";

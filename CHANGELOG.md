@@ -4,7 +4,7 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.8.0] — 2026-10-29: project-scoped config and config reliability
 
 ### Added
 - **Project-scoped config.** `/guard --project <mode|paths|rules>` saves to a per-project entry file under the pi agent dir (`path-guard/projects/<slug>-<hash>.json`), created on first use. Lookup is exact-first, then nearest ancestor, so a subdirectory session inherits the repo root's config. Because the file is user-level, pi never treats it as a trust-requiring project resource — it is read with `--no-approve` and `defaultProjectTrust: "never"` too. `PI_PATH_GUARD_PROJECTS_DIR` overrides the directory.

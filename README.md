@@ -181,7 +181,7 @@ cd tests && node --experimental-strip-types test-pathguard.ts
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.7.4**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.8.0**.
 
 ## License
 

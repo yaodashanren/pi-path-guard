@@ -28,6 +28,7 @@ import {
 	runModePicker,
 	runPathsMenu,
 	runRulesMenu,
+	runScopeMenu,
 } from "./panel.ts";
 import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";
 
@@ -153,6 +154,7 @@ export default function (pi: ExtensionAPI) {
 				const option = main.split(/\s+/)[0];
 				if (option === "paths") await runPathsMenu(ctx);
 				else if (option === "rules") await runRulesMenu(ctx);
+				else if (option === "scope") await runScopeMenu(ctx);
 				else await runModePicker(ctx);
 			}
 		},

@@ -7,7 +7,7 @@ import { NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, TRUSTED_SWITCH_WARNING,
 import { projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
 import { applyConfig, getConfigWarnings, getLayers, projectSettingsPath, readSavedConfig } from "./rules.ts";
 import type { ConfigWarning, PathGuardLayer } from "./schema.ts";
-import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, getConfig, getMode, getWriteScope, isGuardMode, isRuleLevel, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
+import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
 
 // path-guard — /guard interactive UI: chained menus, actions, rules matrix,
 // the single self-contained overlay panel, and warning confirmations.
@@ -113,6 +113,7 @@ export const GUARD_MAIN_MENU = [
 	"switch — Switch mode (切换防护模式)",
 	"rules — Customize per-mode guard rules (定制每模式守护规则)",
 	"paths — Manage protected & trusted paths (管理保护/信任路径)",
+	"scope — Where edits are saved: global or this project (切换保存位置)",
 ];
 
 /** First step inside /guard paths: pick a category (loops until back/cancel). */
@@ -185,6 +186,42 @@ export async function runPathsMenu(ctx: ExtensionCommandContext): Promise<void> 
 		if (kind === "back") return;
 		if (kind === "protected" || kind === "trusted") {
 			await runPathCategoryMenu(kind, ctx);
+		}
+	}
+}
+
+/**
+ * Chained-menu fallback for the write scope: the overlay has its own screen, but
+ * hosts without ctx.ui.custom still need a way to choose where edits are saved.
+ */
+export async function runScopeMenu(ctx: ExtensionCommandContext): Promise<void> {
+	const current = getWriteScope();
+	const chosen = await ctx.ui.select(
+		`Path Guard — where should edits be saved? (current: ${current})`,
+		scopeOptions(),
+	);
+	if (!chosen) {
+		ctx.ui.notify("Cancelled, write scope unchanged", "info");
+		return;
+	}
+	const id = chosen.split(/\s+/)[0];
+	if (id === "global") {
+		setWriteScope("global");
+		ctx.ui.notify("Path Guard: edits now save to global settings", "info");
+		return;
+	}
+	if (id === "project") {
+		if (ensureProjectLayer(ctx.cwd)) {
+			setWriteScope("project");
+			ctx.ui.notify(
+				`Path Guard: edits now save to this project (${getLayers().projectFile})`,
+				"info",
+			);
+		} else {
+			ctx.ui.notify(
+				"Path Guard: this directory has no project config (cwd is HOME) — staying global",
+				"warning",
+			);
 		}
 	}
 }
@@ -519,6 +556,7 @@ export async function runRulesMenu(ctx: ExtensionCommandContext): Promise<void> 
 /** One screen in the /guard overlay navigation stack (the top of the stack is shown). */
 export type PanelScreen =
 	| { kind: "main"; idx: number }
+	| { kind: "scope"; idx: number }
 	| { kind: "mode"; idx: number }
 	| { kind: "rules"; idx: number }
 	| { kind: "ruleMode"; idx: number }
@@ -541,11 +579,26 @@ export interface PendingConfirm {
 /** Minimal theme surface the panel uses (kept loose so test mocks are accepted). */
 export type PanelTheme = { fg: (color: any, text: string) => string };
 
+/** Labels for the write-scope picker (global layer vs this project's entry file). */
+export function scopeOptions(): string[] {
+	const layers = getLayers();
+	const project = layers.projectFile
+		? `project — Save to this project's entry file (${layers.projectFile})${layers.matchedVia === "ancestor" ? " [from a parent directory]" : ""}`
+		: "project — (no project config for this directory yet — this creates one)";
+	return [
+		`global — Save to global settings (${globalSettingsPath()})${getWriteScope() === "global" ? " (current)" : ""}`,
+		`${project}${getWriteScope() === "project" ? " (current)" : ""}`,
+		"back — Back to main menu (返回)",
+	];
+}
+
 /** The option labels for a screen; the leading token is the action id. */
 export function panelOptions(s: PanelScreen): string[] {
 	switch (s.kind) {
 		case "main":
 			return GUARD_MAIN_MENU;
+		case "scope":
+			return scopeOptions();
 		case "mode":
 			return GUARD_MODES.map(
 				(mo) =>
@@ -752,10 +805,35 @@ export class GuardPanel implements Component, Focusable {
 		switch (s.kind) {
 			case "main":
 				if (id === "switch") this.push({ kind: "mode", idx: 0 });
+				else if (id === "scope") this.push({ kind: "scope", idx: 0 });
 				else if (id === "rules") this.push({ kind: "rules", idx: 0 });
 				else if (id === "paths")
 					this.push({ kind: "pathsCategory", idx: 0 });
 				return;
+			case "scope": {
+				if (id === "back") {
+					this.pop();
+					return;
+				}
+				if (id === "global") {
+					setWriteScope("global");
+					this.status = "Path Guard: edits now save to global settings";
+					this.pop();
+					return;
+				}
+				if (id === "project") {
+					if (ensureProjectLayer(this.ctx.cwd)) {
+						setWriteScope("project");
+						this.status = `Path Guard: edits now save to this project (${getLayers().projectFile})`;
+					} else {
+						setWriteScope("global");
+						this.status =
+							"Path Guard: this directory has no project config (cwd is HOME) — staying global";
+					}
+					this.pop();
+				}
+				return;
+			}
 			case "mode": {
 				const mode = GUARD_MODES[s.idx];
 				if (mode) this.requestModeSwitch(mode);
@@ -867,6 +945,13 @@ export class GuardPanel implements Component, Focusable {
 			case "pathsRemove": {
 				const kind = s.pathKind;
 				const list = pathList(kind);
+				const entries = pathEntries(kind);
+				const target = entries[s.idx];
+				if (target && target.layer !== getWriteScope()) {
+					this.status = `Path Guard: not removable here — ${target.normalized} belongs to the ${target.layer} config`;
+					this.requestRender();
+					return;
+				}
 				if (s.idx >= list.length) {
 					this.pop();
 					return;
@@ -981,6 +1066,10 @@ export class GuardPanel implements Component, Focusable {
 	private renderScreen(s: PanelScreen, width: number): string[] {
 		const out: string[] = [];
 		switch (s.kind) {
+			case "scope":
+				out.push("Where should /guard save edits?", "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
 			case "main":
 				out.push("Choose an action:", "");
 				out.push(...this.listLines(panelOptions(s), s.idx));
@@ -1027,6 +1116,7 @@ export class GuardPanel implements Component, Focusable {
 				break;
 			case "pathsActions": {
 				const list = pathList(s.pathKind);
+				out.push(`Saving edits to: ${getWriteScope()}`, "");
 				out.push(
 					`${s.pathKind} paths (${list.length}):`,
 					...(list.length
@@ -1037,10 +1127,19 @@ export class GuardPanel implements Component, Focusable {
 				out.push(...this.listLines(panelOptions(s), s.idx));
 				break;
 			}
-			case "pathsRemove":
+			case "pathsRemove": {
 				out.push(`Choose a ${s.pathKind} path to remove:`, "");
-				out.push(...this.listLines(panelOptions(s), s.idx));
+				const owned = pathEntries(s.pathKind);
+				const options = panelOptions(s);
+				options.forEach((label, i) => {
+					const entry = owned[i];
+					if (entry && entry.layer !== getWriteScope()) {
+						options[i] = `${label} [from ${entry.layer}]`;
+					}
+				});
+				out.push(...this.listLines(options, s.idx));
 				break;
+			}
 			case "pathsAdd":
 				out.push(
 					s.pathKind === "trusted"
@@ -1065,7 +1164,7 @@ export class GuardPanel implements Component, Focusable {
 			}
 		};
 		const inner: string[] = [
-			fg("accent", `Path Guard  ·  mode: ${getMode()}`),
+			fg("accent", `Path Guard  ·  mode: ${getMode()} · scope: ${getWriteScope()}`),
 			"",
 		];
 		if (this.confirmState) {

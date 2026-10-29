@@ -300,7 +300,7 @@ await commands["guard"].handler("bogus", {
 });
 check(
 	"/guard invalid arg falls back to main menu",
-	bogusOptions.length === 3 ? "menu" : "?",
+	bogusOptions.length === 4 ? "menu" : "?",
 	"menu",
 );
 
@@ -3750,6 +3750,63 @@ await setMode("normal");
 	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
 	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
 	setWriteScope("global");
+}
+
+
+// ── panel scope selector + inherited entries (Task 8) ────────────────
+{
+	const P8 = "/tmp/pgtest-task8";
+	rmSync(P8, { recursive: true, force: true });
+	mkdirSync(P8, { recursive: true });
+	const prevGlobalEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	const p8Global = join(P8, "global.json");
+	process.env.PI_PATH_GUARD_SETTINGS = p8Global;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(P8, "projects");
+	writeFileSync(p8Global, JSON.stringify({ pathGuard: { mode: "normal", extraProtected: ["/tmp/panel-inherited"] } }, null, 2));
+
+	const panelRepo = "/tmp/pgtest-panel-repo";
+	rmSync(panelRepo, { recursive: true, force: true });
+	mkdirSync(join(panelRepo, "sub"), { recursive: true });
+	const panelEntry = projectEntryPath(panelRepo);
+	mkdirSync(join(panelEntry, ".."), { recursive: true });
+	writeFileSync(panelEntry, JSON.stringify({ version: 1, project: realpathSync(panelRepo), mode: "normal" }));
+
+	applyConfig(readSavedConfig(panelRepo, true));
+	setWriteScope("global");
+
+	check("main menu offers a scope item", panelMod.panelOptions({ kind: "main", idx: 0 } as any).some((o) => o.startsWith("scope —")) ? "yes" : "?", "yes");
+	const scopeOpts = panelMod.panelOptions({ kind: "scope", idx: 0 } as any);
+	check("scope screen lists global, project and back", String(scopeOpts.length), "3");
+	check("scope screen marks the current layer", scopeOpts[0].includes("(current)") ? "marked" : "?", "marked");
+	check("scope screen names the entry file", scopeOpts[1].includes(panelEntry) ? "path" : "?", "path");
+
+	// project scope writes to the entry file, not the global one
+	setWriteScope("project");
+	addPathIn(getWriteScope(), "protected", "/tmp/panel-scoped", panelRepo);
+	check("panel-scoped add wrote the entry file", JSON.parse(readFileSync(panelEntry, "utf8")).extraProtected.join(","), "/tmp/panel-scoped");
+	check("panel-scoped add left the global file alone", JSON.parse(readFileSync(p8Global, "utf8")).pathGuard.extraProtected.join(","), "/tmp/panel-inherited");
+
+	// inherited entries are visible but not removable from the project layer
+	const inherited = pathEntries("protected").find((e) => e.normalized === "/tmp/panel-inherited");
+	check("inherited entry carries its layer", inherited?.layer, "global");
+	const inheritedRm = removePathIn("project", "protected", "/tmp/panel-inherited", panelRepo);
+	check("inherited entry cannot be removed from the project layer", inheritedRm.error?.includes("inherited") ? "err" : "?", "err");
+
+	// clearing the project layer leaves global entries intact
+	clearPathsIn("project", "protected", panelRepo);
+	check("clearing the project layer keeps global entries", pathList("protected").join(","), "/tmp/panel-inherited");
+	check("clearing the project layer emptied the entry file", String(JSON.parse(readFileSync(panelEntry, "utf8")).extraProtected), "undefined");
+
+	// subdir: scope labels the ancestor file
+	applyConfig(readSavedConfig(join(panelRepo, "sub"), true));
+	const subOpts = panelMod.panelOptions({ kind: "scope", idx: 0 } as any);
+	check("subdir scope screen reports the ancestor entry", subOpts[1].includes(panelEntry) && subOpts[1].includes("parent directory") ? "ancestor" : "?", "ancestor");
+
+	setWriteScope("global");
+	rmSync(panelRepo, { recursive: true, force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
 }
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

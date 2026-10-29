@@ -9,6 +9,9 @@ import {
 	readFileSync,
 	rmSync,
 	existsSync,
+	readdirSync,
+	realpathSync,
+	symlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -38,6 +41,7 @@ const fakePi = {
 };
 
 const mod = await import(EXT);
+import { readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
 const panelMod = await import(
 	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
 );
@@ -3353,6 +3357,41 @@ await setMode("normal");
 	);
 	await setMode("normal");
 	rmSync(join(PROJ, "victim.txt"), { force: true });
+}
+
+
+// ── config storage: atomic writes + structured reads (Task 2) ─────────
+{
+	const atomicDir = "/tmp/pgtest-atomic";
+	rmSync(atomicDir, { recursive: true, force: true });
+	mkdirSync(atomicDir, { recursive: true });
+	const atomicFile = join(atomicDir, "settings.json");
+	writeFileSync(atomicFile, JSON.stringify({ other: { keep: true }, pathGuard: { mode: "normal" } }));
+	writeFileAtomic(atomicFile, JSON.stringify({ other: { keep: true }, pathGuard: { mode: "loose" } }, null, 2));
+	check("atomic write preserves sibling keys", String(JSON.parse(readFileSync(atomicFile, "utf8")).other.keep), "true");
+	check("atomic write applied the new content", JSON.parse(readFileSync(atomicFile, "utf8")).pathGuard.mode, "loose");
+	check("atomic write leaves no temp files", String(readdirSync(atomicDir).filter((f) => f.startsWith(".tmp-")).length), "0");
+
+	const before = readFileSync(atomicFile, "utf8");
+	rmSync("/tmp/pgtest-missing-xyz", { recursive: true, force: true });
+	let threw = false;
+	try { writeFileAtomic("/tmp/pgtest-missing-xyz/deep/settings.json", "{}"); } catch { threw = true; }
+	check("atomic write throws when the parent dir is missing", String(threw), "true");
+	check("failed write leaves the original bytes untouched", readFileSync(atomicFile, "utf8"), before);
+
+	const badFile = join(atomicDir, "bad.json");
+	writeFileSync(badFile, "{ not json");
+	const bad = readSettingsFile(badFile);
+	check("corrupt settings reported as json error", bad.ok === false && bad.reason === "json" ? "json" : "?", "json");
+	check("corrupt settings error carries the path", bad.ok === false && bad.path === badFile ? "path" : "?", "path");
+	check("missing settings is not an error", String(readSettingsFile(join(atomicDir, "nope.json")).ok), "true");
+
+	const warnFile = join(atomicDir, "warn.json");
+	writeFileSync(warnFile, JSON.stringify({ pathGuard: { mode: "loose", rules: { loose: { nopeRule: "pass" } } } }));
+	const warned = readSettingsFile(warnFile);
+	check("unknown rule id produces a warning", warned.ok && warned.warnings.some((w) => w.field === "rules.loose.nopeRule") ? "warn" : "?", "warn");
+	check("unknown rule id does not block other fields", warned.ok && warned.guard?.mode, "loose");
+	check("non-object pathGuard is treated as absent", String(readSettingsFile(join(atomicDir, "np.json")).guard?.mode), "undefined");
 }
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

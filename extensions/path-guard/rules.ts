@@ -7,9 +7,10 @@ import { homedir } from "node:os";
 import { HOME, CONFIG_DIR } from "./constants.ts";
 import { tagged } from "./escape.ts";
 import { expandHome, isOutsideCwd, matchesProtectedPath, resolveReal } from "./paths.ts";
+import { readSettingsFile, writeFileAtomic } from "./store.ts";
 
 
-import type { GuardMode, RuleId, RuleLevel } from "./schema.ts";
+import type { ConfigWarning, GuardMode, PathGuardLayer, RuleId, RuleLevel } from "./schema.ts";
 import { DEFAULT_MODES, GUARD_MODES, RULE_IDS, isGuardMode, isRuleLevel } from "./schema.ts";
 
 // Re-export the schema so every existing importer keeps working unchanged.
@@ -222,53 +223,33 @@ export function clearSessionPass(mode?: GuardMode): void {
 }
 
 /** Read and validate the raw pathGuard block from a settings.json file, or undefined. */
+/**
+ * Config problems from the last read (bad JSON, unknown fields, dropped relative
+ * paths). Empty when everything was clean. Surfaced at session_start and by the
+ * project view instead of silently falling back to built-in defaults.
+ */
+let configWarnings: ConfigWarning[] = [];
+
+/** Config warnings collected during the most recent session_start read. */
+export function getConfigWarnings(): ConfigWarning[] {
+	return [...configWarnings];
+}
+
+function recordReadFailure(filePath: string, message: string): void {
+	configWarnings.push({ path: filePath, message });
+}
+
+/** Read and validate the raw pathGuard block from a settings.json file. */
 export function readSettingsGuard(
 	filePath: string | undefined,
-): Partial<PathGuardConfig> | undefined {
-	if (!filePath) return undefined;
-	try {
-		if (!existsSync(filePath)) return undefined;
-		const data = JSON.parse(readFileSync(filePath, "utf8")) as {
-			pathGuard?: {
-				mode?: string;
-				extraProtected?: string[];
-				trustedPaths?: string[];
-				rules?: Record<string, Record<string, string>>;
-			};
-		};
-		const g = data?.pathGuard;
-		if (!g) return undefined;
-		const out: Partial<PathGuardConfig> = {};
-		if (typeof g.mode === "string" && isGuardMode(g.mode)) out.mode = g.mode;
-		if (Array.isArray(g.extraProtected)) {
-			out.extraProtected = g.extraProtected.filter(
-				(p): p is string => typeof p === "string",
-			);
-		}
-		if (Array.isArray(g.trustedPaths)) {
-			out.trustedPaths = g.trustedPaths.filter(
-				(p): p is string => typeof p === "string",
-			);
-		}
-		if (g.rules && typeof g.rules === "object") {
-			const rules: PathGuardConfig["rules"] = {};
-			for (const [m, overrides] of Object.entries(g.rules)) {
-				if (!isGuardMode(m) || !overrides || typeof overrides !== "object")
-					continue;
-				const clean: Partial<Record<RuleId, RuleLevel>> = {};
-				for (const [r, lvl] of Object.entries(overrides)) {
-					if ((RULE_IDS as readonly string[]).includes(r) && isRuleLevel(lvl)) {
-						clean[r as RuleId] = lvl;
-					}
-				}
-				if (Object.keys(clean).length > 0) rules[m] = clean;
-			}
-			if (Object.keys(rules).length > 0) out.rules = rules;
-		}
-		return out;
-	} catch {
+): PathGuardLayer | undefined {
+	const read = readSettingsFile(filePath);
+	if (!read.ok) {
+		recordReadFailure(read.path, read.message);
 		return undefined;
 	}
+	configWarnings.push(...read.warnings);
+	return read.guard;
 }
 
 /**
@@ -341,7 +322,7 @@ export function persistConfig(cwd: string | undefined): string {
 			delete guard.rules;
 		}
 		data.pathGuard = guard;
-		writeFileSync(target, JSON.stringify(data, null, 2) + "\n", "utf8");
+		writeFileAtomic(target, JSON.stringify(data, null, 2) + "\n");
 		lastPersistError = "";
 		return "global";
 	} catch (e) {

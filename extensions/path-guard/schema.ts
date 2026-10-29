@@ -268,3 +268,31 @@ naked: {
 		commandNameUnresolved: "pass",
 },
 };
+
+// ─── Config layers (global settings / per-project entry files) ───────
+
+/** Per-mode rule overrides: mode → rule → level. */
+export type RulesLayer = Partial<Record<GuardMode, Partial<Record<RuleId, RuleLevel>>>>;
+
+/**
+ * One config layer as stored on disk. Every field is optional: a missing field
+ * means "inherit from the layer below" (global settings, then built-in defaults).
+ */
+export interface PathGuardLayer {
+	mode?: GuardMode;
+	extraProtected?: string[];
+	trustedPaths?: string[];
+	rules?: RulesLayer;
+}
+
+/** A field-level config problem, surfaced instead of silently ignored. */
+export interface ConfigWarning {
+	path: string;
+	field?: string;
+	message: string;
+}
+
+/** Result of reading a settings.json file: never throws, always explains. */
+export type SettingsRead =
+	| { ok: true; guard: PathGuardLayer | undefined; warnings: ConfigWarning[] }
+	| { ok: false; reason: "json" | "io"; path: string; message: string };

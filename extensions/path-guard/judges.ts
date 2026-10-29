@@ -96,7 +96,10 @@ export function judgeUnresolvedScriptTarget(target: string): SegmentVerdict {
 	const tail = unresolvedScriptTail(target);
 	// Nothing but separators / glob metacharacters → no information to act on.
 	if (!/[^/*?[\]]/.test(tail)) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+		return ruleVerdict(
+			"scriptUnresolved",
+			`Script path cannot be resolved statically — rule (scriptUnresolved): ${target}`,
+		);
 	}
 	if (tailLooksUserProtected(tail)) {
 		return {
@@ -131,7 +134,10 @@ export function judgeUnresolvedRedirectTarget(target: string): SegmentVerdict {
 	const tail = unresolvedScriptTail(target);
 	// Nothing but separators / glob metacharacters → no information to act on.
 	if (!/[^/*?[\]]/.test(tail)) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+		return ruleVerdict(
+			"redirectUnresolved",
+			`Redirect target cannot be resolved statically — rule (redirectUnresolved): ${target}`,
+		);
 	}
 	if (tailLooksUserProtected(tail)) {
 		return {
@@ -176,7 +182,7 @@ export function judgeScript(
 	if (!target) {
 		// `source` with no statically resolvable file → conservative; interpreter with
 		// no existing script file → nothing to run → pass.
-		return isSource && !inNaked() ? { kind: "confirm" } : { kind: "pass" };
+		return { kind: "pass" };
 	}
 	if (target.startsWith("$") || target.includes("*") || target.includes("?")) {
 		return judgeUnresolvedScriptTarget(target);
@@ -679,9 +685,9 @@ export function judgeDelete(
 		}
 	}
 
-	// No concrete path (rm "$HOME/.ssh", rm ./* — variable/wildcard, not statically resolvable) → conservative confirm (pass in naked)
+	// No concrete path (variable/wildcard, not statically resolvable) → targetUnresolved.
 	if (pathArgs.length === 0) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
+		return unresolvedTargetVerdict();
 	}
 
 	// All concrete targets are trusted → pass in every mode (trusted-mode protection for those paths)
@@ -732,11 +738,6 @@ export function judgeOverwrite(
 	) {
 		return { kind: "pass" };
 	}
-	// rsync --delete: removes extra files in the target dir → conservative confirm (pass in naked)
-	if (cmdInfo.command === "rsync" && cmdInfo.args.includes("--delete")) {
-		return inNaked() ? { kind: "pass" } : { kind: "confirm" };
-	}
-
 	// Resolve target: -t dir src... form vs the regular form (last operand is the target)
 	let target: string | null = null;
 	let sources: string[] = [];
@@ -774,6 +775,15 @@ export function judgeOverwrite(
 	if (isTrustedPath(real)) return { kind: "pass" };
 
 	const outside = isOutsideCwd(real, realCwd);
+
+	// rsync --delete removes extra files at the destination; use the delete ladder.
+	if (cmdInfo.command === "rsync" && cmdInfo.args.includes("--delete")) {
+		const rule = outside ? "deleteOutside" : "deleteInProject";
+		return ruleVerdict(
+			rule,
+			`rsync --delete removes extra destination files (${rule}): ${target}`,
+		);
+	}
 
 	// Outside overwrite of an existing target → per overwriteOutsideExisting rule
 	const outsideOverwriteVerdict = (): SegmentVerdict =>

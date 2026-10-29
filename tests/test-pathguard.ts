@@ -1092,20 +1092,40 @@ check(
 	"pass",
 );
 
-// ── variable/wildcard paths (not statically resolvable): confirm in any mode (bypass-proof) ──
+// ── variable/wildcard paths follow targetUnresolved (loose confirm, trusted pass) ──
 for (const mode of ["loose", "trusted"]) {
 	await setMode(mode);
+	const expected = mode === "trusted" ? "pass" : "confirm";
 	check(
-		`${mode} rm variable path → confirm`,
+		`${mode} rm variable path → ${expected}`,
 		(await runCmd(`rm "$HOME/.ssh/config"`, PROJ)).verdict,
-		"confirm",
+		expected,
 	);
 	check(
-		`${mode} rm wildcard → confirm`,
+		`${mode} rm wildcard → ${expected}`,
 		(await runCmd(`rm ./*.tmp`, PROJ)).verdict,
-		"confirm",
+		expected,
 	);
 }
+
+// trusted must not bypass the rule matrix through hardcoded confirm branches.
+await setMode("trusted");
+for (const command of [
+	'rm "$TARGET"',
+	'echo x > "$TARGET"',
+	'source "$SCRIPT"',
+	"source",
+	"rsync --delete src/ dest/",
+]) {
+	const result = await runCmd(command, PROJ);
+	check(`trusted ordinary operation passes without prompt: ${command}`, result.verdict, "pass");
+	check(`trusted ordinary operation has zero select calls: ${command}`, result.selectCalls, 0);
+}
+check(
+	"trusted protected delete still blocks",
+	(await runCmd("rm -rf .env", PROJ)).verdict,
+	"block",
+);
 
 // ── truncate existing (split): in-project vs outside ────────
 // truncateInProject: strict/normal confirm, loose/trusted/naked pass
@@ -2647,12 +2667,12 @@ await setMode("strict");
 		"yes",
 	);
 
-	// info-free target (bare variable / bare glob) → stays conservative in trusted
+	// info-free target follows scriptUnresolved, which passes in trusted.
 	await setMode("trusted");
 	check(
-		"bare $VAR trusted → still confirm (no literal info)",
+		"bare $VAR trusted → pass (scriptUnresolved)",
 		(await runCmd('source "$MYKEY"', PROJ)).verdict,
-		"confirm",
+		"pass",
 	);
 	await setMode("normal");
 
@@ -2847,12 +2867,12 @@ await setMode("strict");
 		"yes",
 	);
 
-	// bare $VAR redirect target (no literal tail) → stays conservative in trusted
+	// bare $VAR redirect target follows redirectUnresolved, which passes in trusted.
 	await setMode("trusted");
 	check(
-		"bare $VAR redirect trusted → still confirm (no literal info)",
+		"bare $VAR redirect trusted → pass (redirectUnresolved)",
 		(await runCmd('echo x > "$MYFILE"', PROJ)).verdict,
-		"confirm",
+		"pass",
 	);
 
 	// built-in protected literal tail → hard block (trusted), matching a literal target

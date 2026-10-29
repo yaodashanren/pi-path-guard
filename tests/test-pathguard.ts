@@ -2380,6 +2380,11 @@ check(
 	(await runCmd(`echo x > ${join(TIN, ".env")}`, P2)).verdict,
 	"block",
 );
+check(
+	"sed multi-file protected target still blocks before trusted target",
+	(await runCmd(`sed -i s/x/y/ ${join(TIN, ".env")} ${TFILE}`, P2)).verdict,
+	"block",
+);
 
 // trusted outside path: strict rm outside would block (deleteOutside) → but trusted passes
 await commands["guard"].handler(`paths trusted add ${TOUT}`, {
@@ -3293,6 +3298,32 @@ await setMode("normal");
 		(await runCmd('mv victim.txt "$MD/"', PROJ)).verdict,
 		"confirm",
 	);
+	// Every in-place target is checked, not only the last operand.
+	await setMode("normal");
+	for (const command of [
+		"sed -i s/x/y/ .env README.md",
+		"sed -i -e s/x/y/ .env README.md",
+		"perl -i -pe s/x/y/ .env README.md",
+		"ruby -i -pe s/x/y/ .env README.md",
+	]) {
+		check(
+			`multi-file in-place protected target blocks: ${command}`,
+			(await runCmd(command, PROJ)).verdict,
+			"block",
+		);
+	}
+	check(
+		"in-place expression is not treated as another file",
+		(await runCmd("sed -i s/x/y/ README.md", PROJ)).verdict,
+		"pass",
+	);
+	await runCmd('sed -i s/x/y/ "$F.txt" README.md', PROJ);
+	check(
+		"first unresolved in-place target uses targetUnresolved",
+		selectOptions[0]?.some((o) => o.includes("targetUnresolved")) ? "yes" : "no",
+		"yes",
+	);
+
 	// in-place edit / download share the same rule via unresolvedTargetVerdict
 	await setMode("trusted");
 	check(

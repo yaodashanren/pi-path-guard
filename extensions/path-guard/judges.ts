@@ -15,7 +15,7 @@ import { inNaked, isSessionPassed, isTrustedPath, isUserProtectedPath, pathList,
 	ruleVerdict } from "./rules.ts";
 import { extractCommandSubstitutions, extractHeredocs, extractPathArgs, extractRedirectTargets,
 	hasForceFlag, hasShortFlag, hasLongFlag, isDeleteCommand,
-	isTruncatingOp, lastDestArg, parseCommand, splitSegments, splitShellTokens,
+	isTruncatingOp, parseCommand, splitSegments, splitShellTokens,
 	type CmdInfo } from "./shell-parse.ts";
 
 export /** Verdict for a single segment */
@@ -1058,7 +1058,45 @@ export function judgeTruncate(
 	return { kind: "pass" };
 }
 
-/** In-place edit verdict (sed -i / perl -i / ruby -i): target hits a protected path → block */
+/** Extract file operands, excluding options and the edit expression. */
+function inPlaceTargets(cmdInfo: CmdInfo): string[] {
+	const operands: string[] = [];
+	let skipNext = false;
+	let endFlags = false;
+	let expressionOption = false;
+	for (const arg of cmdInfo.args) {
+		if (skipNext) {
+			skipNext = false;
+			continue;
+		}
+		if (!endFlags && arg === "--") {
+			endFlags = true;
+			continue;
+		}
+		if (!endFlags && arg.startsWith("-")) {
+			if (cmdInfo.command === "sed") {
+				if (arg === "-e" || arg === "--expression") {
+					expressionOption = true;
+					skipNext = true;
+				} else if (arg.startsWith("--expression=")) {
+					expressionOption = true;
+				} else if (arg === "-f" || arg === "--file") {
+					skipNext = true;
+				}
+			} else if (arg === "-e") {
+				expressionOption = true;
+				skipNext = true;
+			}
+			continue;
+		}
+		operands.push(arg);
+	}
+	// sed without -e, and perl/ruby with combined -pe, take the first operand as code.
+	if (!expressionOption) operands.shift();
+	return operands;
+}
+
+/** In-place edit verdict (sed -i / perl -i / ruby -i): every target is checked. */
 export function judgeInPlace(
 	_trimmed: string,
 	cmdInfo: CmdInfo,
@@ -1071,19 +1109,31 @@ export function judgeInPlace(
 	) {
 		return { kind: "pass" };
 	}
-	// sed syntax: sed -i 'script' file — target file is last (multi-file: only the last is checked; conservative enough)
-	const dest = lastDestArg(cmdInfo.args);
-	if (!dest) return { kind: "pass" };
-	if (isUnresolvedTarget(dest)) return unresolvedTargetVerdict();
-	const real = resolveReal(resolve(realCwd, expandHome(dest)));
-	const blocked = protectedVerdict(
-		real,
-		`In-place edit of user-protected path: ${cmdInfo.command} ${dest}`,
-		`In-place edit of protected path: ${cmdInfo.command} ${dest}`,
-	);
-	if (blocked) return blocked;
-	// In-place edit of a trusted path → pass in every mode.
-	if (isTrustedPath(real)) return { kind: "pass" };
+	const blockReasons: string[] = [];
+	const confirmRules = new Set<RuleId>();
+	let confirm = false;
+	for (const dest of inPlaceTargets(cmdInfo)) {
+		if (isUnresolvedTarget(dest)) {
+			const verdict = unresolvedTargetVerdict();
+			if (verdict.kind === "block") blockReasons.push(verdict.reason);
+			else if (verdict.kind === "confirm") {
+				confirm = true;
+				for (const rule of verdict.rules ?? []) confirmRules.add(rule);
+			}
+			continue;
+		}
+		const real = resolveReal(resolve(realCwd, expandHome(dest)));
+		const blocked = protectedVerdict(
+			real,
+			`In-place edit of user-protected path: ${cmdInfo.command} ${dest}`,
+			`In-place edit of protected path: ${cmdInfo.command} ${dest}`,
+		);
+		if (blocked?.kind === "block") blockReasons.push(blocked.reason);
+	}
+	if (blockReasons.length > 0) {
+		return { kind: "block", reason: blockReasons.join("\n") };
+	}
+	if (confirm) return { kind: "confirm", rules: [...confirmRules] };
 	return { kind: "pass" };
 }
 

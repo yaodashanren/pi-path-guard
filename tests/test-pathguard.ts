@@ -41,7 +41,7 @@ const fakePi = {
 };
 
 const mod = await import(EXT);
-import { readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
+import { findProjectConfig, projectEntryPath, readProjectEntry, readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
 const panelMod = await import(
 	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
 );
@@ -3392,6 +3392,53 @@ await setMode("normal");
 	check("unknown rule id produces a warning", warned.ok && warned.warnings.some((w) => w.field === "rules.loose.nopeRule") ? "warn" : "?", "warn");
 	check("unknown rule id does not block other fields", warned.ok && warned.guard?.mode, "loose");
 	check("non-object pathGuard is treated as absent", String(readSettingsFile(join(atomicDir, "np.json")).guard?.mode), "undefined");
+}
+
+
+// ── config storage: project entry files + lookup (Task 3) ────────────
+{
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = "/tmp/pgtest-projects";
+	const PROJECTS = "/tmp/pgtest-projects";
+	rmSync(PROJECTS, { recursive: true, force: true });
+	const repoRoot = "/tmp/pgtest-repo";
+	const repoSub = join(repoRoot, "sub");
+	rmSync(repoRoot, { recursive: true, force: true });
+	mkdirSync(repoSub, { recursive: true });
+
+	check("entry path is a json file with a hash suffix", /^.*-[0-9a-f]{12}\.json$/.test(projectEntryPath(repoRoot)) ? "ok" : projectEntryPath(repoRoot), "ok");
+	check("entry path is stable across calls", projectEntryPath(repoRoot), projectEntryPath(repoRoot));
+	check("different dirs get different entries", projectEntryPath(repoRoot) === projectEntryPath(repoSub) ? "same" : "distinct", "distinct");
+	check("no entry → no lookup", String(findProjectConfig(repoRoot).lookup), "undefined");
+	check("HOME is never a project", String(findProjectConfig(homedir()).lookup), "undefined");
+	const linkPath = "/tmp/pgtest-repo-link";
+	rmSync(linkPath, { force: true });
+	symlinkSync(repoRoot, linkPath);
+	check("projectEntryPath resolves symlinks", projectEntryPath(linkPath), projectEntryPath(repoRoot));
+	check("nonexistent cwd does not throw", String(findProjectConfig("/tmp/pgtest-nope/deep").lookup), "undefined");
+
+	const repoEntry = projectEntryPath(repoRoot);
+	mkdirSync(join(repoEntry, ".."), { recursive: true });
+	writeFileSync(repoEntry, JSON.stringify({ version: 1, project: realpathSync(repoRoot), mode: "strict" }));
+	const exact = findProjectConfig(repoRoot).lookup;
+	check("exact match reported", exact?.matchedVia, "exact");
+	check("exact match returns layer", exact?.layer.mode, "strict");
+	check("exact match reports file", exact?.filePath, repoEntry);
+	check("subdir inherits nearest ancestor entry", findProjectConfig(repoSub).lookup?.layer.mode, "strict");
+	check("ancestor match is labelled", findProjectConfig(repoSub).lookup?.matchedVia, "ancestor");
+	check("ancestor match reports the ancestor root", findProjectConfig(repoSub).lookup?.projectRoot, realpathSync(repoRoot));
+
+	writeFileSync(repoEntry, JSON.stringify({ version: 1, project: "/somewhere/else", mode: "naked" }));
+	check("mismatched project field is ignored", String(findProjectConfig(repoRoot).lookup), "undefined");
+	check("mismatched project field warns", findProjectConfig(repoRoot).warnings.some((w) => w.field === "project") ? "warn" : "?", "warn");
+
+	writeFileSync(repoEntry, "{ broken");
+	check("corrupt entry is skipped", String(findProjectConfig(repoRoot).lookup), "undefined");
+	check("corrupt entry warning names the file", findProjectConfig(repoRoot).warnings.some((w) => w.path === repoEntry) ? "warn" : "?", "warn");
+	check("corrupt entry reported by readProjectEntry as json", readProjectEntry(repoEntry).ok === false ? "json" : "?", "json");
+
+	rmSync(repoRoot, { recursive: true, force: true });
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
 }
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

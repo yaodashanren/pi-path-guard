@@ -5,6 +5,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, normalize, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { HOME, CONFIG_DIR } from "./constants.ts";
+import type {
+	ExtensionUIContext,
+	ToolCallEventResult,
+} from "@earendil-works/pi-coding-agent";
+import type { SegmentVerdict } from "./judges.ts";
 import { tagged } from "./escape.ts";
 import { expandHome, isOutsideCwd, matchesProtectedPath, resolveReal } from "./paths.ts";
 import { readSettingsFile, writeFileAtomic } from "./store.ts";

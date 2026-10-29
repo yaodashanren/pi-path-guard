@@ -912,9 +912,9 @@ export class GuardPanel implements Component, Focusable {
 			if (matchesKey(data, "up")) s.scroll = Math.max(0, s.scroll - 1);
 			else if (matchesKey(data, "down"))
 				s.scroll = Math.min(maxScroll, s.scroll + 1);
-			else if (matchesKey(data, "pageup") || matchesKey(data, "ctrl+u"))
+			else if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u"))
 				s.scroll = Math.max(0, s.scroll - 10);
-			else if (matchesKey(data, "pagedown") || matchesKey(data, "ctrl+d"))
+			else if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d"))
 				s.scroll = Math.min(maxScroll, s.scroll + 10);
 			else if (matchesKey(data, "home")) s.scroll = 0;
 			else if (matchesKey(data, "end")) s.scroll = maxScroll;

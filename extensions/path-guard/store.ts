@@ -23,6 +23,7 @@ import type {
 	LayerRead,
 	PathGuardLayer,
 	ProjectLookup,
+	ProjectLookupResult,
 	RuleId,
 	RuleLevel,
 	SettingsRead,
@@ -203,4 +204,108 @@ export function readSettingsFile(filePath: string | undefined): SettingsRead {
 	}
 	const { layer, warnings } = validateLayer(guard, filePath, "global");
 	return { ok: true, guard: layer, warnings };
+}
+
+/** Entry file for a project: readable slug + sha256 prefix, so two projects never collide. */
+export function projectEntryPath(projectRoot: string): string {
+	const real = resolveReal(projectRoot);
+	const slug =
+		real
+			.replace(/^[\\/]+/, "")
+			.replace(/[^A-Za-z0-9._-]/g, "-")
+			.slice(0, 60) || "root";
+	const hash = createHash("sha256").update(real).digest("hex").slice(0, 12);
+	return join(projectsDir(), `${slug}-${hash}.json`);
+}
+
+/** Read one project entry file. Never throws. */
+export function readProjectEntry(filePath: string): LayerRead {
+	let text: string;
+	try {
+		text = readFileSync(filePath, "utf8");
+	} catch (e) {
+		return { ok: false, reason: "io", path: filePath, message: errorText(e) };
+	}
+	let data: unknown;
+	try {
+		data = JSON.parse(text);
+	} catch (e) {
+		return { ok: false, reason: "json", path: filePath, message: errorText(e) };
+	}
+	if (!data || typeof data !== "object") {
+		return {
+			ok: false,
+			reason: "mismatch",
+			path: filePath,
+			message: "entry is not a JSON object",
+		};
+	}
+	const body = data as Record<string, unknown>;
+	const project = body.project;
+	if (typeof project !== "string" || project.trim() === "") {
+		return {
+			ok: false,
+			reason: "mismatch",
+			path: filePath,
+			message: "entry has no project path — cannot tell which project it belongs to",
+		};
+	}
+	const { layer, warnings } = validateLayer(body, filePath, "project");
+	if (body.version !== undefined && body.version !== 1) {
+		warnings.push({
+			path: filePath,
+			field: "version",
+			message: `unknown entry version ${JSON.stringify(body.version)} (this build writes 1)`,
+		});
+	}
+	return { ok: true, layer, project, warnings };
+}
+
+/**
+ * Find the project config that applies to `cwd`: exact match first, then the
+ * nearest ancestor entry (mirrors pi's "closest decision applies" trust rule).
+ * HOME itself is never a project, and the walk stops at HOME.
+ *
+ * A mismatched or unreadable entry stops the walk: a parent entry must not take
+ * over the config of a project that has its own (broken) entry.
+ */
+export function findProjectConfig(cwd: string | undefined): ProjectLookupResult {
+	if (!cwd) return { warnings: [] };
+	const real = resolveReal(cwd);
+	const homeReal = resolveReal(HOME);
+	if (real === homeReal) return { warnings: [] };
+	const warnings: ConfigWarning[] = [];
+	let dir = real;
+	for (;;) {
+		const filePath = projectEntryPath(dir);
+		if (existsSync(filePath)) {
+			const read = readProjectEntry(filePath);
+			if (!read.ok) {
+				warnings.push({ path: filePath, message: read.message });
+				return { warnings };
+			}
+			if (resolveReal(read.project) !== resolveReal(dir)) {
+				warnings.push({
+					path: filePath,
+					field: "project",
+					message: `entry says it belongs to ${read.project}, not ${dir} — ignored`,
+				});
+				return { warnings };
+			}
+			return {
+				lookup: {
+					filePath,
+					projectRoot: dir,
+					matchedVia: dir === real ? "exact" : "ancestor",
+					layer: read.layer,
+					warnings: read.warnings,
+				},
+				warnings: [...warnings, ...read.warnings],
+			};
+		}
+		const parent = dirname(dir);
+		if (parent === dir || dir === homeReal || parent === homeReal) break;
+		dir = parent;
+	}
+	return { warnings };
 }

@@ -1,13 +1,14 @@
 // path-guard — verdict judges: per-command-class judge* functions, segment
 // classification, pipe-to-shell scanning, and the judgeWriters pipeline.
 
-import { join, normalize, resolve, sep } from "node:path";
+import { basename, join, normalize, resolve, sep } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import {
 	BLOCK_DANGEROUS_PATTERNS, CONFIRM_DANGEROUS_PATTERNS, DELETE_COMMANDS, DEVICE_TARGETS,
 	HOME, INPLACE_EDITORS, OVERWRITE_COMMANDS, PIPE_TO_SHELL_SOURCES, SHELL_INTERPRETERS,
 	SHELL_WRAPPERS,
 } from "./constants.ts";
+import type { RuleId } from "./schema.ts";
 import { escapeCatOf, tagged, type EscapeCat } from "./escape.ts";
 import { expandHome, isDirectory, isOutsideCwd, isUnresolvedTarget, isRemoteTarget,
 	matchesProtectedPath, resolveReal } from "./paths.ts";

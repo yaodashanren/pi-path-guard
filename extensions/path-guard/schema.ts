@@ -296,3 +296,23 @@ export interface ConfigWarning {
 export type SettingsRead =
 	| { ok: true; guard: PathGuardLayer | undefined; warnings: ConfigWarning[] }
 	| { ok: false; reason: "json" | "io"; path: string; message: string };
+
+/** Result of reading one project entry file. */
+export type LayerRead =
+	| { ok: true; layer: PathGuardLayer; project: string; warnings: ConfigWarning[] }
+	| { ok: false; reason: "json" | "io" | "mismatch"; path: string; message: string };
+
+/** The project config that applies to a working directory. */
+export interface ProjectLookup {
+	filePath: string;
+	projectRoot: string;
+	matchedVia: "exact" | "ancestor";
+	layer: PathGuardLayer;
+	warnings: ConfigWarning[];
+}
+
+/** Lookup result: the match (if any) plus problems met while searching. */
+export interface ProjectLookupResult {
+	lookup?: ProjectLookup;
+	warnings: ConfigWarning[];
+}

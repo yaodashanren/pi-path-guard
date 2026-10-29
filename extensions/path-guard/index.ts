@@ -1,4 +1,9 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	BashToolInput,
+	EditToolInput,
+	ExtensionAPI,
+	WriteToolInput,
+} from "@earendil-works/pi-coding-agent";
 import { applyConfig, clearSessionPass, getConfig, readSavedConfig, getMode, isGuardMode, persistConfig, persistNote, setMode } from "./rules.ts";
 import { GUARD_MAIN_MENU, confirmModeSwitch, handlePathsCommand, runGuardPanel, runModePicker, runPathsMenu, runRulesMenu } from "./panel.ts";
 import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";

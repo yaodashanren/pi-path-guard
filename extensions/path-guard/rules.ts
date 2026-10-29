@@ -12,10 +12,17 @@ import type {
 import type { SegmentVerdict } from "./judges.ts";
 import { tagged } from "./escape.ts";
 import { expandHome, isOutsideCwd, matchesProtectedPath, resolveReal } from "./paths.ts";
-import { readSettingsFile, writeFileAtomic } from "./store.ts";
+import { findProjectConfig, mergeLayers, readSettingsFile, writeFileAtomic } from "./store.ts";
 
 
-import type { ConfigWarning, GuardMode, PathGuardLayer, RuleId, RuleLevel } from "./schema.ts";
+import type {
+	ConfigWarning,
+	GuardMode,
+	PathGuardLayer,
+	ProjectLookup,
+	RuleId,
+	RuleLevel,
+} from "./schema.ts";
 import { DEFAULT_MODES, GUARD_MODES, RULE_IDS, isGuardMode, isRuleLevel } from "./schema.ts";
 
 // Re-export the schema so every existing importer keeps working unchanged.
@@ -58,11 +65,11 @@ export const inNaked = () => currentMode === "naked";
  * User-configured protected paths (pathGuard.extraProtected). Unlike built-in
  * protected paths, these are enforced in EVERY mode — including naked.
  */
-let extraProtected: string[] = [];
+
 
 /** Match a resolved absolute path against a user-configured protected entry. */
 export function isUserProtectedPath(absolutePath: string): boolean {
-	for (const entry of extraProtected) {
+	for (const entry of config.extraProtected) {
 		const e = normalize(resolveReal(entry));
 		if (absolutePath === e) return true;
 		if (absolutePath.startsWith(e + sep)) return true;
@@ -94,19 +101,24 @@ export function normalizeProtectedEntry(
  * prompting. Protection always outranks trust: a trusted path can never be a
  * protected path (built-in system path or user-protected path), so those stay blocked.
  */
-let trustedPaths: string[] = [];
+
 
 /** Path category selector used by both the CLI and interactive /guard paths UIs. */
 export type PathKind = "protected" | "trusted";
 
 /** The live entry list for a path category. */
 export function pathList(kind: PathKind): string[] {
-	return kind === "trusted" ? trustedPaths : extraProtected;
+	return kind === "trusted" ? config.trustedPaths : config.extraProtected;
+}
+
+/** Effective path entries with provenance (which layer/file supplied each path). */
+export function pathEntries(kind: PathKind): ScopedPathEntry[] {
+	return [...scopedPaths[kind]];
 }
 
 /** Whether a path is a user-configured trusted entry (or under one). */
 export function isTrustedPath(absolutePath: string): boolean {
-	for (const entry of trustedPaths) {
+	for (const entry of config.trustedPaths) {
 		const e = normalize(resolveReal(entry));
 		if (absolutePath === e) return true;
 		if (absolutePath.startsWith(e + sep)) return true;
@@ -193,6 +205,48 @@ export interface PathGuardConfig {
 	rules: Partial<Record<GuardMode, Partial<Record<RuleId, RuleLevel>>>>;
 }
 
+/** Which layer a config value came from. */
+export type PathLayerName = "global" | "project" | "authored";
+
+/** One configured path plus its provenance (which layer/file supplied it). */
+export interface ScopedPathEntry {
+	raw: string;
+	normalized: string;
+	layer: PathLayerName;
+	file: string;
+}
+
+/** A hand-authored `cwd/.pi/settings.json` pathGuard block (read-only compat layer). */
+export interface AuthoredLayer {
+	layer: PathGuardLayer;
+	file: string;
+	root: string;
+}
+
+/** Everything read at session_start: the raw layers, their provenance, and problems. */
+export interface LoadedConfig {
+	global: PathGuardLayer;
+	project?: ProjectLookup;
+	authored?: AuthoredLayer;
+	warnings: ConfigWarning[];
+}
+
+/** Raw layers as stored on disk. The effective config is derived from these. */
+let layers: {
+	global: PathGuardLayer;
+	project?: PathGuardLayer;
+	authored?: AuthoredLayer;
+	projectRoot?: string;
+	projectFile?: string;
+	matchedVia?: "exact" | "ancestor";
+} = { global: {} };
+
+/** Effective path entries with provenance (drives pathEntries). */
+let scopedPaths: { protected: ScopedPathEntry[]; trusted: ScopedPathEntry[] } = {
+	protected: [],
+	trusted: [],
+};
+
 let config: PathGuardConfig = {
 	mode: "normal",
 	extraProtected: [],
@@ -270,23 +324,23 @@ export function readSettingsGuard(
 export function readSavedConfig(
 	cwd: string | undefined,
 	trusted: boolean,
-): PathGuardConfig {
+): LoadedConfig {
+	configWarnings = [];
 	const global = readSettingsGuard(globalSettingsPath()) ?? {};
-	const project =
-		trusted && !isHomeCwd(cwd)
-			? (readSettingsGuard(projectSettingsPath(cwd)) ?? {})
-			: {};
-	const mode = project.mode ?? global.mode ?? "normal";
-	const extraProtected = [
-		...(global.extraProtected ?? []),
-		...(project.extraProtected ?? []),
-	].map((e) => normalizeProtectedEntry(e, cwd));
-	const trustedPaths = [
-		...(global.trustedPaths ?? []),
-		...(project.trustedPaths ?? []),
-	].map((e) => normalizeProtectedEntry(e, cwd));
-	const rules = { ...global.rules, ...project.rules };
-	return { mode, extraProtected, trustedPaths, rules };
+	const found = findProjectConfig(cwd);
+	configWarnings.push(...found.warnings);
+	let authored: AuthoredLayer | undefined;
+	if (trusted && cwd && !isHomeCwd(cwd)) {
+		const file = projectSettingsPath(cwd) as string;
+		const read = readSettingsFile(file);
+		if (!read.ok) {
+			configWarnings.push({ path: read.path, message: read.message });
+		} else if (read.guard) {
+			configWarnings.push(...read.warnings);
+			authored = { layer: read.guard, file, root: resolveReal(cwd) };
+		}
+	}
+	return { global, project: found.lookup, authored, warnings: [...configWarnings] };
 }
 
 /**
@@ -311,13 +365,13 @@ export function persistConfig(cwd: string | undefined): string {
 		}
 		const guard = (data.pathGuard as Record<string, unknown>) ?? {};
 		guard.mode = config.mode;
-		if (extraProtected.length > 0) {
-			guard.extraProtected = extraProtected;
+		if (config.extraProtected.length > 0) {
+			guard.extraProtected = config.extraProtected;
 		} else {
 			delete guard.extraProtected;
 		}
-		if (trustedPaths.length > 0) {
-			guard.trustedPaths = trustedPaths;
+		if (config.trustedPaths.length > 0) {
+			guard.trustedPaths = config.trustedPaths;
 		} else {
 			delete guard.trustedPaths;
 		}
@@ -345,10 +399,86 @@ export function persistNote(where: string): string {
 }
 
 /** Apply a loaded/saved config wholesale (session_start restore). */
-export function applyConfig(saved: PathGuardConfig): void {
-	config = saved;
-	extraProtected = saved.extraProtected;
-	trustedPaths = saved.trustedPaths;
+export function applyConfig(loaded: LoadedConfig): void {
+	layers = {
+		global: loaded.global,
+		project: loaded.project?.layer,
+		authored: loaded.authored,
+		projectRoot: loaded.project?.projectRoot,
+		projectFile: loaded.project?.filePath,
+		matchedVia: loaded.project?.matchedVia,
+	};
+	configWarnings = [...loaded.warnings];
+	rebuildEffective();
+}
+
+/** The layers currently in effect, with provenance (for diagnostics/UI). */
+export function getLayers(): {
+	global: PathGuardLayer;
+	project?: PathGuardLayer;
+	authored?: AuthoredLayer;
+	projectRoot?: string;
+	projectFile?: string;
+	matchedVia?: "exact" | "ancestor";
+} {
+	return { ...layers };
+}
+
+function describePaths(
+	layer: PathGuardLayer | undefined,
+	name: PathLayerName,
+	file: string,
+	base: string,
+	kind: PathKind,
+): ScopedPathEntry[] {
+	const raw =
+		(kind === "trusted" ? layer?.trustedPaths : layer?.extraProtected) ?? [];
+	return raw.map((entry) => ({
+		raw: entry,
+		normalized: normalizeProtectedEntry(entry, base),
+		layer: name,
+		file,
+	}));
+}
+
+/** First occurrence of a normalized path wins; later layers cannot duplicate it. */
+function dedupeEntries(entries: ScopedPathEntry[]): ScopedPathEntry[] {
+	const seen = new Set<string>();
+	const out: ScopedPathEntry[] = [];
+	for (const entry of entries) {
+		if (seen.has(entry.normalized)) continue;
+		seen.add(entry.normalized);
+		out.push(entry);
+	}
+	return out;
+}
+
+/** Recompute the effective config from the layered state. */
+function rebuildEffective(): void {
+	// A hand-authored project block only applies when no projects entry matched.
+	const overlay = layers.project ?? layers.authored?.layer;
+	const overlayName: PathLayerName = layers.project ? "project" : "authored";
+	const overlayFile = layers.project
+		? (layers.projectFile ?? "")
+		: (layers.authored?.file ?? "");
+	const overlayBase = layers.project
+		? (layers.projectRoot ?? HOME)
+		: (layers.authored?.root ?? HOME);
+	const merged = mergeLayers(layers.global, overlay);
+	const build = (kind: PathKind): ScopedPathEntry[] =>
+		dedupeEntries([
+			...describePaths(layers.global, "global", globalSettingsPath(), HOME, kind),
+			...(overlay
+				? describePaths(overlay, overlayName, overlayFile, overlayBase, kind)
+				: []),
+		]);
+	scopedPaths = { protected: build("protected"), trusted: build("trusted") };
+	config = {
+		mode: merged.mode ?? "normal",
+		extraProtected: scopedPaths.protected.map((e) => e.normalized),
+		trustedPaths: scopedPaths.trusted.map((e) => e.normalized),
+		rules: merged.rules ?? {},
+	};
 }
 
 /** Live config accessor (rule overrides / mode are mutated in place). */

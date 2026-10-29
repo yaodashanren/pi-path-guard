@@ -41,7 +41,15 @@ const fakePi = {
 };
 
 const mod = await import(EXT);
-import { findProjectConfig, projectEntryPath, readProjectEntry, readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
+import { findProjectConfig, mergeLayers, projectEntryPath, readProjectEntry, readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
+import {
+	applyConfig,
+	getConfig,
+	getLayers,
+	pathEntries,
+	pathList,
+	readSavedConfig,
+} from "../extensions/path-guard/rules.ts";
 const panelMod = await import(
 	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
 );
@@ -3439,6 +3447,66 @@ await setMode("normal");
 
 	rmSync(repoRoot, { recursive: true, force: true });
 	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+}
+
+
+// ── config layering: deep merge + provenance (Task 4) ────────────────
+{
+	const merged = mergeLayers(
+		{ mode: "normal", rules: { loose: { deleteInProject: "confirm", writeInProject: "pass" } } },
+		{ mode: "strict", rules: { loose: { writeInProject: "block" } } },
+	);
+	check("project mode wins", merged.mode, "strict");
+	check("deep-merged sibling rule kept", merged.rules?.loose?.deleteInProject, "confirm");
+	check("deep-merged overridden rule applied", merged.rules?.loose?.writeInProject, "block");
+	check("other modes are not invented", Object.keys(merged.rules ?? {}).join(","), "loose");
+	check("mergeLayers(undefined, undefined) yields no keys", String(Object.keys(mergeLayers(undefined, undefined)).length), "0");
+
+	const prevGlobalEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	const prevProjectsEnv2 = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	const GLOBAL_CFG = "/tmp/pgtest-layers-global.json";
+	rmSync(GLOBAL_CFG, { force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = GLOBAL_CFG;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = "/tmp/pgtest-layers-projects";
+	rmSync("/tmp/pgtest-layers-projects", { recursive: true, force: true });
+	writeFileSync(GLOBAL_CFG, JSON.stringify({ pathGuard: { mode: "normal", extraProtected: ["/tmp/pg-secrets"] } }));
+	const layerRepo = "/tmp/pgtest-layers-repo";
+	rmSync(layerRepo, { recursive: true, force: true });
+	mkdirSync(layerRepo, { recursive: true });
+	const layerEntry = projectEntryPath(layerRepo);
+	mkdirSync(join(layerEntry, ".."), { recursive: true });
+	writeFileSync(layerEntry, JSON.stringify({ version: 1, project: realpathSync(layerRepo), extraProtected: ["/tmp/proj-secrets"] }));
+
+	applyConfig({ global: { mode: "normal", extraProtected: ["/tmp/pg-secrets"] }, project: findProjectConfig(layerRepo).lookup, warnings: [] });
+	const entries = pathEntries("protected");
+	check("effective protected paths are the union", entries.map((e) => e.normalized).sort().join(","), ["/tmp/pg-secrets", "/tmp/proj-secrets"].sort().join(","));
+	check("global entry tagged global", entries.find((e) => e.normalized === "/tmp/pg-secrets")?.layer, "global");
+	check("project entry tagged project", entries.find((e) => e.normalized === "/tmp/proj-secrets")?.layer, "project");
+	check("provenance names the entry file", entries.find((e) => e.normalized === "/tmp/proj-secrets")?.file, layerEntry);
+	check("pathList still returns plain strings", String(pathList("protected").every((p) => typeof p === "string")), "true");
+	check("effective mode comes from the global layer", getConfig().mode, "normal");
+	check("getLayers exposes the project root", getLayers().projectRoot, realpathSync(layerRepo));
+
+	// hand-authored .pi/settings.json is the fallback layer when no entry matched
+	const authoredLayerRepo = "/tmp/pgtest-authored-layer";
+	rmSync(authoredLayerRepo, { recursive: true, force: true });
+	mkdirSync(join(authoredLayerRepo, ".pi"), { recursive: true });
+	writeFileSync(join(authoredLayerRepo, ".pi", "settings.json"), JSON.stringify({ pathGuard: { mode: "strict" } }));
+	applyConfig(readSavedConfig(authoredLayerRepo, true));
+	check("authored block applies when no project entry exists", getConfig().mode, "strict");
+	applyConfig(readSavedConfig(authoredLayerRepo, false));
+	check("authored block ignored when untrusted", getConfig().mode, "normal");
+
+	// entry wins over the authored block
+	mkdirSync(join(projectEntryPath(authoredLayerRepo), ".."), { recursive: true });
+	writeFileSync(projectEntryPath(authoredLayerRepo), JSON.stringify({ version: 1, project: realpathSync(authoredLayerRepo), mode: "loose" }));
+	applyConfig(readSavedConfig(authoredLayerRepo, true));
+	check("project entry outranks the authored block", getConfig().mode, "loose");
+
+	rmSync(layerRepo, { recursive: true, force: true });
+	rmSync(authoredLayerRepo, { recursive: true, force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv2;
 }
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

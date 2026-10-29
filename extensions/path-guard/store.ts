@@ -309,3 +309,37 @@ export function findProjectConfig(cwd: string | undefined): ProjectLookupResult 
 	}
 	return { warnings };
 }
+
+/**
+ * Merge a project layer over the global layer. Rules merge by mode AND rule, so
+ * a project that tunes one rule does not drop the global overrides of the same
+ * mode. Lists are concatenated (dedupe/normalization happen in rules.ts).
+ */
+export function mergeLayers(
+	global: PathGuardLayer | undefined,
+	project: PathGuardLayer | undefined,
+): PathGuardLayer {
+	const out: PathGuardLayer = {};
+	const mode = project?.mode ?? global?.mode;
+	if (mode !== undefined) out.mode = mode;
+	const extraProtected = [
+		...(global?.extraProtected ?? []),
+		...(project?.extraProtected ?? []),
+	];
+	if (extraProtected.length > 0) out.extraProtected = extraProtected;
+	const trustedPaths = [
+		...(global?.trustedPaths ?? []),
+		...(project?.trustedPaths ?? []),
+	];
+	if (trustedPaths.length > 0) out.trustedPaths = trustedPaths;
+	const rules: NonNullable<PathGuardLayer["rules"]> = {};
+	for (const layer of [global, project]) {
+		for (const [modeKey, overrides] of Object.entries(layer?.rules ?? {})) {
+			if (!overrides) continue;
+			const existing = (rules[modeKey as GuardMode] ??= {});
+			Object.assign(existing, overrides);
+		}
+	}
+	if (Object.keys(rules).length > 0) out.rules = rules;
+	return out;
+}

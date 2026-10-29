@@ -23,16 +23,16 @@ export default function (pi: ExtensionAPI) {
 		const cfg = readSavedConfig(ctx.cwd, ctx.isProjectTrusted?.() === true);
 		applyConfig(cfg);
 		clearSessionPass();
-		setMode(cfg.mode, ctx.ui);
+		setMode(getConfig().mode, ctx.ui);
 		// A persisted loose mode survives into every new session; surface it so the
 		// user never runs unprotected without noticing (naked in particular).
-		if (cfg.mode === "naked") {
+		if (getConfig().mode === "naked") {
 			ctx.ui.notify(
 				"⚠️ Path Guard restored in NAKED mode — nearly all protection is OFF " +
 					"(persisted from a previous session). Use /guard normal to re-enable.",
 				"warning",
 			);
-		} else if (cfg.mode === "trusted") {
+		} else if (getConfig().mode === "trusted") {
 			ctx.ui.notify(
 				"⚠️ Path Guard restored in trusted mode (persisted from a previous session): " +
 					"in-project deletes and outside overwrites are no longer prompted. " +

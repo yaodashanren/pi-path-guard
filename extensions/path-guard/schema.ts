@@ -316,3 +316,12 @@ export interface ProjectLookupResult {
 	lookup?: ProjectLookup;
 	warnings: ConfigWarning[];
 }
+
+/** Which config layer an edit is written to. */
+export type ConfigScope = "global" | "project";
+
+/** Result of a persist attempt: the layer written and, when known, the file. */
+export interface PersistWhere {
+	kind: "global" | "project" | "none";
+	file?: string;
+}

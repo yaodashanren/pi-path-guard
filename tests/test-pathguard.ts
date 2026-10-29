@@ -43,12 +43,20 @@ const fakePi = {
 const mod = await import(EXT);
 import { findProjectConfig, mergeLayers, projectEntryPath, readProjectEntry, readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
 import {
+	addPathIn,
 	applyConfig,
+	clearPathsIn,
 	getConfig,
 	getLayers,
+	getWriteScope,
 	pathEntries,
 	pathList,
+	persistNote,
 	readSavedConfig,
+	removePathIn,
+	setModeIn,
+	setRuleIn,
+	setWriteScope,
 } from "../extensions/path-guard/rules.ts";
 const panelMod = await import(
 	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
@@ -1881,7 +1889,7 @@ await commands["guard"].handler("loose", {
 process.env.PI_PATH_GUARD_SETTINGS = prevSettingsPath;
 check(
 	"persist failure reports reason (#12c)",
-	persistFailNotify.join(" ").includes("could not write global settings")
+	persistFailNotify.join(" ").includes("could not write")
 		? "reason"
 		: "?",
 	"reason",
@@ -3507,6 +3515,90 @@ await setMode("normal");
 	rmSync(authoredLayerRepo, { recursive: true, force: true });
 	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
 	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv2;
+}
+
+
+// ── config writes: one layer only (Task 5, fixes the inherit-freeze bug) ──
+{
+	const FREEZE_DIR = "/tmp/pgtest-freeze";
+	const freezeGlobal = join(FREEZE_DIR, "global.json");
+	rmSync(FREEZE_DIR, { recursive: true, force: true });
+	mkdirSync(FREEZE_DIR, { recursive: true });
+	const prevGlobalEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	process.env.PI_PATH_GUARD_SETTINGS = freezeGlobal;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(FREEZE_DIR, "projects");
+	writeFileSync(freezeGlobal, JSON.stringify({ other: { keep: true }, pathGuard: { mode: "normal" } }, null, 2));
+	const freezeRepo = "/tmp/pgtest-freeze-repo";
+	rmSync(freezeRepo, { recursive: true, force: true });
+	mkdirSync(freezeRepo, { recursive: true });
+	const freezeEntry = projectEntryPath(freezeRepo);
+	mkdirSync(join(freezeEntry, ".."), { recursive: true });
+	writeFileSync(freezeEntry, JSON.stringify({ version: 1, project: realpathSync(freezeRepo), mode: "strict" }));
+	applyConfig({ global: { mode: "normal" }, project: findProjectConfig(freezeRepo).lookup, warnings: [] });
+	check("effective mode inherits project strict", getConfig().mode, "strict");
+
+	// A. a global edit must not freeze the inherited project mode
+	setWriteScope("global");
+	const addRes = addPathIn("global", "protected", "/tmp/frozen-secrets", freezeRepo);
+	check("global add reports the global target", addRes.where.kind, "global");
+	const frozenOnDisk = JSON.parse(readFileSync(freezeGlobal, "utf8"));
+	check("global write does NOT freeze the inherited project mode", frozenOnDisk.pathGuard.mode, "normal");
+	check("global write keeps sibling pi settings", String(frozenOnDisk.other.keep), "true");
+	check("global write recorded the new path", frozenOnDisk.pathGuard.extraProtected.join(","), "/tmp/frozen-secrets");
+	check("project entry untouched by the global write", JSON.parse(readFileSync(freezeEntry, "utf8")).mode, "strict");
+
+	// B. a project edit only touches the entry file
+	const projRes = setModeIn("project", "loose", freezeRepo);
+	check("project write targets the entry file", projRes.kind === "project" && projRes.file === freezeEntry ? "project" : "?", "project");
+	check("project write updated the file", JSON.parse(readFileSync(freezeEntry, "utf8")).mode, "loose");
+	check("project write left the global mode alone", JSON.parse(readFileSync(freezeGlobal, "utf8")).pathGuard.mode, "normal");
+	check("project write note names the entry file", persistNote(projRes).includes(freezeEntry) ? "path" : "?", "path");
+
+	// C. no matching entry → project writes refuse instead of creating a file
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(FREEZE_DIR, "empty-projects");
+	const emptyRepo = "/tmp/pgtest-freeze-empty";
+	rmSync(emptyRepo, { recursive: true, force: true });
+	mkdirSync(emptyRepo, { recursive: true });
+	applyConfig({ global: { mode: "normal" }, warnings: [] });
+	const refused = setModeIn("project", "loose", emptyRepo);
+	check("project write with no entry refuses", refused.kind, "none");
+	check("refusal does not create a file", String(existsSync(join(FREEZE_DIR, "empty-projects"))), "false");
+	check("refusal explains how to create one", persistNote(refused).includes("no project config") ? "explains" : "?", "explains");
+
+	// D. inherited entries cannot be removed from the project layer
+	process.env.PI_PATH_GUARD_SETTINGS = freezeGlobal;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(FREEZE_DIR, "projects");
+	applyConfig({ global: { mode: "normal", extraProtected: ["/tmp/inherited/a"] }, project: findProjectConfig(freezeRepo).lookup, warnings: [] });
+	const globalBytesBeforeRm = readFileSync(freezeGlobal, "utf8");
+	const inheritedRm = removePathIn("project", "protected", "/tmp/inherited/a", freezeRepo);
+	check("removing an inherited entry errors", inheritedRm.error?.includes("inherited") ? "err" : "?", "err");
+	check("inherited entry is still effective", String(pathList("protected").includes("/tmp/inherited/a")), "true");
+	check("failed inherited removal did not rewrite the global file", readFileSync(freezeGlobal, "utf8"), globalBytesBeforeRm);
+
+	// E. a failed write leaves the previous file byte-identical
+	const beforeFail = readFileSync(freezeGlobal, "utf8");
+	const prevBad = process.env.PI_PATH_GUARD_SETTINGS;
+	process.env.PI_PATH_GUARD_SETTINGS = "/tmp/pgtest-missing-dir-xyz/settings.json";
+	const failRes = setModeIn("global", "naked", freezeRepo);
+	process.env.PI_PATH_GUARD_SETTINGS = prevBad;
+	check("failed persist reports none", failRes.kind, "none");
+	check("failed persist note names the target path", persistNote(failRes).includes("settings.json") ? "path" : "?", "path");
+	check("failed persist left the previous file untouched", readFileSync(freezeGlobal, "utf8"), beforeFail);
+
+	// F. rules edits go to the chosen layer only, and deep-merge on read
+	setWriteScope("global");
+	setRuleIn("global", "loose", "deleteInProject", "confirm", freezeRepo);
+	applyConfig(readSavedConfig(freezeRepo, true));
+	check("rule override reaches the effective matrix", getConfig().rules.loose?.deleteInProject, "confirm");
+	check("global rule override did not touch the entry file", String(JSON.parse(readFileSync(freezeEntry, "utf8")).rules), "undefined");
+	check("write scope is session state, default global", getWriteScope(), "global");
+
+	rmSync(freezeRepo, { recursive: true, force: true });
+	rmSync(emptyRepo, { recursive: true, force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+	setWriteScope("global");
 }
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

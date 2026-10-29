@@ -4,7 +4,7 @@ import type {
 	ExtensionAPI,
 	WriteToolInput,
 } from "@earendil-works/pi-coding-agent";
-import { applyConfig, clearSessionPass, getConfig, readSavedConfig, getMode, isGuardMode, persistConfig, persistNote, setMode } from "./rules.ts";
+import { applyConfig, clearSessionPass, getWriteScope, getConfig, readSavedConfig, getMode, isGuardMode, persistNote, setMode, setModeIn } from "./rules.ts";
 import { GUARD_MAIN_MENU, confirmModeSwitch, handlePathsCommand, runGuardPanel, runModePicker, runPathsMenu, runRulesMenu } from "./panel.ts";
 import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";
 
@@ -64,14 +64,13 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
-				getConfig().mode = m;
-				setMode(m, ctx.ui);
-				const where = persistConfig(ctx.cwd);
-				ctx.ui.notify(
-					`Path Guard switched to: ${m} (${persistNote(where)})`,
-					"info",
-				);
-				return;
+				const where = setModeIn(getWriteScope(), m, ctx.cwd);
+			setMode(getConfig().mode, ctx.ui);
+			ctx.ui.notify(
+				`Path Guard switched to: ${m} (${persistNote(where)})`,
+				"info",
+			);
+			return;
 			}
 
 			// No UI → cannot interact; just show the current mode

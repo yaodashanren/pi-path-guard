@@ -2,16 +2,19 @@ import type { Component, Focusable } from "@earendil-works/pi-tui";
 import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, TRUSTED_SWITCH_WARNING, TRUST_PATH_WARNING } from "./constants.ts";
-import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, clearSessionPass, getConfig, getMode, isGuardMode, isRuleLevel, normalizeProtectedEntry, pathList, persistConfig, persistNote, rlFor, sessionPassList, setMode, untrustableReason, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
+import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, getConfig, getMode, getWriteScope, isGuardMode, isRuleLevel, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
 
 // path-guard — /guard interactive UI: chained menus, actions, rules matrix,
 // the single self-contained overlay panel, and warning confirmations.
 
 /** Switch the active mode: update config, refresh the footer, persist. Confirm first. */
-export function actionSwitchMode(mode: GuardMode, ctx: ExtensionCommandContext): string {
-	getConfig().mode = mode;
-	setMode(mode, ctx.ui);
-	const where = persistConfig(ctx.cwd);
+export function actionSwitchMode(
+	mode: GuardMode,
+	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
+): string {
+	const where = setModeIn(scope, mode, ctx.cwd);
+	setMode(getConfig().mode, ctx.ui);
 	return `Path Guard switched to: ${mode} (${persistNote(where)})`;
 }
 
@@ -21,10 +24,9 @@ export function actionSetRule(
 	rule: RuleId,
 	level: RuleLevel,
 	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
 ): string {
-	(getConfig().rules[mode] ??= {})[rule] = level;
-	clearSessionPass(mode);
-	const where = persistConfig(ctx.cwd);
+	const where = setRuleIn(scope, mode, rule, level, ctx.cwd);
 	return `Path Guard: set ${mode}.${rule} = ${level} (${persistNote(where)})`;
 }
 
@@ -33,26 +35,28 @@ export function actionResetRule(
 	mode: GuardMode,
 	rule: RuleId,
 	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
 ): string {
-	if (getConfig().rules[mode]) delete getConfig().rules[mode]![rule];
-	clearSessionPass(mode);
-	const where = persistConfig(ctx.cwd);
+	const where = setRuleIn(scope, mode, rule, "default", ctx.cwd);
 	return `Path Guard: ${mode}.${rule} back to default ${DEFAULT_MODES[mode][rule]} (${persistNote(where)})`;
 }
 
 /** Reset every override of one mode to built-in defaults. */
-export function actionResetMode(mode: GuardMode, ctx: ExtensionCommandContext): string {
-	delete getConfig().rules[mode];
-	clearSessionPass(mode);
-	const where = persistConfig(ctx.cwd);
+export function actionResetMode(
+	mode: GuardMode,
+	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
+): string {
+	const where = resetModeIn(scope, mode, ctx.cwd);
 	return `Path Guard: reset mode ${mode} to defaults (${persistNote(where)})`;
 }
 
 /** Clear all rule overrides for every mode. */
-export function actionResetAllRules(ctx: ExtensionCommandContext): string {
-	getConfig().rules = {};
-	clearSessionPass();
-	const where = persistConfig(ctx.cwd);
+export function actionResetAllRules(
+	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
+): string {
+	const where = resetAllRulesIn(scope, ctx.cwd);
 	return `Path Guard: cleared all rule overrides (${persistNote(where)})`;
 }
 
@@ -65,49 +69,41 @@ export function actionAddPath(
 	kind: PathKind,
 	input: string,
 	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
 ): string {
 	const norm = normalizeProtectedEntry(input, ctx.cwd);
 	if (kind === "trusted") {
 		const denied = untrustableReason(norm);
 		if (denied) return `Path Guard: cannot trust ${norm} — ${denied}`;
 	}
-	const list = pathList(kind);
-	if (list.includes(norm)) return `Path Guard: already ${kind} — ${norm}`;
-	list.push(norm);
-	const where = persistConfig(ctx.cwd);
-	return `Path Guard: added ${kind} path ${norm} (${persistNote(where)})`;
+	const result = addPathIn(scope, kind, input, ctx.cwd);
+	if (result.error) return `Path Guard: ${result.error}`;
+	return `Path Guard: added ${kind} path ${norm} (${persistNote(result.where)})`;
 }
 
-/** Remove a (normalized) path entry. */
+/** Remove a (normalized) path entry from the layer that owns it. */
 export function actionRemovePath(
 	kind: PathKind,
 	target: string,
 	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
 ): string {
-	const list = pathList(kind);
-	const idx = list.indexOf(target);
-	if (idx === -1) return `Path Guard: not a ${kind} path — ${target}`;
-	list.splice(idx, 1);
-	const where = persistConfig(ctx.cwd);
-	return `Path Guard: removed ${kind} path ${target} (${persistNote(where)})`;
+	const result = removePathIn(scope, kind, target, ctx.cwd);
+	if (result.error) return `Path Guard: ${result.error}`;
+	return `Path Guard: removed ${kind} path ${target} (${persistNote(result.where!)})`;
 }
 
-/** Clear every entry of a path category. */
+/** Clear every entry of a path category in one layer. */
 export function actionClearPaths(
 	kind: PathKind,
 	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
 ): string {
-	const list = pathList(kind);
-	if (list.length === 0) return `Path Guard: no ${kind} paths to clear`;
-	list.length = 0;
-	const where = persistConfig(ctx.cwd);
-	return `Path Guard: cleared all ${kind} paths (${persistNote(where)})`;
+	const result = clearPathsIn(scope, kind, ctx.cwd);
+	if (result.error) return `Path Guard: ${result.error}`;
+	return `Path Guard: cleared all ${kind} paths (${persistNote(result.where!)})`;
 }
 
-/**
- * Main /guard menu (shown when invoked with no/unknown args and a UI is
- * available). Extend this array to add future top-level actions.
- */
 export const GUARD_MAIN_MENU = [
 	"switch — Switch mode (切换防护模式)",
 	"rules — Customize per-mode guard rules (定制每模式守护规则)",

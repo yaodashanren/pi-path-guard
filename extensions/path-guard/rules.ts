@@ -1,8 +1,8 @@
 // path-guard — guard modes, tunable rules, user path lists, and settings
 // persistence. All mutable guard state lives in this module.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, normalize, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join, normalize, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { HOME, CONFIG_DIR } from "./constants.ts";
 import type {
@@ -16,9 +16,11 @@ import { findProjectConfig, mergeLayers, readSettingsFile, writeFileAtomic } fro
 
 
 import type {
+	ConfigScope,
 	ConfigWarning,
 	GuardMode,
 	PathGuardLayer,
+	PersistWhere,
 	ProjectLookup,
 	RuleId,
 	RuleLevel,
@@ -354,51 +356,253 @@ export function readSavedConfig(
  */
 /** Reason the last persistConfig call fell back to session-only (empty on success). */
 let lastPersistError = "";
+let lastPersistPath = "";
 
-export function persistConfig(cwd: string | undefined): string {
-	if (!cwd) return "none";
+/** Which layer /guard edits are saved to (session-only; never persisted). */
+let writeScope: ConfigScope = "global";
+
+/** Where edits are currently saved ("global" unless /guard --project was used). */
+export function getWriteScope(): ConfigScope {
+	return writeScope;
+}
+
+/** Choose the layer edits are saved to (per-command, session-only). */
+export function setWriteScope(scope: ConfigScope): void {
+	writeScope = scope;
+}
+
+function layerOf(scope: ConfigScope): PathGuardLayer | undefined {
+	return scope === "global" ? layers.global : layers.project;
+}
+
+/** Base directory a layer's relative path entries resolve against. */
+function baseOf(scope: ConfigScope): string {
+	return scope === "global" ? HOME : (layers.projectRoot ?? HOME);
+}
+
+/**
+ * Persist ONLY the given layer. Global → the pathGuard block of
+ * ~/.pi/agent/settings.json (all other keys preserved); project → that project's
+ * entry file. The effective (merged) config is never written back, so an
+ * inherited project value can no longer be frozen into the global file.
+ */
+export function persistConfig(
+	scope: ConfigScope,
+	cwd: string | undefined,
+): PersistWhere {
+	if (!cwd) return { kind: "none" };
+	return scope === "global" ? persistGlobal() : persistProject(cwd);
+}
+
+function persistGlobal(): PersistWhere {
 	const target = globalSettingsPath();
+	lastPersistPath = target;
 	try {
 		let data: Record<string, unknown> = {};
 		if (existsSync(target)) {
 			data = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown>;
 		}
 		const guard = (data.pathGuard as Record<string, unknown>) ?? {};
-		guard.mode = config.mode;
-		if (config.extraProtected.length > 0) {
-			guard.extraProtected = config.extraProtected;
-		} else {
-			delete guard.extraProtected;
-		}
-		if (config.trustedPaths.length > 0) {
-			guard.trustedPaths = config.trustedPaths;
-		} else {
-			delete guard.trustedPaths;
-		}
-		if (Object.keys(config.rules).length > 0) {
-			guard.rules = config.rules;
-		} else {
-			delete guard.rules;
-		}
+		const layer = layers.global;
+		if (layer.mode) guard.mode = layer.mode;
+		else delete guard.mode;
+		if (layer.extraProtected?.length)
+			guard.extraProtected = layer.extraProtected;
+		else delete guard.extraProtected;
+		if (layer.trustedPaths?.length) guard.trustedPaths = layer.trustedPaths;
+		else delete guard.trustedPaths;
+		if (layer.rules && Object.keys(layer.rules).length) guard.rules = layer.rules;
+		else delete guard.rules;
 		data.pathGuard = guard;
-		writeFileAtomic(target, JSON.stringify(data, null, 2) + "\n");
+		writeFileAtomic(target, `${JSON.stringify(data, null, 2)}\n`);
 		lastPersistError = "";
-		return "global";
+		return { kind: "global", file: target };
 	} catch (e) {
 		lastPersistError = e instanceof Error ? e.message : String(e);
-		return "none";
+		return { kind: "none" };
 	}
 }
 
-/** Human-readable persistence note for notify messages. */
-export function persistNote(where: string): string {
-	if (where === "global") return "saved to global settings";
-	return lastPersistError
-		? `session-only — could not write global settings: ${lastPersistError}`
-		: "session-only (not persisted)";
+function persistProject(cwd: string): PersistWhere {
+	const file = layers.projectFile;
+	if (!layers.project || !file || !layers.projectRoot) {
+		lastPersistPath = "";
+		lastPersistError = `no project config for ${cwd} — create one with /guard --project <mode> first`;
+		return { kind: "none" };
+	}
+	lastPersistPath = file;
+	try {
+		mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+		const body = {
+			version: 1,
+			project: layers.projectRoot,
+			...layers.project,
+			updatedAt: new Date().toISOString(),
+		};
+		writeFileAtomic(file, `${JSON.stringify(body, null, 2)}\n`);
+		lastPersistError = "";
+		return { kind: "project", file };
+	} catch (e) {
+		lastPersistError = e instanceof Error ? e.message : String(e);
+		return { kind: "none" };
+	}
 }
 
-/** Apply a loaded/saved config wholesale (session_start restore). */
+/** Human-readable persistence note for notify messages (always names the target). */
+export function persistNote(where: PersistWhere): string {
+	if (where.kind === "global")
+		return `saved to global settings (${where.file ?? globalSettingsPath()})`;
+	if (where.kind === "project")
+		return `saved to project config (${where.file ?? ""})`;
+	if (lastPersistError) {
+		return `session-only — could not write ${lastPersistPath || "config"}: ${lastPersistError}`;
+	}
+	return "session-only (not persisted)";
+}
+
+/** Switch the mode of one layer and persist just that layer. */
+export function setModeIn(
+	scope: ConfigScope,
+	mode: GuardMode,
+	cwd?: string,
+): PersistWhere {
+	const layer = layerOf(scope);
+	if (!layer) return noLayer(scope, cwd);
+	layer.mode = mode;
+	rebuildEffective();
+	return persistConfig(scope, cwd);
+}
+
+/** Set (or reset) one rule override in one layer. */
+export function setRuleIn(
+	scope: ConfigScope,
+	mode: GuardMode,
+	rule: RuleId,
+	level: RuleLevel | "default",
+	cwd?: string,
+): PersistWhere {
+	const layer = layerOf(scope);
+	if (!layer) return noLayer(scope, cwd);
+	const rules = (layer.rules ??= {});
+	const overrides = (rules[mode] ??= {});
+	if (level === "default") delete overrides[rule];
+	else overrides[rule] = level;
+	if (Object.keys(overrides).length === 0) delete rules[mode];
+	if (Object.keys(rules).length === 0) delete layer.rules;
+	clearSessionPass(mode);
+	rebuildEffective();
+	return persistConfig(scope, cwd);
+}
+
+/** Reset every override of one mode in one layer. */
+export function resetModeIn(
+	scope: ConfigScope,
+	mode: GuardMode,
+	cwd?: string,
+): PersistWhere {
+	const layer = layerOf(scope);
+	if (!layer) return noLayer(scope, cwd);
+	if (layer.rules) delete layer.rules[mode];
+	if (layer.rules && Object.keys(layer.rules).length === 0) delete layer.rules;
+	clearSessionPass(mode);
+	rebuildEffective();
+	return persistConfig(scope, cwd);
+}
+
+/** Clear every rule override in one layer. */
+export function resetAllRulesIn(scope: ConfigScope, cwd?: string): PersistWhere {
+	const layer = layerOf(scope);
+	if (!layer) return noLayer(scope, cwd);
+	delete layer.rules;
+	clearSessionPass();
+	rebuildEffective();
+	return persistConfig(scope, cwd);
+}
+
+function noLayer(
+	scope: ConfigScope,
+	cwd: string | undefined,
+): PersistWhere {
+	lastPersistPath = "";
+	lastPersistError =
+		scope === "project"
+			? `no project config for ${cwd ?? "this directory"} — create one with /guard --project <mode> first`
+			: "no config layer";
+	return { kind: "none" };
+}
+
+/** Add a path entry to one layer (stored as typed; normalized on read). */
+export function addPathIn(
+	scope: ConfigScope,
+	kind: PathKind,
+	rawInput: string,
+	cwd?: string,
+): { where: PersistWhere; error?: string } {
+	const layer = layerOf(scope);
+	if (!layer) return { where: noLayer(scope, cwd) };
+	const key = kind === "trusted" ? "trustedPaths" : "extraProtected";
+	const list = (layer[key] ??= []);
+	const raw = rawInput.trim();
+	const base = baseOf(scope);
+	const normalized = normalizeProtectedEntry(raw, base);
+	if (list.some((entry) => normalizeProtectedEntry(entry, base) === normalized)) {
+		return { where: { kind: "none" }, error: `already ${kind} — ${normalized}` };
+	}
+	list.push(raw);
+	rebuildEffective();
+	return { where: persistConfig(scope, cwd) };
+}
+
+/** Remove a path entry from the layer that owns it (inherited entries cannot be). */
+export function removePathIn(
+	scope: ConfigScope,
+	kind: PathKind,
+	normalizedTarget: string,
+	cwd?: string,
+): { where?: PersistWhere; error?: string } {
+	const layer = layerOf(scope);
+	if (!layer) return { error: noLayer(scope, cwd).kind === "none" ? lastPersistError : "no layer" };
+	const key = kind === "trusted" ? "trustedPaths" : "extraProtected";
+	const base = baseOf(scope);
+	const list = layer[key] ?? [];
+	const idx = list.findIndex(
+		(entry) => normalizeProtectedEntry(entry, base) === normalizedTarget,
+	);
+	if (idx === -1) {
+		const other = scope === "project" ? layers.global : layers.authored?.layer;
+		const inherited = (other?.[key] ?? []).some(
+			(entry) =>
+				normalizeProtectedEntry(entry, scope === "project" ? HOME : HOME) ===
+				normalizedTarget,
+		);
+		return {
+			error: inherited
+				? `not removable here — ${normalizedTarget} is inherited from the ${scope === "project" ? "global" : "authored"} layer`
+				: `not a ${kind} path in the ${scope} layer — ${normalizedTarget}`,
+		};
+	}
+	list.splice(idx, 1);
+	if (list.length === 0) delete layer[key];
+	rebuildEffective();
+	return { where: persistConfig(scope, cwd) };
+}
+
+/** Clear one path category in one layer. */
+export function clearPathsIn(
+	scope: ConfigScope,
+	kind: PathKind,
+	cwd?: string,
+): { where?: PersistWhere; error?: string } {
+	const layer = layerOf(scope);
+	if (!layer) return { error: "no config layer" };
+	const key = kind === "trusted" ? "trustedPaths" : "extraProtected";
+	if (!layer[key]?.length) return { error: `no ${kind} paths in the ${scope} layer` };
+	delete layer[key];
+	rebuildEffective();
+	return { where: persistConfig(scope, cwd) };
+}
+
+/** Apply a loaded/saved config wholesale (session_start restore). *//** Apply a loaded/saved config wholesale (session_start restore). */
 export function applyConfig(loaded: LoadedConfig): void {
 	layers = {
 		global: loaded.global,

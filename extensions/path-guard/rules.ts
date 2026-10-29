@@ -12,7 +12,14 @@ import type {
 import type { SegmentVerdict } from "./judges.ts";
 import { tagged } from "./escape.ts";
 import { expandHome, isOutsideCwd, matchesProtectedPath, resolveReal } from "./paths.ts";
-import { findProjectConfig, mergeLayers, projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
+import {
+	findProjectConfig,
+	mergeLayers,
+	projectEntryPath,
+	readProjectEntry,
+	readSettingsFile,
+	writeFileAtomic,
+} from "./store.ts";
 
 
 import type {
@@ -381,6 +388,14 @@ function baseOf(scope: ConfigScope): string {
 }
 
 /**
+ * Normalize a user-typed path exactly the way the given layer will store and
+ * resolve it — UI messages and trust checks must use this, not the session cwd.
+ */
+export function normalizeInScope(scope: ConfigScope, entry: string): string {
+	return normalizeProtectedEntry(entry, baseOf(scope));
+}
+
+/**
  * Persist ONLY the given layer. Global → the pathGuard block of
  * ~/.pi/agent/settings.json (all other keys preserved); project → that project's
  * entry file. The effective (merged) config is never written back, so an
@@ -432,13 +447,46 @@ function persistProject(cwd: string): PersistWhere {
 	}
 	lastPersistPath = file;
 	try {
+		// Never clobber a file we cannot read: the user must see and decide.
+		if (existsSync(file)) {
+			const existing = readProjectEntry(file);
+			if (!existing.ok) {
+				lastPersistError = `refusing to overwrite ${file} — ${existing.message}`;
+				return { kind: "none" };
+			}
+		}
 		mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-		const body = {
-			version: 1,
-			project: layers.projectRoot,
-			...layers.project,
-			updatedAt: new Date().toISOString(),
-		};
+		// Keep unknown/forward-compatible keys from the file we are updating.
+		let existingBody: Record<string, unknown> = {};
+		if (existsSync(file)) {
+			try {
+				existingBody = JSON.parse(readFileSync(file, "utf8")) as Record<
+					string,
+					unknown
+				>;
+			} catch {
+				existingBody = {};
+			}
+		}
+		const body: Record<string, unknown> = { ...existingBody };
+		body.version = 1;
+		body.project = layers.projectRoot;
+		body.updatedAt = new Date().toISOString();
+		for (const key of [
+			"mode",
+			"extraProtected",
+			"trustedPaths",
+			"rules",
+		] as const) {
+			const value = layers.project[key];
+			const empty =
+				value === undefined ||
+				(Array.isArray(value) && value.length === 0) ||
+				(typeof value === "object" && !Array.isArray(value) &&
+					Object.keys(value as object).length === 0);
+			if (empty) delete body[key];
+			else body[key] = value;
+		}
 		writeFileAtomic(file, `${JSON.stringify(body, null, 2)}\n`);
 		lastPersistError = "";
 		return { kind: "project", file };
@@ -537,7 +585,7 @@ export function addPathIn(
 	kind: PathKind,
 	rawInput: string,
 	cwd?: string,
-): { where: PersistWhere; error?: string } {
+): { where: PersistWhere; error?: string; normalized?: string } {
 	const layer = layerOf(scope);
 	if (!layer) return { where: noLayer(scope, cwd) };
 	const key = kind === "trusted" ? "trustedPaths" : "extraProtected";
@@ -550,7 +598,7 @@ export function addPathIn(
 	}
 	list.push(raw);
 	rebuildEffective();
-	return { where: persistConfig(scope, cwd) };
+	return { where: persistConfig(scope, cwd), normalized };
 }
 
 /** Remove a path entry from the layer that owns it (inherited entries cannot be). */
@@ -592,14 +640,21 @@ export function clearPathsIn(
 	scope: ConfigScope,
 	kind: PathKind,
 	cwd?: string,
-): { where?: PersistWhere; error?: string } {
+): { where?: PersistWhere; error?: string; cleared?: number; kept?: number } {
 	const layer = layerOf(scope);
 	if (!layer) return { error: "no config layer" };
 	const key = kind === "trusted" ? "trustedPaths" : "extraProtected";
-	if (!layer[key]?.length) return { error: `no ${kind} paths in the ${scope} layer` };
+	const own = layer[key] ?? [];
+	if (own.length === 0) {
+		return { error: `no ${kind} paths in the ${scope} layer` };
+	}
 	delete layer[key];
 	rebuildEffective();
-	return { where: persistConfig(scope, cwd) };
+	return {
+		where: persistConfig(scope, cwd),
+		cleared: own.length,
+		kept: pathEntries(kind).length,
+	};
 }
 
 /**
@@ -611,26 +666,41 @@ export function clearPathsIn(
 export function ensureProjectLayer(
 	cwd: string | undefined,
 	mode?: GuardMode,
-): boolean {
-	if (!cwd || isHomeCwd(cwd)) return false;
+): { ok: boolean; error?: string } {
+	if (!cwd || isHomeCwd(cwd)) {
+		return {
+			ok: false,
+			error: "this directory has no project config (cwd is HOME) — staying global",
+		};
+	}
 	// Always resolve from cwd: reusing whatever layer a previous session left in
 	// memory could write to an unrelated project's file.
-	const found = findProjectConfig(cwd).lookup;
-	if (found) {
-		layers.project = found.layer;
-		layers.projectRoot = found.projectRoot;
-		layers.projectFile = found.filePath;
-		layers.matchedVia = found.matchedVia;
+	const found = findProjectConfig(cwd);
+	if (found.lookup) {
+		layers.project = found.lookup.layer;
+		layers.projectRoot = found.lookup.projectRoot;
+		layers.projectFile = found.lookup.filePath;
+		layers.matchedVia = found.lookup.matchedVia;
 	} else {
 		const root = resolveReal(cwd);
+		const target = projectEntryPath(root);
+		// An existing-but-unusable entry must never be silently overwritten: the
+		// user gets to see the file and decide (fix it, or /guard project remove).
+		if (existsSync(target)) {
+			const broken = found.warnings[0];
+			return {
+				ok: false,
+				error: `existing project entry ${target} cannot be used${broken ? ` — ${broken.message}` : ""}; fix it or delete it with /guard project remove`,
+			};
+		}
 		layers.project = {};
 		layers.projectRoot = root;
-		layers.projectFile = projectEntryPath(root);
+		layers.projectFile = target;
 		layers.matchedVia = "exact";
 	}
 	if (mode) layers.project.mode = mode;
 	rebuildEffective();
-	return true;
+	return { ok: true };
 }
 
 /** Apply a loaded/saved config wholesale (session_start restore). *//** Apply a loaded/saved config wholesale (session_start restore). */

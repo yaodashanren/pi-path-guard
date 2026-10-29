@@ -5,9 +5,10 @@ import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-work
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, TRUSTED_SWITCH_WARNING, TRUST_PATH_WARNING } from "./constants.ts";
 import { projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
+import { resolveReal } from "./paths.ts";
 import { applyConfig, getConfigWarnings, getLayers, projectSettingsPath, readSavedConfig } from "./rules.ts";
 import type { ConfigWarning, PathGuardLayer } from "./schema.ts";
-import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
+import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
 
 // path-guard — /guard interactive UI: chained menus, actions, rules matrix,
 // the single self-contained overlay panel, and warning confirmations.
@@ -76,14 +77,14 @@ export function actionAddPath(
 	ctx: ExtensionCommandContext,
 	scope: ConfigScope = getWriteScope(),
 ): string {
-	const norm = normalizeProtectedEntry(input, ctx.cwd);
+	const norm = normalizeInScope(scope, input);
 	if (kind === "trusted") {
 		const denied = untrustableReason(norm);
 		if (denied) return `Path Guard: cannot trust ${norm} — ${denied}`;
 	}
 	const result = addPathIn(scope, kind, input, ctx.cwd);
 	if (result.error) return `Path Guard: ${result.error}`;
-	return `Path Guard: added ${kind} path ${norm} (${persistNote(result.where)})`;
+	return `Path Guard: added ${kind} path ${result.normalized ?? norm} (${persistNote(result.where)})`;
 }
 
 /** Remove a (normalized) path entry from the layer that owns it. */
@@ -106,7 +107,8 @@ export function actionClearPaths(
 ): string {
 	const result = clearPathsIn(scope, kind, ctx.cwd);
 	if (result.error) return `Path Guard: ${result.error}`;
-	return `Path Guard: cleared all ${kind} paths (${persistNote(result.where!)})`;
+	const kept = result.kept ? `, ${result.kept} inherited kept` : "";
+	return `Path Guard: cleared ${result.cleared} ${kind} path(s) in the ${scope} layer${kept} (${persistNote(result.where!)})`;
 }
 
 export const GUARD_MAIN_MENU = [
@@ -211,17 +213,15 @@ export async function runScopeMenu(ctx: ExtensionCommandContext): Promise<void> 
 		return;
 	}
 	if (id === "project") {
-		if (ensureProjectLayer(ctx.cwd)) {
+		const ensured = ensureProjectLayer(ctx.cwd);
+		if (ensured.ok) {
 			setWriteScope("project");
 			ctx.ui.notify(
 				`Path Guard: edits now save to this project (${getLayers().projectFile})`,
 				"info",
 			);
 		} else {
-			ctx.ui.notify(
-				"Path Guard: this directory has no project config (cwd is HOME) — staying global",
-				"warning",
-			);
+			ctx.ui.notify(`Path Guard: ${ensured.error}`, "warning");
 		}
 	}
 }
@@ -231,8 +231,8 @@ export async function runPathCategoryMenu(
 	kind: PathKind,
 	ctx: ExtensionCommandContext,
 ): Promise<void> {
-	const list = pathList(kind);
 	while (true) {
+		const list = pathList(kind);
 		if (list.length > 0) {
 			ctx.ui.notify(
 				`Path Guard ${kind} paths (${list.length}):\n` +
@@ -299,14 +299,23 @@ export async function runPathCategoryMenu(
 		}
 
 		if (op === "clear") {
-			if (list.length === 0) {
-				ctx.ui.notify(`Path Guard: no ${kind} paths to clear`, "info");
+			const own = pathEntries(kind).filter(
+				(entry) => entry.layer === getWriteScope(),
+			);
+			if (own.length === 0) {
+				ctx.ui.notify(
+					`Path Guard: no ${kind} paths owned by the ${getWriteScope()} layer to clear`,
+					"info",
+				);
 				continue;
 			}
+			const inherited = list.length - own.length;
 			const ok = await ctx.ui.confirm(
-				`Clear all ${kind} paths?`,
-				`Remove these ${list.length} path(s)?\n` +
-					list.map((p) => `· ${p}`).join("\n"),
+				`Clear ${own.length} ${kind} path(s) from the ${getWriteScope()} layer?`,
+				own.map((entry) => `· ${entry.normalized}`).join("\n") +
+					(inherited > 0
+						? `\n\n${inherited} inherited path(s) stay in effect.`
+						: ""),
 			);
 			if (!ok) {
 				ctx.ui.notify("Cancelled clear", "info");
@@ -822,13 +831,13 @@ export class GuardPanel implements Component, Focusable {
 					return;
 				}
 				if (id === "project") {
-					if (ensureProjectLayer(this.ctx.cwd)) {
+					const ensured = ensureProjectLayer(this.ctx.cwd);
+					if (ensured.ok) {
 						setWriteScope("project");
 						this.status = `Path Guard: edits now save to this project (${getLayers().projectFile})`;
 					} else {
 						setWriteScope("global");
-						this.status =
-							"Path Guard: this directory has no project config (cwd is HOME) — staying global";
+						this.status = `Path Guard: ${ensured.error}`;
 					}
 					this.pop();
 				}
@@ -1249,6 +1258,7 @@ function overrideList(layer: PathGuardLayer): string[] {
 /** Human-readable view of a project config (live session when no input given). */
 export function projectConfigView(entry?: ProjectViewInput): string {
 	const live = getLayers();
+	const allWarnings = getConfigWarnings();
 	const view: ProjectViewInput | undefined =
 		entry ??
 		(live.projectFile && live.project
@@ -1257,7 +1267,7 @@ export function projectConfigView(entry?: ProjectViewInput): string {
 					projectRoot: live.projectRoot ?? "",
 					matchedVia: live.matchedVia ?? "exact",
 					layer: live.project,
-					warnings: getConfigWarnings(),
+					warnings: allWarnings,
 				}
 			: live.authored
 				? {
@@ -1265,11 +1275,31 @@ export function projectConfigView(entry?: ProjectViewInput): string {
 						projectRoot: live.authored.root,
 						matchedVia: "authored",
 						layer: live.authored.layer,
-						warnings: getConfigWarnings(),
+						warnings: allWarnings,
 					}
 				: undefined);
+	const warningLines = (warnings: ConfigWarning[]) => {
+		const lines = [`· warnings: ${warnings.length}`];
+		for (const warning of warnings.slice(0, 3)) {
+			lines.push(
+				`  · ${warning.path}${warning.field ? ` ${warning.field}` : ""}: ${warning.message}`,
+			);
+		}
+		if (warnings.length > 3) lines.push(`  · … and ${warnings.length - 3} more`);
+		return lines;
+	};
 	if (!view) {
-		return "Path Guard project config\n· file: (none — using global config only)\n· create one with: /guard --project <mode>";
+		// A broken entry has no view — but its warning is exactly what the user was
+		// sent here to read, so surface it instead of pretending there is nothing.
+		const missing = ["Path Guard project config"];
+		missing.push(
+			allWarnings.length > 0
+				? "· file: (no usable entry — see warnings)"
+				: "· file: (none — using global config only)",
+		);
+		if (allWarnings.length > 0) missing.push(...warningLines(allWarnings));
+		missing.push("· create one with: /guard --project <mode>");
+		return missing.join("\n");
 	}
 	const lines = [
 		"Path Guard project config",
@@ -1281,11 +1311,7 @@ export function projectConfigView(entry?: ProjectViewInput): string {
 	lines.push(
 		`· overrides: ${overrides.length > 0 ? overrides.join(", ") : "(none)"}`,
 	);
-	const warnings = view.warnings.filter((w) => w.path === view.filePath);
-	lines.push(`· warnings: ${warnings.length}`);
-	for (const warning of warnings.slice(0, 3)) {
-		lines.push(`  · ${warning.field ? `${warning.field}: ` : ""}${warning.message}`);
-	}
+	lines.push(...warningLines(allWarnings));
 	if (view.projectRoot && !existsSync(view.projectRoot)) {
 		lines.push(
 			"· stale — project directory no longer exists (kept until /guard doctor can prune in a later release)",
@@ -1331,12 +1357,28 @@ export async function handleProjectCommand(
 			);
 		}
 		const target = projectEntryPath(ctx.cwd);
+		// A repo-supplied trustedPaths list must not become a user-level, permanent
+		// allow-list without review: validate every entry and report what changed.
+		const layer: PathGuardLayer = { ...read.guard };
+		const accepted: string[] = [];
+		const refused: string[] = [];
+		for (const entry of read.guard.trustedPaths ?? []) {
+			const denied = untrustableReason(
+				normalizeProtectedEntry(entry, resolveReal(ctx.cwd)),
+			);
+			if (denied) refused.push(`${entry} (${denied})`);
+			else accepted.push(entry);
+		}
+		if (refused.length > 0) {
+			if (accepted.length > 0) layer.trustedPaths = accepted;
+			else delete layer.trustedPaths;
+		}
 		try {
 			mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
 			writeFileAtomic(
 				target,
 				`${JSON.stringify(
-					{ version: 1, project: ctx.cwd, ...read.guard, updatedAt: new Date().toISOString() },
+					{ version: 1, project: ctx.cwd, ...layer, updatedAt: new Date().toISOString() },
 					null,
 					2,
 				)}\n`,
@@ -1347,10 +1389,17 @@ export async function handleProjectCommand(
 			);
 		}
 		applyConfig(readSavedConfig(ctx.cwd, true));
-		return show(
-			`Path Guard: imported the pathGuard block into ${target}\n· ${source} still exists — delete its pathGuard block when you are ready`,
+		const lines = [`Path Guard: imported the pathGuard block into ${target}`];
+		if (accepted.length > 0) {
+			lines.push(`· trusted paths imported: ${accepted.join(", ")}`);
+		}
+		if (refused.length > 0) {
+			lines.push(`· refused (protected — cannot be trusted): ${refused.join(", ")}`);
+		}
+		lines.push(
+			`· ${source} still exists — delete its pathGuard block when you are ready`,
 		);
-	}
+		return show(lines.join("\n"));	}
 
 	if (rest === "remove") {
 		const live = getLayers();
@@ -1412,7 +1461,7 @@ export async function handlePathsCommand(raw: string, ctx: ExtensionCommandConte
 			);
 		case "add": {
 			if (!arg) return show(`Usage: /guard paths ${kind} add <path>`);
-			const norm = normalizeProtectedEntry(arg, ctx.cwd);
+			const norm = normalizeInScope(getWriteScope(), arg);
 			if (kind === "trusted") {
 				const denied = untrustableReason(norm);
 				if (denied) {
@@ -1432,7 +1481,7 @@ export async function handlePathsCommand(raw: string, ctx: ExtensionCommandConte
 		case "rm":
 		case "remove": {
 			if (!arg) return show(`Usage: /guard paths ${kind} rm <path>`);
-			const norm = normalizeProtectedEntry(arg, ctx.cwd);
+			const norm = normalizeInScope(getWriteScope(), arg);
 			return show(actionRemovePath(kind, norm, ctx));
 		}
 		case "clear":

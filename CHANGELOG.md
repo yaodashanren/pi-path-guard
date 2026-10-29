@@ -20,13 +20,14 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 - `write/exit` writes are atomic (temp file + rename) and preserve the file mode and every sibling key of `settings.json`.
 
 ### Fixed
+- **Review fixes.** `/guard project` now shows a broken entry's warning instead of hiding it, `--project` refuses to overwrite an unreadable entry file, the chained menus re-read the path list after an edit, `clear` reports what it actually cleared (and how many inherited entries stay), add/rm messages use the layer's own resolution base, unknown entry fields survive a write, and `project import` validates every imported trusted path and says what it imported / refused.
 - Corrupt or partially invalid config is no longer swallowed: bad JSON, unknown modes/rule ids/levels, a mismatched `project` field and dropped relative paths each surface as a warning at session start, and the offending layer is skipped instead of silently resetting to `normal`.
 - A failed settings write leaves the previous file byte-identical and reports the path and reason.
 - Paging keys in the `/guard` overlay used `pageup`/`pagedown` (not valid `KeyId`s, so they never matched); now `pageUp`/`pageDown`.
 - Missing type imports in `judges.ts` / `rules.ts` / `index.ts` that were only latent because the suite runs through `--experimental-strip-types`.
 
 ### Tests
-- +108 assertions (**494 passing**): atomic writes, structured reads, project entry encoding/lookup (incl. ancestor, HOME, symlink and mismatched-project cases), deep merge, provenance, scoped persistence (the inherit-freeze regression), relative-path bases, `--project`/`project import`/`project remove`, config warnings, panel scope screen.
+- +124 assertions (**510 passing**): atomic writes, structured reads, project entry encoding/lookup (incl. ancestor, HOME, symlink and mismatched-project cases), deep merge, provenance, scoped persistence (the inherit-freeze regression), relative-path bases, `--project`/`project import`/`project remove`, config warnings, panel scope screen.
 
 ## [1.7.4] — 2026-10-29: honour the rule matrix in every judgement path
 

@@ -3840,6 +3840,122 @@ await setMode("normal");
 	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
 }
 
+
+// ── final-review fixes (RED first) ───────────────────────────────────
+{
+	const FR = "/tmp/pgtest-final-review";
+	rmSync(FR, { recursive: true, force: true });
+	mkdirSync(FR, { recursive: true });
+	const prevGlobalEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	process.env.PI_PATH_GUARD_SETTINGS = join(FR, "global.json");
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(FR, "projects");
+	writeFileSync(join(FR, "global.json"), JSON.stringify({ pathGuard: { mode: "normal", extraProtected: ["/tmp/fr-global-a", "/tmp/fr-global-b"] } }, null, 2));
+	const fakeCtx = (cwd: string, notifies: string[]) => ({
+		cwd, isProjectTrusted: () => true, hasUI: true,
+		ui: { notify: (m: string) => notifies.push(m), confirm: async () => true, theme: themeMock, setStatus: () => {} },
+	});
+
+	// 1. the project view must show a corrupt entry's warning, not hide it
+	const corruptRepo = join(FR, "corrupt-repo");
+	mkdirSync(corruptRepo, { recursive: true });
+	const corruptEntry = projectEntryPath(corruptRepo);
+	mkdirSync(join(corruptEntry, ".."), { recursive: true });
+	writeFileSync(corruptEntry, "{ broken");
+	applyConfig(readSavedConfig(corruptRepo, true));
+	const corruptView = panelMod.projectConfigView();
+	check("project view names the unreadable entry", corruptView.includes(corruptEntry) ? "named" : "?", "named");
+	check("project view explains why", /json|broken|unreadable/i.test(corruptView) ? "explained" : "?", "explained");
+
+	// 2. --project must not silently overwrite a corrupt entry file
+	const corruptBytes = readFileSync(corruptEntry, "utf8");
+	const corruptNotifies: string[] = [];
+	await commands["guard"].handler("--project loose", fakeCtx(corruptRepo, corruptNotifies) as any);
+	check("--project refuses to clobber a corrupt entry", readFileSync(corruptEntry, "utf8"), corruptBytes);
+	check("--project says the entry is unreadable", corruptNotifies.join(" ").includes(corruptEntry) ? "named" : "?", "named");
+	check("--project did not switch mode silently", getConfig().mode, "normal");
+
+	// 3. chained menu: the list must refresh after an add
+	const chainRepo = join(FR, "chain-repo");
+	mkdirSync(join(chainRepo, "sub"), { recursive: true });
+	const chainEntry = projectEntryPath(chainRepo);
+	mkdirSync(join(chainEntry, ".."), { recursive: true });
+	writeFileSync(chainEntry, JSON.stringify({ version: 1, project: realpathSync(chainRepo), mode: "normal" }));
+	applyConfig(readSavedConfig(chainRepo, true));
+	setWriteScope("project");
+	const seenMenus: string[][] = [];
+	const answers = ["add", "remove", undefined];
+	let inputCalls = 0;
+	const chainCtx = {
+		cwd: chainRepo, isProjectTrusted: () => true, hasUI: true,
+		ui: {
+			notify: () => {}, confirm: async () => true, theme: themeMock, setStatus: () => {},
+			select: async (_title: string, options: string[]) => {
+				seenMenus.push([...options]);
+				return answers.shift();
+			},
+			input: async () => { inputCalls++; return "/tmp/fr-chain-added"; },
+		},
+	};
+	await panelMod.runPathCategoryMenu("protected", chainCtx as any);
+	check("chained menu re-reads the list after an add", seenMenus.some((menu) => menu.some((o) => o.includes("fr-chain-added"))) ? "refreshed" : "?", "refreshed");
+	setWriteScope("global");
+
+	// 4. clear tells the truth about inherited entries
+	const clearRepo = join(FR, "clear-repo");
+	mkdirSync(clearRepo, { recursive: true });
+	const clearEntry = projectEntryPath(clearRepo);
+	mkdirSync(join(clearEntry, ".."), { recursive: true });
+	writeFileSync(clearEntry, JSON.stringify({ version: 1, project: realpathSync(clearRepo), mode: "normal", extraProtected: ["/tmp/fr-project-own"] }));
+	applyConfig(readSavedConfig(clearRepo, true));
+	const clearCtx = fakeCtx(clearRepo, []);
+	const clearMsg = panelMod.actionClearPaths("protected", clearCtx as any, "project");
+	check("cleared message does not claim everything is gone", /cleared all/i.test(clearMsg) ? "all" : "scoped", "scoped");
+	check("inherited entries survive a project-layer clear", String(pathList("protected").length), "2");
+	check("the project's own entry is gone", String(pathList("protected").includes("/tmp/fr-project-own")), "false");
+
+	// 5. add/rm in a subdirectory report the path the layer actually stores
+	const subRepo = join(FR, "sub-repo");
+	mkdirSync(join(subRepo, "sub"), { recursive: true });
+	const subEntry = projectEntryPath(subRepo);
+	mkdirSync(join(subEntry, ".."), { recursive: true });
+	writeFileSync(subEntry, JSON.stringify({ version: 1, project: realpathSync(subRepo), mode: "normal" }));
+	const subNotifies: string[] = [];
+	const subCtx = fakeCtx(join(subRepo, "sub"), subNotifies);
+	await commands["guard"].handler("--project paths protected add secrets", subCtx);
+	const expectedProtected = join(realpathSync(subRepo), "secrets");
+	check("subdir add reports the resolved protected path", subNotifies.join(" ").includes(expectedProtected) ? "resolved" : "?", "resolved");
+	check("subdir add stored the raw entry", (JSON.parse(readFileSync(subEntry, "utf8")).extraProtected ?? []).join(","), "secrets");
+	subNotifies.length = 0;
+	await commands["guard"].handler("--project paths protected rm secrets", subCtx);
+	check("subdir rm resolves the same entry", String((JSON.parse(readFileSync(subEntry, "utf8")).extraProtected ?? []).length), "0");
+
+	// 6. unknown entry fields survive a write
+	const keepRepo = join(FR, "keep-repo");
+	mkdirSync(keepRepo, { recursive: true });
+	const keepEntry = projectEntryPath(keepRepo);
+	mkdirSync(join(keepEntry, ".."), { recursive: true });
+	writeFileSync(keepEntry, JSON.stringify({ version: 1, project: realpathSync(keepRepo), mode: "normal", futureKey: { x: 1 } }));
+	applyConfig(readSavedConfig(keepRepo, true));
+	setModeIn("project", "loose", keepRepo);
+	check("unknown entry fields survive a write", String(JSON.parse(readFileSync(keepEntry, "utf8")).futureKey?.x), "1");
+
+	// 7. import validates trustedPaths and says what it imported
+	const importRepo = join(FR, "import-repo");
+	mkdirSync(join(importRepo, ".pi"), { recursive: true });
+	writeFileSync(join(importRepo, ".pi", "settings.json"), JSON.stringify({ pathGuard: { mode: "strict", trustedPaths: ["/tmp/fr-trusted-ok", join(homedir(), ".ssh")] } }));
+	const importNotifies: string[] = [];
+	await commands["guard"].handler("project import", fakeCtx(importRepo, importNotifies) as any);
+	const importEntry = JSON.parse(readFileSync(projectEntryPath(importRepo), "utf8"));
+	check("import keeps a legitimate trusted path", (importEntry.trustedPaths ?? []).join(","), "/tmp/fr-trusted-ok");
+	check("import refuses to import a protected path as trusted", String((importEntry.trustedPaths ?? []).length), "1");
+	check("import says what it imported", importNotifies.join(" ").includes("/tmp/fr-trusted-ok") ? "listed" : "?", "listed");
+
+	setWriteScope("global");
+	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

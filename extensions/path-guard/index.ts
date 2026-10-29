@@ -100,7 +100,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (projectScope) {
 				// Create the entry on first use so /guard --project <mode> works from scratch.
-				ensureProjectLayer(ctx.cwd);
+				const ensured = ensureProjectLayer(ctx.cwd);
+				if (!ensured.ok) {
+					ctx.ui.notify(`Path Guard: ${ensured.error}`, "warning");
+					return;
+				}
 			}
 
 			// ── /guard paths … : manage user-configured protected paths (any mode) ──

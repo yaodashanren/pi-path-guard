@@ -2192,9 +2192,10 @@ const hintHeader = "To run anyway / 如需执行:";
 {
 	const b = await runCmd(`echo x > ${join(P2, ".env")}`, P2);
 	check(
-		"built-in protected block hints /guard naked",
+		"built-in protected block hints /guard naked (last resort)",
 		(b.reason ?? "").includes("built-in protected path") &&
-			(b.reason ?? "").includes("/guard naked")
+			(b.reason ?? "").includes("/guard naked") &&
+			/built-in protected path[^]*last resort/.test(b.reason ?? "")
 			? "hint"
 			: "?",
 		"hint",
@@ -2213,12 +2214,14 @@ const hintHeader = "To run anyway / 如需执行:";
 	);
 }
 {
-	const d = await runCmd(`rm ${join(OUT, "outside_exist.txt")}`, P2);
+	const rr = await runCmd(`rm ${join(OUT, "outside_exist.txt")}`, P2);
+	const dr = rr.reason ?? "";
 	check(
-		"rule-level block hints /guard loose + rules",
-		(d.reason ?? "").includes("rule-level block") &&
-			(d.reason ?? "").includes("/guard loose") &&
-			(d.reason ?? "").includes("/guard rules")
+		"rule-level block hints: tune rule (/guard rules) before loosening mode",
+		dr.includes("rule-level block") &&
+			dr.includes("/guard rules") &&
+			dr.includes("/guard loose") &&
+			dr.indexOf("/guard rules") < dr.indexOf("/guard loose")
 			? "hint"
 			: "?",
 		"hint",

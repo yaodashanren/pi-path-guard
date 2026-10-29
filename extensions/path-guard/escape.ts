@@ -17,12 +17,12 @@ export type EscapeCat =
 
 export const ESCAPE_HINTS: Record<EscapeCat, { en: string; zh: string }> = {
 	userPath: {
-		en: "user-configured protected path — blocked in every mode; remove it with /guard paths rm <path>",
-		zh: "自定义保护路径，所有模式强制拦截；请先用 /guard paths rm 移除",
+		en: "user-configured protected path — blocked in every mode; remove it with /guard paths rm <path>; if you really must write it, remove the protection first, then re-add it after",
+		zh: "自定义保护路径，所有模式强制拦截；请先用 /guard paths rm 移除；若确要写入，先移除保护，操作后再加回",
 	},
 	protectedPath: {
-		en: "built-in protected path — only /guard naked bypasses it",
-		zh: "内置保护路径，仅 /guard naked 会放行",
+		en: "built-in protected path — use a different target path, or copy the file out first; only /guard naked bypasses it — last resort",
+		zh: "内置保护路径，请换一个目标路径，或先把文件拷出再操作；仅 /guard naked 可整体放行——最后手段",
 	},
 	systemDestructive: {
 		en: "system-destructive command — /guard naked still prompts once before running it",
@@ -33,8 +33,8 @@ export const ESCAPE_HINTS: Record<EscapeCat, { en: string; zh: string }> = {
 		zh: "需要交互确认，请在 TUI 里运行，或把该规则调为 pass",
 	},
 	rule: {
-		en: "rule-level block — loosen the mode (/guard loose|trusted|naked) or tune just this rule (/guard rules)",
-		zh: "规则级拦截，可切换 /guard loose 或 /guard rules 调整该条规则",
+		en: "rule-level block — tune just this rule (/guard rules), or loosen the mode (/guard loose|trusted) as a bigger step",
+		zh: "规则级拦截，先微调该条规则 (/guard rules)，必要时再放宽模式 (/guard loose|trusted)",
 	},
 };
 

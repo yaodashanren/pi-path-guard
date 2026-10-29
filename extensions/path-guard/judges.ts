@@ -413,24 +413,42 @@ export function classifySegmentOuter(
 	depth = 0,
 ): SegmentVerdict {
 	// ① Judge every output redirect; no safe first target may hide a later one.
-	const redirectBlocks: string[] = [];
-	const redirectRules = new Set<RuleId>();
-	let redirectConfirm = false;
+	const blockReasons: string[] = [];
+	const confirmRules = new Set<RuleId>();
+	let confirm = false;
 	for (const redirect of extractRedirectTargets(trimmed)) {
 		const verdict = judgeRedirect(trimmed, redirect, realCwd);
-		if (verdict.kind === "block") redirectBlocks.push(verdict.reason);
+		if (verdict.kind === "block") blockReasons.push(verdict.reason);
 		else if (verdict.kind === "confirm") {
-			redirectConfirm = true;
-			for (const rule of verdict.rules ?? []) redirectRules.add(rule);
+			confirm = true;
+			for (const rule of verdict.rules ?? []) confirmRules.add(rule);
 		}
 	}
-	if (redirectBlocks.length > 0) {
-		return { kind: "block", reason: redirectBlocks.join("\n") };
-	}
-	if (redirectConfirm) {
-		return { kind: "confirm", rules: [...redirectRules] };
+
+	// ② Judge the command itself. Redirect confirms must not short-circuit this:
+	// `rm -rf .env > "$X"` is still a protected delete (block wins), and a
+	// `git reset --hard > "$X"` keeps both of its confirm rules.
+	const outer = classifyCommandAfterRedirects(trimmed, realCwd, hasUI, depth);
+	if (outer.kind === "block") blockReasons.push(outer.reason);
+	else if (outer.kind === "confirm") {
+		confirm = true;
+		for (const rule of outer.rules ?? []) confirmRules.add(rule);
 	}
 
+	if (blockReasons.length > 0) {
+		return { kind: "block", reason: blockReasons.join("\n") };
+	}
+	if (confirm) return { kind: "confirm", rules: [...confirmRules] };
+	return { kind: "pass" };
+}
+
+/** Steps ②-⑪ of a segment, once redirects have been judged separately. */
+function classifyCommandAfterRedirects(
+	trimmed: string,
+	realCwd: string,
+	hasUI: boolean,
+	depth: number,
+): SegmentVerdict {
 	// ② Dangerous commands → per blockGroup / confirmGroup rule
 	const danger = dangerousLevel(trimmed);
 	if (danger === "block") {
@@ -1063,7 +1081,7 @@ function inPlaceTargets(cmdInfo: CmdInfo): string[] {
 	const operands: string[] = [];
 	let skipNext = false;
 	let endFlags = false;
-	let expressionOption = false;
+	let scriptSupplied = false;
 	for (const arg of cmdInfo.args) {
 		if (skipNext) {
 			skipNext = false;
@@ -1073,26 +1091,38 @@ function inPlaceTargets(cmdInfo: CmdInfo): string[] {
 			endFlags = true;
 			continue;
 		}
-		if (!endFlags && arg.startsWith("-")) {
+		if (!endFlags && arg.startsWith("-") && arg !== "-") {
 			if (cmdInfo.command === "sed") {
 				if (arg === "-e" || arg === "--expression") {
-					expressionOption = true;
+					scriptSupplied = true;
 					skipNext = true;
 				} else if (arg.startsWith("--expression=")) {
-					expressionOption = true;
+					scriptSupplied = true;
+				} else if (arg.startsWith("-e")) {
+					// Attached form: -es/x/y/
+					scriptSupplied = true;
 				} else if (arg === "-f" || arg === "--file") {
+					scriptSupplied = true;
 					skipNext = true;
+				} else if (arg.startsWith("--file=") || arg.startsWith("-f")) {
+					// Attached forms: --file=script.sed / -fscript.sed
+					scriptSupplied = true;
 				}
-			} else if (arg === "-e") {
-				expressionOption = true;
-				skipNext = true;
+			} else {
+				// perl/ruby: a short-flag cluster containing e supplies inline code;
+				// when e is the last character, the code is the next argument.
+				const short = !arg.startsWith("--");
+				if (short && arg.slice(1).includes("e")) {
+					scriptSupplied = true;
+					if (arg.endsWith("e")) skipNext = true;
+				}
 			}
 			continue;
 		}
 		operands.push(arg);
 	}
-	// sed without -e, and perl/ruby with combined -pe, take the first operand as code.
-	if (!expressionOption) operands.shift();
+	// A positional script is consumed only when no -e/-f option supplied one.
+	if (!scriptSupplied) operands.shift();
 	return operands;
 }
 

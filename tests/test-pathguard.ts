@@ -1202,6 +1202,17 @@ check(
 	(await runCmd("echo x > harmless.txt > .env", PROJ)).verdict,
 	"block",
 );
+check(
+	"redirect confirm cannot hide protected delete",
+	(await runCmd('rm -rf .env > "$X"', PROJ)).verdict,
+	"block",
+);
+await runCmd('git reset --hard > "$X"', PROJ);
+check(
+	"redirect and writer confirm rules are both retained",
+	selectOptions[0]?.some((o) => o.includes("2 rules")) ? "yes" : "no",
+	"yes",
+);
 for (const command of ["echo '>.env'", 'echo ">.env"', "echo \\>.env"]) {
 	check(
 		`quoted/escaped redirect text passes: ${command}`,
@@ -3103,8 +3114,14 @@ await setMode("normal");
 		(await runCmd("true & rm -rf .env", PROJ)).verdict,
 		"block",
 	);
+	check(
+		"no-space background protected delete normal → block",
+		(await runCmd("true &rm -rf .env", PROJ)).verdict,
+		"block",
+	);
 	for (const [command, expected] of [
 		["cmd1 & cmd2", ["cmd1", "cmd2"]],
+		["cmd1 &cmd2", ["cmd1", "cmd2"]],
 		["cmd1 && cmd2", ["cmd1", "cmd2"]],
 		["echo x &> out", ["echo x &> out"]],
 		["printf x 2>&1", ["printf x 2>&1"]],
@@ -3303,6 +3320,9 @@ await setMode("normal");
 	for (const command of [
 		"sed -i s/x/y/ .env README.md",
 		"sed -i -e s/x/y/ .env README.md",
+		"sed -i -es/x/y/ .env README.md",
+		"sed -i -f script.sed .env README.md",
+		"sed -i --file=script.sed .env README.md",
 		"perl -i -pe s/x/y/ .env README.md",
 		"ruby -i -pe s/x/y/ .env README.md",
 	]) {

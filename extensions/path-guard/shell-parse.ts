@@ -467,7 +467,7 @@ export function splitSegments(input: string): string[] {
 			if (isSep) {
 				if (current.trim()) segments.push(current.trim());
 				current = "";
-				if (ch === "&") i++; // skip the second &
+				if (andIf) i++; // skip only the second & of &&
 				continue;
 			}
 		}

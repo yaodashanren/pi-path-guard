@@ -404,11 +404,18 @@ export function splitSegments(input: string): string[] {
 		if (!inSingle && !inDouble) {
 			// `>|` / `>>|` is the noclobber redirect override, not a pipe separator
 			const noclobber = ch === "|" && input[i - 1] === ">";
+			const andIf = ch === "&" && input[i + 1] === "&";
+			const background =
+				ch === "&" &&
+				input[i + 1] !== "&" &&
+				input[i - 1] !== ">" &&
+				input[i + 1] !== ">";
 			const isSep =
 				(ch === "|" && !noclobber) ||
 				ch === ";" ||
 				ch === "\n" ||
-				(ch === "&" && input[i + 1] === "&");
+				andIf ||
+				background;
 			if (isSep) {
 				if (current.trim()) segments.push(current.trim());
 				current = "";

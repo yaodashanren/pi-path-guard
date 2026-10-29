@@ -41,6 +41,9 @@ const mod = await import(EXT);
 const panelMod = await import(
 	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
 );
+const shellParseMod = await import(
+	new URL("../extensions/path-guard/shell-parse.ts", import.meta.url).href,
+);
 mod.default(fakePi);
 
 // ── test helpers ────────────────────────────────────────────
@@ -3046,6 +3049,26 @@ await setMode("normal");
 		(await runCmd("echo x > /dev/null", PROJ)).verdict,
 		"pass",
 	);
+
+	// 5b) background commands are separate, without splitting fd redirects.
+	await setMode("normal");
+	check(
+		"background protected delete normal → block",
+		(await runCmd("true & rm -rf .env", PROJ)).verdict,
+		"block",
+	);
+	for (const [command, expected] of [
+		["cmd1 & cmd2", ["cmd1", "cmd2"]],
+		["cmd1 && cmd2", ["cmd1", "cmd2"]],
+		["echo x &> out", ["echo x &> out"]],
+		["printf x 2>&1", ["printf x 2>&1"]],
+	] as const) {
+		check(
+			`shell segment splitting: ${command}`,
+			JSON.stringify(shellParseMod.splitSegments(command)),
+			JSON.stringify(expected),
+		);
+	}
 
 	// 6) process substitution <( ) body is judged
 	await setMode("normal");

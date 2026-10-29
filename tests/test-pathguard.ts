@@ -4076,6 +4076,69 @@ await setMode("normal");
 	setWriteScope("global");
 }
 
+// ── Task 4: confirm before destructive config operations (RED first) ──
+{
+	const T4 = "/tmp/pgtest-task4";
+	rmSync(T4, { recursive: true, force: true });
+	mkdirSync(T4, { recursive: true });
+	const prevGlobalEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	process.env.PI_PATH_GUARD_SETTINGS = join(T4, "global.json");
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(T4, "projects");
+	writeFileSync(join(T4, "global.json"), JSON.stringify({ pathGuard: { mode: "normal", extraProtected: ["/tmp/t4-g1", "/tmp/t4-g2"] } }, null, 2));
+	const repo = join(T4, "repo");
+	mkdirSync(repo, { recursive: true });
+	const entryFile = projectEntryPath(repo);
+	mkdirSync(join(entryFile, ".."), { recursive: true });
+	writeFileSync(entryFile, JSON.stringify({ version: 1, project: realpathSync(repo), mode: "normal", extraProtected: ["/tmp/t4-own"] }));
+	applyConfig(readSavedConfig(repo, true));
+	setWriteScope("project");
+	const ownCount = () => (JSON.parse(readFileSync(entryFile, "utf8")).extraProtected ?? []).length;
+
+	// 1. CLI clear with UI, user declines → nothing cleared
+	const declineNotifies: string[] = [];
+	const declineCtx = { cwd: repo, isProjectTrusted: () => true, hasUI: true, ui: { notify: (m: string) => declineNotifies.push(m), confirm: async () => false, theme: themeMock, setStatus: () => {} } };
+	await panelMod.handlePathsCommand("paths protected clear", declineCtx as any);
+	check("declined CLI clear leaves entries untouched", String(ownCount()), "1");
+	check("declined CLI clear says cancelled", String(declineNotifies.join(" ").toLowerCase().includes("cancel")), "true");
+
+	// 2. CLI clear without UI → refused, nothing cleared
+	const headlessNotifies: string[] = [];
+	const headlessCtx = { cwd: repo, isProjectTrusted: () => true, hasUI: false, ui: { notify: (m: string) => headlessNotifies.push(m) } };
+	await panelMod.handlePathsCommand("paths protected clear", headlessCtx as any);
+	check("headless CLI clear refuses", String(ownCount()), "1");
+	check("headless CLI clear points at the settings file", String(headlessNotifies.join(" ").includes(entryFile)), "true");
+
+	// 3. CLI clear with UI, user accepts → cleared as before (regression)
+	const acceptNotifies: string[] = [];
+	const acceptCtx = { cwd: repo, isProjectTrusted: () => true, hasUI: true, ui: { notify: (m: string) => acceptNotifies.push(m), confirm: async () => true, theme: themeMock, setStatus: () => {} } };
+	await panelMod.handlePathsCommand("paths protected clear", acceptCtx as any);
+	check("accepted CLI clear removes own entries", String(ownCount()), "0");
+	check("accepted CLI clear reports the clear", String(acceptNotifies.join(" ").includes("cleared")), "true");
+	check("accepted CLI clear keeps inherited entries", String(pathList("protected").length), "2");
+
+	// 4. confirm prompt states how many entries and which layer
+	writeFileSync(projectEntryPath(repo), JSON.stringify({ version: 1, project: realpathSync(repo), mode: "normal", extraProtected: ["/tmp/t4-own"] }));
+	applyConfig(readSavedConfig(repo, true));
+	let confirmTitle = "";
+	const promptCtx = { cwd: repo, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async (t: string) => { confirmTitle = t; return false; }, theme: themeMock, setStatus: () => {} } };
+	await panelMod.handlePathsCommand("paths protected clear", promptCtx as any);
+	check("clear confirm names the count and layer", String(/1 protected path/.test(confirmTitle) && confirmTitle.includes("project")), "true");
+
+	// 5. reset-all-rules confirm states the scope
+	setWriteScope("global");
+	let resetTitle = "";
+	const menus = ["reset", undefined];
+	const rulesCtx = { cwd: repo, isProjectTrusted: () => true, hasUI: true, ui: { notify: () => {}, confirm: async (t: string) => { resetTitle = t; return false; }, select: async (_t: string, options: string[]) => menus.shift(), theme: themeMock, setStatus: () => {} } };
+	await panelMod.runRulesMenu(rulesCtx as any);
+	check("reset-all confirm states the scope", String(resetTitle.includes("global")), "true");
+
+	rmSync(T4, { recursive: true, force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+	setWriteScope("global");
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

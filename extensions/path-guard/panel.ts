@@ -111,6 +111,39 @@ export function actionClearPaths(
 	return `Path Guard: cleared ${result.cleared} ${kind} path(s) in the ${scope} layer${kept} (${persistNote(result.where!)})`;
 }
 
+/**
+ * Clear every entry of a path category in one layer — but only after the user
+ * confirms (destructive: wipes ALL entries of that category in the layer).
+ * Without a UI there is no way to confirm, so the operation is refused and the
+ * user is pointed at the settings file to edit manually.
+ */
+export async function confirmClearPaths(
+	kind: PathKind,
+	ctx: ExtensionCommandContext,
+	scope: ConfigScope = getWriteScope(),
+): Promise<string> {
+	if (!ctx.hasUI) {
+		const file =
+			scope === "global"
+				? globalSettingsPath()
+				: (getLayers().projectFile ?? projectSettingsPath(ctx.cwd));
+		return `Path Guard: clearing all ${kind} paths needs a UI to confirm — edit ${file ?? `the ${scope} settings file`} manually instead`;
+	}
+	const own = pathEntries(kind).filter((entry) => entry.layer === scope);
+	if (own.length > 0) {
+		const inherited = pathList(kind).length - own.length;
+		const ok = await ctx.ui.confirm(
+			`Clear ALL ${own.length} ${kind} path(s) in the ${scope} layer?`,
+			own.map((entry) => `· ${entry.normalized}`).join("\n") +
+				(inherited > 0
+					? `\n\n${inherited} inherited path(s) stay in effect.`
+					: ""),
+		);
+		if (!ok) return "Path Guard: cancelled, nothing cleared";
+	}
+	return actionClearPaths(kind, ctx, scope);
+}
+
 export const GUARD_MAIN_MENU = [
 	"switch — Switch mode (切换防护模式)",
 	"rules — Customize per-mode guard rules (定制每模式守护规则)",
@@ -545,7 +578,7 @@ export async function runRulesMenu(ctx: ExtensionCommandContext): Promise<void> 
 		}
 		if (op === "reset") {
 			const ok = await ctx.ui.confirm(
-				"Clear ALL rule overrides?",
+				`Clear ALL rule overrides in the ${getWriteScope()} layer?`,
 				"Reset every mode back to its built-in defaults?",
 			);
 			if (!ok) continue;
@@ -854,7 +887,7 @@ export class GuardPanel implements Component, Focusable {
 					this.push({ kind: "overview", scroll: 0 });
 				else if (id === "reset")
 					this.askConfirm(
-						"Clear ALL rule overrides?",
+						`Clear ALL rule overrides in the ${getWriteScope()} layer?`,
 						"Reset every mode back to its built-in defaults?",
 						() => {
 							this.status = actionResetAllRules(this.ctx);
@@ -1485,7 +1518,7 @@ export async function handlePathsCommand(raw: string, ctx: ExtensionCommandConte
 			return show(actionRemovePath(kind, norm, ctx));
 		}
 		case "clear":
-			return show(actionClearPaths(kind, ctx));
+			return show(await confirmClearPaths(kind, ctx));
 		default:
 			return show(PATHS_USAGE);
 	}

@@ -9,7 +9,7 @@ Intercepts destructive operations in tool calls (`bash`, `write`, `edit`): prote
 
 ## Feature highlights
 
-- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 22 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 22 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 20 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，22 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
+- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 22 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 22 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 22 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，22 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
 - **📁 Protected & trusted paths** — `/guard → paths` splits into two categories: **protected paths** (`/guard paths protected …`, the default) are guarded in **every** mode (incl. naked); **trusted paths** (`/guard paths trusted …`) are **always allowed** — operations on them pass like trusted mode, in any mode. System-important paths can never be trusted (see below). 管理**受保护路径**与**信任路径**两类路径。
 - **🔒 Three-way verdict** — every intercepted operation resolves to **block / confirm / pass**: block refuses outright, confirm asks you, pass executes. How strict the guard is depends entirely on your rules.
 
@@ -162,13 +162,13 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 ## Development / 开发与测试
 
-Automated tests (332 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
+Automated tests (386 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（332 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
+自动化测试（386 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
@@ -176,7 +176,7 @@ cd tests && node --experimental-strip-types test-pathguard.ts
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.7.3**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.7.4**.
 
 ## License
 

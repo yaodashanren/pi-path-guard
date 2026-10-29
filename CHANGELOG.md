@@ -2,7 +2,28 @@
 
 All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
-released entry below. Versions follow [Semantic Versioning](https://semver.org/). ## [1.7.3] — 2026-10-24: tunable `targetUnresolved` rule
+released entry below. Versions follow [Semantic Versioning](https://semver.org/).
+
+## [1.7.4] — 2026-10-29: honour the rule matrix in every judgement path
+
+### Fixed
+
+- **trusted mode no longer prompts for operations its rules already pass.** Several judges bypassed the rule table and returned a hardcoded `confirm` whenever the mode was not `naked`: unresolvable delete targets, bare `$VAR` script targets, bare `$VAR` redirect targets, `source` without a script operand, and `rsync --delete`. They now follow `targetUnresolved`, `scriptUnresolved`, `redirectUnresolved` and the `deleteOutside`/`deleteInProject` ladder, so trusted passes what its rules say it should.
+- **Confirm rules survive recursion.** `bash -c "git reset --hard"`, `echo "$(git reset --hard)"` and heredoc bodies used to drop the triggering `RuleId`, so the dialog could not offer the session-pass option and the same operation prompted repeatedly. Confirm verdicts now carry a deduplicated `RuleId[]` through command substitutions, shell wrappers, heredocs and compound-command aggregation.
+- **Background commands are judged on their own.** A single `&` (including the no-space form `true &rm -rf .env`) was not treated as a separator, so the trailing command was never checked. `&&`, `&>`, `&>>` and fd duplication such as `2>&1` keep their existing meaning.
+- **Every redirect target is checked.** Only the first redirect was inspected, so `echo x > harmless.txt > .env` passed. Redirects are now extracted in full, and a redirect confirm no longer short-circuits the rest of the segment — `rm -rf .env > "$X"` blocks, and `git reset --hard > "$X"` keeps both rules.
+- **Quoted and escaped `>` is no longer a redirect.** `echo '>.env'` / `echo \>.env` are plain text and pass again.
+- **In-place edits check every file operand.** `sed -i s/x/y/ .env README.md` only checked the last argument. All file operands are checked now, including attached `-e` expressions, `-f` script files and `--file=` forms; option arguments and the edit expression are not mistaken for files.
+
+### Tests
+
+- +42 assertions (**386 passing**): trusted rule-matrix cases, recursive session-pass retention, background/no-space `&`, multi-redirect aggregation, quoted/escaped redirects, and multi-file in-place forms.
+
+### Docs
+
+- README: corrected the stale rule count (20 → 22) and the assertion count (332 → 386).
+
+## [1.7.3] — 2026-10-24: tunable `targetUnresolved` rule
 
 ### Added
 - Write targets that cannot be resolved statically (`$VAR` / glob — shared by

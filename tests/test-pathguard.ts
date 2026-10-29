@@ -58,12 +58,17 @@ import {
 	setModeIn,
 	setRuleIn,
 	setWriteScope,
+	sessionPassRule,
+	clearSessionPass,
 } from "../extensions/path-guard/rules.ts";
 const panelMod = await import(
 	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
 );
 const shellParseMod = await import(
 	new URL("../extensions/path-guard/shell-parse.ts", import.meta.url).href,
+);
+const doctorMod = await import(
+	new URL("../extensions/path-guard/doctor.ts", import.meta.url).href,
 );
 mod.default(fakePi);
 
@@ -3954,6 +3959,69 @@ await setMode("normal");
 	setWriteScope("global");
 	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
 	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+}
+
+// ── /guard doctor: layered-config status report (Task 1) ─────────────
+{
+	const D = "/tmp/pgtest-doctor";
+	rmSync(D, { recursive: true, force: true });
+	mkdirSync(D, { recursive: true });
+	const prevGlobalEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+	const docGlobal = join(D, "global.json");
+	process.env.PI_PATH_GUARD_SETTINGS = docGlobal;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = join(D, "projects");
+
+	// State 1: global-only layer + warnings + session-pass rules
+	applyConfig({
+		global: { mode: "normal", extraProtected: ["/tmp/doc-secrets"] },
+		warnings: [
+			{ path: docGlobal, field: "trustedPaths", message: "relative path dropped" },
+		],
+	});
+	sessionPassRule("normal", "deleteInProject");
+	const v1 = doctorMod.doctorView("/tmp/doc-repo");
+	check("doctor view has a heading", v1.startsWith("Path Guard doctor") ? "heading" : "?", "heading");
+	check("doctor reports mode with global source", v1.includes("mode: normal") && v1.includes("from global settings") ? "yes" : "?", "yes");
+	check("doctor names the global settings file", v1.includes(docGlobal) ? "yes" : "?", "yes");
+	check("doctor lists config warnings", v1.includes("relative path dropped") ? "yes" : "?", "yes");
+	check("doctor shows protected path provenance", v1.includes("/tmp/doc-secrets") && v1.includes("[global]") ? "yes" : "?", "yes");
+	check("doctor shows empty trusted paths", v1.includes("trusted paths") && v1.includes("(none)") ? "yes" : "?", "yes");
+	check("doctor lists session-pass rules", v1.includes("deleteInProject") ? "yes" : "?", "yes");
+	check("doctor notes session passes are not persisted", v1.includes("never persisted") ? "yes" : "?", "yes");
+
+	// State 2: project layer active
+	const docRepo = join(D, "repo");
+	mkdirSync(docRepo, { recursive: true });
+	const docEntry = projectEntryPath(docRepo);
+	mkdirSync(join(docEntry, ".."), { recursive: true });
+	writeFileSync(docEntry, JSON.stringify({ version: 1, project: realpathSync(docRepo), mode: "strict", trustedPaths: ["/tmp/doc-trusted"] }));
+	applyConfig(readSavedConfig(docRepo, true));
+	const v2 = doctorMod.doctorView(docRepo);
+	check("doctor reports project-layer mode source", v2.includes("from project layer") ? "yes" : "?", "yes");
+	check("doctor names the project entry file", v2.includes(docEntry) ? "yes" : "?", "yes");
+	check("doctor labels the match kind", v2.includes("exact") ? "yes" : "?", "yes");
+	check("doctor shows trusted entry from project layer", v2.includes("/tmp/doc-trusted") && v2.includes("[project]") ? "yes" : "?", "yes");
+
+	// State 3: HOME cwd, empty layers
+	applyConfig({ global: {}, warnings: [] });
+	clearSessionPass();
+	const v3 = doctorMod.doctorView(homedir());
+	check("doctor marks a HOME cwd", v3.includes("HOME") ? "yes" : "?", "yes");
+	check("doctor shows (none) for empty sections", (v3.match(/\(none\)/g) ?? []).length >= 3 ? "yes" : "?", "yes");
+	check("doctor mode falls back to default", v3.includes("(default)") ? "yes" : "?", "yes");
+
+	// CLI dispatch: /guard doctor notifies with the view, UI or not
+	const docNotifies: string[] = [];
+	const docCtx = { cwd: docRepo, hasUI: false, ui: { notify: (m: string) => docNotifies.push(m) } };
+	await commands["guard"].handler("doctor", docCtx as any);
+	check("guard doctor dispatches to notify", docNotifies.length === 1 ? "one" : "?", "one");
+	check("guard doctor notify carries the view", docNotifies[0]?.startsWith("Path Guard doctor") ? "yes" : "?", "yes");
+
+	rmSync(D, { recursive: true, force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = prevGlobalEnv;
+	process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjectsEnv;
+	setWriteScope("global");
 }
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

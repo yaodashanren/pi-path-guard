@@ -30,6 +30,7 @@ import {
 	runRulesMenu,
 	runScopeMenu,
 } from "./panel.ts";
+import { doctorView } from "./doctor.ts";
 import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";
 
 /**
@@ -85,7 +86,7 @@ export default function (pi: ExtensionAPI) {
 	// /guard slash command: view / switch mode, and manage custom protected paths
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> add|rm|list|clear <path> manages paths",
+			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> add|rm|list|clear <path> manages paths, /guard doctor shows the layered-config status report",
 		handler: async (args, ctx) => {
 			let raw = args?.trim() ?? "";
 			// `/guard --project <anything>` saves the edit to this project's entry file.
@@ -97,6 +98,12 @@ export default function (pi: ExtensionAPI) {
 			// ── /guard project … : inspect/import/remove this project's config ──
 			if (m === "project" || m.startsWith("project ")) {
 				return handleProjectCommand(raw, ctx);
+			}
+
+			// ── /guard doctor : layered-config status report (works without UI) ──
+			if (m === "doctor") {
+				ctx.ui.notify(doctorView(ctx.cwd), "info");
+				return;
 			}
 			if (projectScope) {
 				// Create the entry on first use so /guard --project <mode> works from scratch.

@@ -1462,6 +1462,9 @@ export async function handleProjectCommand(
 			);
 		}
 		if (ctx.cwd) applyConfig(readSavedConfig(ctx.cwd, true));
+		// Re-derive the effective mode into the footer: applyConfig only updates
+		// the in-memory config; the status-bar mirror needs an explicit setMode.
+		setMode(getConfig().mode, ctx.ui);
 		return show(`Path Guard: removed project config ${file}`);
 	}
 

@@ -65,6 +65,16 @@ export default function (pi: ExtensionAPI) {
 				"warning",
 			);
 		}
+		// A hand-authored cwd/.pi/settings.json pathGuard block is only in effect
+		// when no projects entry matched (applyConfig overlays project ??
+		// authored); hint once so the user knows to migrate it to a managed
+		// project entry (spec §9).
+		if (cfg.authored && !cfg.project) {
+			ctx.ui.notify?.(
+				`hand-authored .pi/settings.json pathGuard block detected at ${cfg.authored.file} — run /guard project import to migrate it to a project entry`,
+				"info",
+			);
+		}
 		// A persisted loose mode survives into every new session; surface it so the
 		// user never runs unprotected without noticing (naked in particular).
 		if (getConfig().mode === "naked") {
@@ -109,7 +119,10 @@ export default function (pi: ExtensionAPI) {
 				// Create the entry on first use so /guard --project <mode> works from scratch.
 				const ensured = ensureProjectLayer(ctx.cwd);
 				if (!ensured.ok) {
-					ctx.ui.notify(`Path Guard: ${ensured.error}`, "warning");
+					ctx.ui.notify(
+					`Path Guard: ${ensured.error} — not switched; still ${getMode()}`,
+					"warning",
+				);
 					return;
 				}
 			}

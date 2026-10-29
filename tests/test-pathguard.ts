@@ -4139,6 +4139,114 @@ await setMode("normal");
 	setWriteScope("global");
 }
 
+// ── Task 5: three minor fixes ─────────────────────────────────────────────
+{
+const prevSettings = process.env.PI_PATH_GUARD_SETTINGS;
+const prevProjects = process.env.PI_PATH_GUARD_PROJECTS_DIR;
+const T5 = "/tmp/pgtest-task5";
+const T5_GLOBAL = join(T5, "global-settings.json");
+const T5_PROJECTS = join(T5, "projects");
+rmSync(T5, { recursive: true, force: true });
+mkdirSync(T5_PROJECTS, { recursive: true });
+process.env.PI_PATH_GUARD_SETTINGS = T5_GLOBAL;
+process.env.PI_PATH_GUARD_PROJECTS_DIR = T5_PROJECTS;
+writeFileSync(T5_GLOBAL, JSON.stringify({ pathGuard: { mode: "normal" } }));
+// sync the in-memory config/mode from the fresh global before asserting
+handlers["session_start"](
+	{ reason: "startup" },
+	{ cwd: T5, isProjectTrusted: () => true, ui: { theme: themeMock, setStatus: () => {}, notify: () => {} } },
+);
+
+// 1. HOME + `--project <mode>`: no "switched" claim; message says still <mode>
+{
+	const homeNotifies: string[] = [];
+	await commands["guard"].handler("--project strict", {
+		cwd: homedir(),
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: (m: string) => homeNotifies.push(m),
+			confirm: async () => true,
+			theme: themeMock,
+			setStatus: () => {},
+		},
+	});
+	const joined = homeNotifies.join(" ");
+	check("HOME --project failure never claims switched", String(joined.includes("switched to")), "false");
+	check("HOME --project failure says not switched", String(joined.includes("not switched")), "true");
+	check("HOME --project failure names the current mode", String(/still\s+normal/.test(joined)), "true");
+	check("HOME --project failure leaves mode unchanged", getMode(), "normal");
+}
+
+// 2. project remove refreshes the footer status to the re-derived mode
+{
+	const repo = join(T5, "remove-repo");
+	mkdirSync(repo, { recursive: true });
+	writeFileSync(T5_GLOBAL, JSON.stringify({ pathGuard: { mode: "loose" } }));
+	const entry = projectEntryPath(repo);
+	mkdirSync(T5_PROJECTS, { recursive: true });
+	writeFileSync(entry, JSON.stringify({ version: 1, project: realpathSync(repo), mode: "trusted" }));
+	handlers["session_start"](
+		{ reason: "startup" },
+		{ cwd: repo, isProjectTrusted: () => true, ui: { theme: themeMock, setStatus: () => {}, notify: () => {} } },
+	);
+	check("precondition: project mode in effect", getMode(), "trusted");
+	const statusCalls: string[] = [];
+	await commands["guard"].handler("project remove", {
+		cwd: repo,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: () => {},
+			confirm: async () => true,
+			theme: themeMock,
+			setStatus: (k: string) => statusCalls.push(k + ":" + String(getMode())),
+		},
+	});
+	check("project remove deletes the entry", String(existsSync(entry)), "false");
+	check("project remove refreshes footer status", String(statusCalls.some((s) => s.endsWith(":loose"))), "true");
+	check("project remove re-derives global mode", getMode(), "loose");
+}
+
+// 3. session_start: hand-authored block (no project entry) → migration hint
+{
+	const repo = join(T5, "authored-repo");
+	mkdirSync(join(repo, ".pi"), { recursive: true });
+	writeFileSync(T5_GLOBAL, JSON.stringify({ pathGuard: { mode: "normal" } }));
+	writeFileSync(join(repo, ".pi", "settings.json"), JSON.stringify({ pathGuard: { mode: "strict" } }));
+	const notifies: string[] = [];
+	handlers["session_start"](
+		{ reason: "startup" },
+		{ cwd: repo, isProjectTrusted: () => true, ui: { theme: themeMock, setStatus: () => {}, notify: (m: string) => notifies.push(m) } },
+	);
+	check("authored block triggers migration hint", String(notifies.join(" ").includes("project import")), "true");
+
+	// a matched projects entry → authored block is NOT in effect → no hint
+	writeFileSync(projectEntryPath(repo), JSON.stringify({ version: 1, project: realpathSync(repo), mode: "strict" }));
+	notifies.length = 0;
+	handlers["session_start"](
+		{ reason: "startup" },
+		{ cwd: repo, isProjectTrusted: () => true, ui: { theme: themeMock, setStatus: () => {}, notify: (m: string) => notifies.push(m) } },
+	);
+	check("project entry matched → no migration hint", String(notifies.join(" ").includes("project import")), "false");
+
+	// no authored block anywhere → no hint
+	rmSync(join(repo, ".pi", "settings.json"), { force: true });
+	rmSync(projectEntryPath(repo), { force: true });
+	notifies.length = 0;
+	handlers["session_start"](
+		{ reason: "startup" },
+		{ cwd: repo, isProjectTrusted: () => true, ui: { theme: themeMock, setStatus: () => {}, notify: (m: string) => notifies.push(m) } },
+	);
+	check("no authored block → no migration hint", String(notifies.join(" ").includes("project import")), "false");
+}
+
+process.env.PI_PATH_GUARD_SETTINGS = prevSettings;
+process.env.PI_PATH_GUARD_PROJECTS_DIR = prevProjects;
+rmSync(T5, { recursive: true, force: true });
+setWriteScope("global");
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

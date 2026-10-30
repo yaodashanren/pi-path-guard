@@ -44,6 +44,8 @@ const mod = await import(EXT);
 import { findProjectConfig, mergeLayers, projectEntryPath, readProjectEntry, readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
 import * as explainMod from "../extensions/path-guard/explain.ts";
 import {
+	RULE_GROUPS,
+	RULE_IDS,
 	addPathIn,
 	applyConfig,
 	clearPathsIn,
@@ -4596,6 +4598,28 @@ setWriteScope("global");
 	exNotifies.length = 0;
 	await commands["guard"].handler("explain", exCtx as any);
 	check("explain without argument shows usage", String(/Usage: \/guard explain/.test(exNotifies.join("\n"))), "true");
+}
+
+// ── RULE_GROUPS: two-level picker grouping table (phase3 rule-groups UI) ──
+{
+	const groupIds = RULE_GROUPS.map((g) => g.id);
+	check("ruleGroups: exactly 7 groups", String(groupIds.length), "7");
+	check(
+		"ruleGroups: group ids unique",
+		String(new Set(groupIds).size),
+		String(groupIds.length),
+	);
+	const flatRules = RULE_GROUPS.flatMap((g) => [...g.rules]);
+	check(
+		"ruleGroups cover every rule exactly once",
+		JSON.stringify([...flatRules].sort()),
+		JSON.stringify([...RULE_IDS].sort()),
+	);
+	check(
+		"ruleGroups: no duplicate rule inside groups",
+		String(new Set(flatRules).size),
+		String(flatRules.length),
+	);
 }
 
 // ── 8.5 trusted acceptance: askConfirm behavior (acceptance — failures = real bugs) ──

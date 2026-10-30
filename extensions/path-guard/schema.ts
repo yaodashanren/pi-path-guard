@@ -95,6 +95,78 @@ export const RULE_IDS: readonly RuleId[] = [
 	"commandNameUnresolved",
 ];
 
+/** Rule groups for the two-level rule picker UI. Pure data. */
+export type RuleGroupId =
+	| "system"
+	| "writes"
+	| "deletes"
+	| "overwrite"
+	| "gitPipes"
+	| "scripts"
+	| "unknowable";
+
+/** One group in the two-level rule picker: stable id, bilingual label, member rules. */
+export interface RuleGroup {
+	id: RuleGroupId;
+	label: string;
+	rules: readonly RuleId[];
+}
+
+/** Two-level rule picker grouping — every RuleId must appear exactly once. */
+export const RULE_GROUPS: readonly RuleGroup[] = [
+	{
+		id: "system",
+		label: "System — 系统级破坏/提权远程",
+		rules: ["blockGroup", "confirmGroup"],
+	},
+	{
+		id: "writes",
+		label: "Writes — 写入/截断",
+		rules: [
+			"writeOutside",
+			"writeHome",
+			"writeInProject",
+			"truncateInProject",
+			"truncateOutside",
+		],
+	},
+	{
+		id: "deletes",
+		label: "Deletes — 删除",
+		rules: ["deleteOutside", "deleteInProject"],
+	},
+	{
+		id: "overwrite",
+		label: "Overwrite — mv/cp 覆盖",
+		rules: [
+			"overwriteOutsideExisting",
+			"overwriteOutsideNew",
+			"overwriteInProject",
+		],
+	},
+	{
+		id: "gitPipes",
+		label: "Git & Pipes — git破坏/管道进shell",
+		rules: ["gitDestructive", "pipeToShellInProject", "pipeToShellOutside"],
+	},
+	{
+		id: "scripts",
+		label: "Scripts — 运行脚本",
+		rules: ["runScriptInProject", "runScriptOutside", "runScriptProtected"],
+	},
+	{
+		id: "unknowable",
+		label: "Unknowable — 不可静态解析/内容不可知",
+		rules: [
+			"scriptUnresolved",
+			"redirectUnresolved",
+			"targetUnresolved",
+			"commandNameUnresolved",
+			"archiveExtract",
+		],
+	},
+];
+
 /** Bilingual short labels for each tunable rule (used in the rule-editor menu). */
 export const RULE_DESCRIPTIONS: Record<RuleId, string> = {
 	blockGroup: "system-destructive mkfs/reboot (系统级破坏)",

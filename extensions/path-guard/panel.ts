@@ -7,7 +7,7 @@ import { NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, TRUSTED_SWITCH_WARNING,
 import { projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
 import { resolveReal } from "./paths.ts";
 import { applyConfig, getConfigWarnings, getLayers, projectSettingsPath, readSavedConfig } from "./rules.ts";
-import type { ConfigWarning, PathGuardLayer, RuleGroup } from "./schema.ts";
+import type { ConfigWarning, PathGuardLayer, RuleGroup, RuleGroupId } from "./schema.ts";
 import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_GROUPS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, ruleProvenance, provenanceSuffix, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
 
 // path-guard — /guard interactive UI: chained menus, actions, rules matrix,
@@ -489,6 +489,23 @@ export function ruleGroupOptions(mode: GuardMode): string[] {
 }
 
 /**
+ * Options for the second (rule) level of the rule editor: the rows of ONE
+ * group (`${rule} — ${description} (${level}${provenanceSuffix})`) plus back.
+ * `reset` is deliberately absent — it resets the whole mode, so it stays on
+ * the group level. Shared by the CLI editor and the /guard overlay so the two
+ * entries cannot drift apart.
+ */
+export function ruleRowOptions(mode: GuardMode, group: RuleGroup): string[] {
+	return [
+		...group.rules.map(
+			(r) =>
+				`${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(mode, r)}${provenanceSuffix(mode, r)})`,
+		),
+		"back — Back to group list (返回)",
+	];
+}
+
+/**
  * Rule editor for one mode, two levels deep: first pick a rule group (the
  * per-group override counts are shown on each row), then a rule inside it.
  * The level pick returns to the same group list, so several rules can be set
@@ -540,13 +557,7 @@ async function runRuleGroupEditor(
 	ctx: ExtensionCommandContext,
 ): Promise<boolean> {
 	while (true) {
-		const options = [
-			...group.rules.map(
-				(r) =>
-					`${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(mode, r)}${provenanceSuffix(mode, r)})`,
-			),
-			"back — Back to group list (返回)",
-		];
+		const options = ruleRowOptions(mode, group);
 		const picked = await ctx.ui.select(
 			`Mode: ${mode} · ${group.label} — pick a rule to set (level + source shown):`,
 			options,
@@ -660,7 +671,8 @@ export type PanelScreen =
 	| { kind: "mode"; idx: number }
 	| { kind: "rules"; idx: number }
 	| { kind: "ruleMode"; idx: number }
-	| { kind: "ruleEditor"; mode: GuardMode; idx: number }
+	| { kind: "ruleGroup"; mode: GuardMode; idx: number }
+	| { kind: "ruleEditor"; mode: GuardMode; group: RuleGroupId; idx: number }
 	| { kind: "ruleLevel"; mode: GuardMode; rule: RuleId; idx: number }
 	| { kind: "overview"; scroll: number }
 	| { kind: "pathsCategory"; idx: number }
@@ -720,14 +732,14 @@ export function panelOptions(s: PanelScreen): string[] {
 				...GUARD_MODES.map((mo) => `${mo} — ${MODE_DESCRIPTIONS[mo]}`),
 				"back — Back (返回)",
 			];
-		case "ruleEditor":
-			return [
-				...RULE_IDS.map(
-					(r) => `${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(s.mode, r)})`,
-				),
-				"reset — Reset this mode to built-in defaults (恢复该模式默认)",
-				"back — Back to mode list (返回)",
-			];
+		case "ruleGroup":
+			return ruleGroupOptions(s.mode);
+		case "ruleEditor": {
+			const group = RULE_GROUPS.find((g) => g.id === s.group);
+			return group
+				? ruleRowOptions(s.mode, group)
+				: ["back — Back to group list (返回)"];
+		}
 		case "ruleLevel":
 			return [
 				...RULE_LEVELS.map(
@@ -958,7 +970,7 @@ export class GuardPanel implements Component, Focusable {
 				if (id === "reset") this.push({ kind: "resetModePick", idx: 0 });
 				else if (id === "back") this.pop();
 				else if (isGuardMode(id))
-					this.push({ kind: "ruleEditor", mode: id, idx: 0 });
+					this.push({ kind: "ruleGroup", mode: id, idx: 0 });
 				return;
 			case "resetModePick": {
 				if (id === "back") {
@@ -977,7 +989,7 @@ export class GuardPanel implements Component, Focusable {
 				);
 				return;
 			}
-			case "ruleEditor": {
+			case "ruleGroup": {
 				const mode = s.mode;
 				if (id === "reset")
 					this.askConfirm(
@@ -989,13 +1001,31 @@ export class GuardPanel implements Component, Focusable {
 						},
 					);
 				else if (id === "back") this.pop();
-				else if ((RULE_IDS as readonly string[]).includes(id))
-					this.push({
-						kind: "ruleLevel",
-						mode,
-						rule: id as RuleId,
-						idx: 0,
-					});
+				else {
+					// Groups are rows 0..RULE_GROUPS.length-1 of this screen and the
+					// shared option builder preserves that order — resolve by index
+					// (matching on label text would be brittle) and let the explicit
+					// reset/back id checks above exclude their rows.
+					const group = RULE_GROUPS[s.idx];
+					if (group)
+						this.push({
+							kind: "ruleEditor",
+							mode,
+							group: group.id,
+							idx: 0,
+						});
+				}
+				return;
+			}
+			case "ruleEditor": {
+				const { mode, group: groupId } = s;
+				if (id === "back") this.pop();
+				else {
+					// Rules are rows 0..group.rules.length-1 of this screen.
+					const group = RULE_GROUPS.find((g) => g.id === groupId);
+					const rule = group?.rules[s.idx];
+					if (rule) this.push({ kind: "ruleLevel", mode, rule, idx: 0 });
+				}
 				return;
 			}
 			case "ruleLevel": {
@@ -1191,12 +1221,18 @@ export class GuardPanel implements Component, Focusable {
 				out.push("Reset which mode to its built-in defaults?", "");
 				out.push(...this.listLines(panelOptions(s), s.idx));
 				break;
-			case "ruleEditor":
+			case "ruleGroup":
+				out.push(`Pick a rule group (mode: ${s.mode}):`);
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "ruleEditor": {
+				const group = RULE_GROUPS.find((g) => g.id === s.group);
 				out.push(
-					`Mode: ${s.mode} — pick a rule to set (current levels shown):`,
+					`Mode: ${s.mode} · Group: ${group ? group.label : s.group} — pick a rule to set (level + source shown):`,
 				);
 				out.push(...this.listLines(panelOptions(s), s.idx, 16));
 				break;
+			}
 			case "ruleLevel":
 				out.push(
 					`Mode: ${s.mode} · Rule: ${s.rule} — ${RULE_DESCRIPTIONS[s.rule]}`,

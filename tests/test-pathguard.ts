@@ -714,15 +714,17 @@ const panelPrevMode =
 	await setMode(panelPrevMode); // restore for the rest of the suite
 }
 
-// rule editing: rules → normal → writeHome → block (in-panel)
+// rule editing: rules → normal → Writes → writeHome → block (in-panel)
 {
 	const p = await openGuardPanel();
 	p.press(KEY_DOWN); // main: rules (idx 1)
 	p.press(KEY_ENTER);
 	p.press(KEY_ENTER); // rules → mode list (idx 0)
 	p.press(KEY_DOWN); // → normal (idx 1)
-	p.press(KEY_ENTER); // → normal rule editor
-	for (let i = 0; i < 3; i++) p.press(KEY_DOWN); // blockGroup…writeHome
+	p.press(KEY_ENTER); // → normal rule groups
+	p.press(KEY_DOWN); // system → Writes (idx 1)
+	p.press(KEY_ENTER); // → writes rule list
+	p.press(KEY_DOWN); // writeOutside → writeHome (idx 1)
 	p.press(KEY_ENTER); // → rule level
 	p.press(KEY_ENTER); // block (idx 0) → apply
 	check(
@@ -4982,6 +4984,182 @@ setWriteScope("global");
 		);
 	} finally {
 		clearSessionPass();
+		applyConfig({ global: {}, warnings: [] });
+	}
+}
+// ── GuardPanel: two-level group → rule navigation (phase3 rule-groups) ──
+// The overlay mirrors the CLI editor: ruleMode → ruleGroup → ruleEditor →
+// ruleLevel, with reset living on the group screen (whole-mode reset).
+{
+	const PANEL2_SETTINGS = "/tmp/pgtest/panel-rulesettings.json";
+	const prevEnv2 = process.env.PI_PATH_GUARD_SETTINGS;
+	rmSync(PANEL2_SETTINGS, { force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = PANEL2_SETTINGS;
+	applyConfig({ global: {}, warnings: [] });
+	const label = (id: string) => RULE_GROUPS.find((g) => g.id === id)!.label;
+	try {
+		// 1. ruleGroup screen mirrors the shared CLI group list verbatim
+		const groupOpts: string[] =
+			panelMod.panelOptions({
+				kind: "ruleGroup",
+				mode: "normal",
+				idx: 0,
+			} as any) ?? [];
+		check(
+			"panel ruleGroup: options mirror the shared group list",
+			String(
+				JSON.stringify(groupOpts) ===
+					JSON.stringify(panelMod.ruleGroupOptions("normal")),
+			),
+			"true",
+		);
+		check(
+			"panel ruleGroup: 7 groups + reset + back",
+			String(groupOpts.length),
+			"9",
+		);
+		check(
+			"panel ruleGroup: reset lives at the group level",
+			String(groupOpts.some((o) => o.startsWith("reset —"))),
+			"true",
+		);
+
+		// 2. ruleEditor screen = only that group's rules (+ back, no reset)
+		const writes = RULE_GROUPS.find((g) => g.id === "writes")!;
+		const ruleOpts: string[] =
+			panelMod.panelOptions({
+				kind: "ruleEditor",
+				mode: "normal",
+				group: "writes",
+				idx: 0,
+			} as any) ?? [];
+		check(
+			"panel ruleEditor: rows are the selected group's rules + back",
+			String(
+				typeof panelMod.ruleRowOptions === "function" &&
+					JSON.stringify(ruleOpts) ===
+						JSON.stringify(panelMod.ruleRowOptions("normal", writes)),
+			),
+			"true",
+		);
+		check(
+			"panel ruleEditor: only the group's rules (+ back)",
+			String(ruleOpts.length),
+			"6",
+		);
+		check(
+			"panel ruleEditor: no reset row",
+			String(ruleOpts.some((o) => o.startsWith("reset"))),
+			"false",
+		);
+		check(
+			"panel ruleEditor: row carries level + provenance suffix",
+			String(ruleOpts[0]),
+			`writeOutside — ${RULE_DESCRIPTIONS.writeOutside} (${rlFor("normal", "writeOutside")}${provenanceSuffix("normal", "writeOutside")})`,
+		);
+
+		// 3. navigation: rules → mode list → normal → group list
+		const p = await openGuardPanel();
+		p.press(KEY_DOWN);
+		p.press(KEY_ENTER); // main → rules
+		p.press(KEY_ENTER); // rules → mode list (mode row idx 0)
+		p.press(KEY_DOWN);
+		p.press(KEY_ENTER); // → normal
+		const groupRender = p.render();
+		check(
+			"panel nav: mode selection lands on the group list",
+			String(groupRender.includes("Pick a rule group (mode: normal)")),
+			"true",
+		);
+		check(
+			"panel nav: the group list shows the groups' override counts",
+			String(
+				groupRender.includes(`${label("writes")} (5 rules, 0 overrides)`),
+			),
+			"true",
+		);
+
+		// 4. group selection opens that group's rule list (index-based)
+		p.press(KEY_DOWN);
+		p.press(KEY_ENTER); // system → writes
+		const editorRender = p.render();
+		check(
+			"panel nav: group selection opens its rule list",
+			String(editorRender.includes("Mode: normal · Group:")),
+			"true",
+		);
+		check(
+			"panel nav: the rule list only has that group's rules",
+			String(
+				editorRender.includes("writeHome") &&
+					!editorRender.includes("archiveExtract") &&
+					!editorRender.includes("deleteInProject"),
+			),
+			"true",
+		);
+
+		// 5. back chain: ruleEditor → ruleGroup → ruleMode
+		p.press(KEY_ESC);
+		check(
+			"panel nav: back from the rule list returns to the group list",
+			String(p.render().includes("Pick a rule group (mode: normal)")),
+			"true",
+		);
+		p.press(KEY_ESC);
+		check(
+			"panel nav: back from the group list returns to the mode list",
+			String(p.render().includes("Pick a mode to customize:")),
+			"true",
+		);
+
+		// 6. rule → level, and the edit is applied
+		const p2 = await openGuardPanel();
+		p2.press(KEY_DOWN);
+		p2.press(KEY_ENTER); // main → rules
+		p2.press(KEY_ENTER); // rules → mode list
+		p2.press(KEY_DOWN);
+		p2.press(KEY_ENTER); // → normal
+		p2.press(KEY_DOWN);
+		p2.press(KEY_ENTER); // → writes
+		p2.press(KEY_DOWN);
+		p2.press(KEY_ENTER); // → writeHome → rule level
+		check(
+			"panel nav: selecting a rule opens the level picker",
+			String(p2.render().includes("Mode: normal · Rule: writeHome")),
+			"true",
+		);
+		p2.press(KEY_ENTER); // block (idx 0) → apply
+		check(
+			"panel nav: the level picked from a group is applied",
+			String(p2.render().includes("set normal.writeHome = block")),
+			"true",
+		);
+
+		// 7. reset at the group level asks the in-panel confirmation
+		const p3 = await openGuardPanel();
+		p3.press(KEY_DOWN);
+		p3.press(KEY_ENTER); // main → rules
+		p3.press(KEY_ENTER); // rules → mode list
+		p3.press(KEY_DOWN);
+		p3.press(KEY_ENTER); // → normal group list
+		for (let i = 0; i < RULE_GROUPS.length; i++) p3.press(KEY_DOWN);
+		p3.press(KEY_ENTER); // reset row → in-panel confirm
+		check(
+			"panel ruleGroup: reset asks the in-panel confirmation",
+			String(p3.render().includes('Reset mode "normal" to built-in defaults?')),
+			"true",
+		);
+		p3.press(KEY_ENTER); // yes
+		check(
+			"panel ruleGroup: accepted reset keeps the group list visible",
+			String(
+				p3.render().includes("reset mode normal") &&
+					p3.render().includes("Pick a rule group (mode: normal)"),
+			),
+			"true",
+		);
+	} finally {
+		process.env.PI_PATH_GUARD_SETTINGS = prevEnv2;
 		applyConfig({ global: {}, warnings: [] });
 	}
 }

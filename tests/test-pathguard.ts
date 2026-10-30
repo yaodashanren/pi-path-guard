@@ -4598,6 +4598,136 @@ setWriteScope("global");
 	check("explain without argument shows usage", String(/Usage: \/guard explain/.test(exNotifies.join("\n"))), "true");
 }
 
+// ── 8.5 trusted acceptance: askConfirm behavior (acceptance — failures = real bugs) ──
+{
+	await setMode("trusted");
+	newSession(); // fresh session state (clears session passes); re-enter trusted
+	await setMode("trusted");
+
+	// 1. trusted mode: ordinary rules pass → no prompt at all
+	const probes1 = ['rm "$TARGET"', 'echo x > "$TARGET"', 'source "$SCRIPT"'];
+	for (const cmd of probes1) {
+		const r = await runCmd(cmd, PROJ);
+		check(
+			`8.5 trusted: no prompt for ${cmd}`,
+			String(r.verdict === "pass" && r.selectCalls === 0),
+			"true",
+		);
+	}
+
+	// 2. gitDestructive still prompts in trusted (confirm-group unaffected by mode);
+	//    all variants surface the gitDestructive rule
+	const gitProbes = [
+		'bash -c "git reset --hard"',
+		"git reset --hard",
+		'echo "$(git reset --hard)"',
+	];
+	for (const cmd of gitProbes) {
+		const r = await runCmd(cmd, PROJ);
+		const opts = selectOptions.flat().join(" | ");
+		check(
+			`8.5 trusted: prompts for ${cmd}`,
+			String(r.verdict === "confirm" && r.selectCalls === 1),
+			"true",
+		);
+		check(
+			`8.5 trusted: gitDestructive rule surfaced for ${cmd}`,
+			String(opts.includes("gitDestructive")),
+			"true",
+		);
+	}
+
+	// session pass → all three stop prompting in-session
+	sessionPassRule("trusted", "gitDestructive");
+	try {
+		for (const cmd of gitProbes) {
+			const r = await runCmd(cmd, PROJ);
+			check(
+				`8.5 trusted: session pass silences ${cmd}`,
+				String(r.verdict === "pass" && r.selectCalls === 0),
+				"true",
+			);
+		}
+	} finally {
+		clearSessionPass();
+	}
+
+	// 3. fresh-session reset → prompting returns
+	clearSessionPass();
+	newSession();
+	await setMode("trusted");
+	{
+		const r = await runCmd("git reset --hard", PROJ);
+		check(
+			"8.5 trusted: fresh session → git reset --hard prompts again",
+			String(r.verdict === "confirm" && r.selectCalls === 1),
+			"true",
+		);
+	}
+
+	// 4. sudo ls: prompts, NO session-pass option, by-design copy present
+	{
+		const r = await runCmd("sudo ls", PROJ);
+		check(
+			"8.5 trusted: sudo ls prompts",
+			String(r.verdict === "confirm" && r.selectCalls === 1),
+			"true",
+		);
+		const opts = selectOptions[selectOptions.length - 1] ?? [];
+		check(
+			"8.5 trusted: sudo has no session-pass option",
+			String(!opts.some((o) => o.includes("pass"))),
+			"true",
+		);
+		const msg = selectMessages.join(" ");
+		check(
+			"8.5 trusted: sudo copy mentions by-design / every time",
+			String(/every time \(by design\)/.test(msg)),
+			"true",
+		);
+	}
+
+	// 5. mkfs on a device path: blocked without prompting
+	{
+		const r = await runCmd("mkfs.ext4 /dev/sda1", PROJ);
+		check(
+			"8.5 trusted: mkfs blocked without prompting",
+			String(r.verdict === "block" && r.selectCalls === 0),
+			"true",
+		);
+	}
+
+	// 6. cross-mode sanity: the (1) probes are NOT pass in normal and strict.
+	// README: redirectUnresolved/scriptUnresolved are strict=block,
+	// normal/loose=confirm; rm of an unresolvable path confirms in both.
+	for (const mode of ["normal", "strict"] as const) {
+		await setMode(mode);
+		newSession();
+		await setMode(mode);
+		{
+			const r = await runCmd('rm "$TARGET"', PROJ);
+			check(
+				`8.5 ${mode}: prompts for rm "$TARGET"`,
+				String(r.verdict === "confirm" && r.selectCalls === 1),
+				"true",
+			);
+		}
+		const expect = mode === "strict" ? "block" : "confirm";
+		for (const cmd of ['echo x > "$TARGET"', 'source "$SCRIPT"']) {
+			const r = await runCmd(cmd, PROJ);
+			check(
+				`8.5 ${mode}: ${cmd} → ${expect}`,
+				String(r.verdict === expect && r.selectCalls === (expect === "confirm" ? 1 : 0)),
+				"true",
+			);
+		}
+	}
+
+	// restore default state
+	newSession();
+	await setMode("normal");
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

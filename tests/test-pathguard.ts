@@ -301,21 +301,60 @@ check(
 	"loose",
 );
 
-// invalid arg → falls back to main menu (same rows as the panel main menu)
-let bogusOptions: string[] = [];
-await commands["guard"].handler("bogus", {
-	hasUI: true,
-	ui: {
-		notify: () => {},
-		select: async (_t: string, options: string[]) => {
-			bogusOptions = options;
-			return undefined;
+// invalid arg → falls back to the main menu, and EVERY main-menu row must
+// dispatch to its own sub-menu/report. Comparing the menu array with itself (as
+// the old assertion did) cannot notice a row with no dispatcher branch — such a
+// row silently falls through to the mode picker instead.
+async function mainMenuRow(row: string) {
+	const titles: string[] = [];
+	const options: string[][] = [];
+	const notes: string[] = [];
+	let calls = 0;
+	await commands["guard"].handler("bogus", {
+		cwd: PROJ,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: (m: string) => notes.push(m),
+			confirm: async () => false,
+			setWidget: () => {},
+			select: async (t: string, o: string[]) => {
+				calls++;
+				titles.push(t);
+				options.push([...o]);
+				return calls === 1 ? row : undefined;
+			},
 		},
-	},
-});
+	});
+	return { titles, options, notes, calls };
+}
+const MAIN_ROW_SCREEN: Record<string, string> = {
+	switch: "choose one:",
+	rules: "Choose an action:",
+	paths: "choose a path category",
+	scope: "where should edits be saved",
+};
+const menuRows = panelMod.GUARD_MAIN_MENU;
+check("/guard main menu has five rows", String(menuRows.length), "5");
+for (const row of menuRows) {
+	const id = row.split(/\s+/)[0];
+	const reached = await mainMenuRow(row);
+	const hit =
+		id === "doctor"
+			? reached.calls === 2 &&
+				String(reached.notes[0] ?? "").startsWith("Path Guard doctor")
+			: String(reached.titles[1] ?? "").includes(MAIN_ROW_SCREEN[id] ?? "\u0000");
+	check(
+		`/guard main menu row "${id}" dispatches to its own screen`,
+		String(hit),
+		"true",
+	);
+}
+const fallbackMenu = await mainMenuRow(menuRows[0]);
 check(
-	"/guard invalid arg falls back to main menu",
-	JSON.stringify(bogusOptions) === JSON.stringify(panelMod.GUARD_MAIN_MENU)
+	"/guard invalid arg falls back to the main menu",
+	JSON.stringify(fallbackMenu.options[0]) === JSON.stringify(menuRows) &&
+		fallbackMenu.titles[0].includes("choose an action")
 		? "menu"
 		: "?",
 	"menu",
@@ -4845,7 +4884,10 @@ setWriteScope("global");
 		},
 	};
 	applyConfig({ global: navLayer, warnings: [] });
-	sessionPassRule("normal", "writeInProject"); // must NOT count as an override
+	// A session pass on a non-`pass` default rule (truncateInProject defaults to
+	// "confirm"): with writeInProject (default "pass") the old coincidence would
+	// hide a level/provenance contradiction.
+	sessionPassRule("normal", "truncateInProject"); // must NOT count as an override
 
 	const label = (id: string) => RULE_GROUPS.find((g) => g.id === id)!.label;
 	const writesLabel = label("writes");
@@ -4938,13 +4980,17 @@ setWriteScope("global");
 		);
 		check(
 			"cli editor: default provenance has no suffix",
-			String(opts2[3]),
-			`truncateInProject — ${RULE_DESCRIPTIONS.truncateInProject} (${rlFor("normal", "truncateInProject")})`,
+			String(opts2[4]),
+			`truncateOutside — ${RULE_DESCRIPTIONS.truncateOutside} (${rlFor("normal", "truncateOutside")})`,
 		);
+		// The level shown for a session-passed rule must be `pass` (what rl()
+		// returns), never the persisted/default level next to a `, session-pass`
+		// suffix. truncateInProject defaults to "confirm", so this cannot pass by
+		// coincidence the way writeInProject (default "pass") could.
 		check(
-			"cli editor: session-pass is rendered as a suffix",
-			String(String(opts2[2] ?? "").endsWith("(pass, session-pass)")),
-			"true",
+			"cli editor: session-pass shows the effective pass level + suffix",
+			String(opts2[3]),
+			`truncateInProject — ${RULE_DESCRIPTIONS.truncateInProject} (pass, session-pass)`,
 		);
 		check("cli editor: second-level back returns to the group list", String(r2.calls[2]?.options.length), "9");
 

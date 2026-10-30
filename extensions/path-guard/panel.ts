@@ -9,10 +9,20 @@ import { resolveReal } from "./paths.ts";
 import { doctorView } from "./doctor.ts";
 import { applyConfig, getConfigWarnings, getLayers, projectSettingsPath, readSavedConfig } from "./rules.ts";
 import type { ConfigWarning, PathGuardLayer, RuleGroup, RuleGroupId } from "./schema.ts";
-import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_GROUPS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, ruleProvenance, provenanceSuffix, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
+import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_GROUPS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, isSessionPassed, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, ruleProvenance, provenanceSuffix, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
 
 // path-guard — /guard interactive UI: chained menus, actions, rules matrix,
 // the single self-contained overlay panel, and warning confirmations.
+
+/**
+ * Level shown in the UI for a (mode, rule) pair. A session pass outranks every
+ * persisted layer and is what `rl()` returns, so the displayed level must honour
+ * it — otherwise a row reads `(confirm, session-pass)` while the real verdict is
+ * `pass`, contradicting the judgement precedence the suffix claims to mirror.
+ */
+function displayLevel(mode: GuardMode, rule: RuleId): RuleLevel {
+	return isSessionPassed(mode, rule) ? "pass" : rlFor(mode, rule);
+}
 
 /** Switch the active mode: update config, refresh the footer, persist. Confirm first. */
 export function actionSwitchMode(
@@ -440,7 +450,7 @@ export async function ruleLevelPicker(
 	ctx: ExtensionCommandContext,
 ): Promise<void> {
 	const dflt = DEFAULT_MODES[mode][rule];
-	const cur = rlFor(mode, rule);
+	const cur = displayLevel(mode, rule);
 	const options = [
 		...RULE_LEVELS.map(
 			(l) =>
@@ -501,7 +511,7 @@ export function ruleRowOptions(mode: GuardMode, group: RuleGroup): string[] {
 	return [
 		...group.rules.map(
 			(r) =>
-				`${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(mode, r)}${provenanceSuffix(mode, r)})`,
+				`${r} — ${RULE_DESCRIPTIONS[r]} (${displayLevel(mode, r)}${provenanceSuffix(mode, r)})`,
 		),
 		"back — Back to group list (返回)",
 	];
@@ -522,7 +532,7 @@ export async function runModeEditor(
 			`Mode: ${mode} — pick a rule group (current levels shown):\n` +
 			RULE_GROUPS.map(
 				(g) =>
-					`  ${g.label}: ${g.rules.map((r) => `${r}=${rlFor(mode, r)}`).join(", ")}`,
+					`  ${g.label}: ${g.rules.map((r) => `${r}=${displayLevel(mode, r)}`).join(", ")}`,
 			).join("\n");
 		const picked = await ctx.ui.select(title, ruleGroupOptions(mode));
 		if (!picked) {
@@ -747,7 +757,7 @@ export function panelOptions(s: PanelScreen): string[] {
 			return [
 				...RULE_LEVELS.map(
 					(l) =>
-						`${RULE_LEVEL_LABELS[l]}${l === rlFor(s.mode, s.rule) ? " (current)" : ""}${l === DEFAULT_MODES[s.mode][s.rule] ? " [default]" : ""}`,
+						`${RULE_LEVEL_LABELS[l]}${l === displayLevel(s.mode, s.rule) ? " (current)" : ""}${l === DEFAULT_MODES[s.mode][s.rule] ? " [default]" : ""}`,
 				),
 				`reset — back to built-in default (${DEFAULT_MODES[s.mode][s.rule]}) (恢复该条默认)`,
 				"back — Back to rule list (返回)",
@@ -1249,7 +1259,7 @@ export class GuardPanel implements Component, Focusable {
 					`Mode: ${s.mode} · Rule: ${s.rule} — ${RULE_DESCRIPTIONS[s.rule]}`,
 				);
 				out.push(
-					`Current: ${rlFor(s.mode, s.rule)} · Built-in default: ${DEFAULT_MODES[s.mode][s.rule]}`,
+					`Current: ${displayLevel(s.mode, s.rule)} · Built-in default: ${DEFAULT_MODES[s.mode][s.rule]}`,
 					"",
 				);
 				out.push(...this.listLines(panelOptions(s), s.idx));

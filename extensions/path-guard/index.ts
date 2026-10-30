@@ -193,6 +193,7 @@ export default function (pi: ExtensionAPI) {
 				if (option === "paths") await runPathsMenu(ctx);
 				else if (option === "rules") await runRulesMenu(ctx);
 				else if (option === "scope") await runScopeMenu(ctx);
+				else if (option === "doctor") ctx.ui.notify(doctorView(ctx.cwd), "info");
 				else await runModePicker(ctx);
 			}
 		},

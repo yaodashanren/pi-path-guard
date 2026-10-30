@@ -7,8 +7,8 @@ import { NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, TRUSTED_SWITCH_WARNING,
 import { projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
 import { resolveReal } from "./paths.ts";
 import { applyConfig, getConfigWarnings, getLayers, projectSettingsPath, readSavedConfig } from "./rules.ts";
-import type { ConfigWarning, PathGuardLayer } from "./schema.ts";
-import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
+import type { ConfigWarning, PathGuardLayer, RuleGroup } from "./schema.ts";
+import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_GROUPS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, ruleProvenance, provenanceSuffix, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
 
 // path-guard — /guard interactive UI: chained menus, actions, rules matrix,
 // the single self-contained overlay panel, and warning confirmations.
@@ -465,9 +465,34 @@ export async function ruleLevelPicker(
 }
 
 /**
- * Rule editor for one mode: shows all 17 rules with their current levels, lets
- * the user set several in a row (each level pick returns here), and offers
- * reset (this mode) + back.
+ * Options for the first (group) level of the rule editor: one row per rule
+ * group (`${label} (${N} rules, ${M} overrides)`) plus reset and back.
+ *
+ * `M` counts only PERSISTED overrides — provenance ∈ {global, project}. A
+ * session-only pass is not a stored override, so it is not counted.
+ *
+ * Shared verbatim with the /guard overlay (Task 4) so both entries render the
+ * identical list; `reset` stays at this level (it resets the whole mode).
+ */
+export function ruleGroupOptions(mode: GuardMode): string[] {
+	return [
+		...RULE_GROUPS.map((g) => {
+			const overrides = g.rules.filter((r) => {
+				const p = ruleProvenance(mode, r);
+				return p === "global" || p === "project";
+			}).length;
+			return `${g.label} (${g.rules.length} rules, ${overrides} overrides)`;
+		}),
+		"reset — Reset this mode to built-in defaults (恢复该模式默认)",
+		"back — Back to mode list (返回)",
+	];
+}
+
+/**
+ * Rule editor for one mode, two levels deep: first pick a rule group (the
+ * per-group override counts are shown on each row), then a rule inside it.
+ * The level pick returns to the same group list, so several rules can be set
+ * in a row; reset (whole mode) and back live on the group level.
  */
 export async function runModeEditor(
 	mode: GuardMode,
@@ -475,14 +500,12 @@ export async function runModeEditor(
 ): Promise<void> {
 	while (true) {
 		const title =
-			`Mode: ${mode} — pick a rule to set (current levels shown):\n` +
-			RULE_IDS.map((r) => `  ${r} = ${rlFor(mode, r)}`).join("\n");
-		const options = [
-			...RULE_IDS.map((r) => `${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(mode, r)})`),
-			"reset — Reset this mode to built-in defaults (恢复该模式默认)",
-			"back — Back to mode list (返回)",
-		];
-		const picked = await ctx.ui.select(title, options);
+			`Mode: ${mode} — pick a rule group (current levels shown):\n` +
+			RULE_GROUPS.map(
+				(g) =>
+					`  ${g.label}: ${g.rules.map((r) => `${r}=${rlFor(mode, r)}`).join(", ")}`,
+			).join("\n");
+		const picked = await ctx.ui.select(title, ruleGroupOptions(mode));
 		if (!picked) {
 			ctx.ui.notify("Cancelled, rules unchanged", "info");
 			return;
@@ -498,9 +521,44 @@ export async function runModeEditor(
 			ctx.ui.notify(actionResetMode(mode, ctx), "info");
 			continue;
 		}
-		if ((RULE_IDS as readonly string[]).includes(op)) {
-			await ruleLevelPicker(mode, op as RuleId, ctx);
+		const group = RULE_GROUPS.find(
+			(g) => picked.startsWith(g.label) || g.id === op,
+		);
+		if (!group) continue;
+		if (!(await runRuleGroupEditor(mode, group, ctx))) return;
+	}
+}
+
+/**
+ * Second level of the rule editor: the group's rules (level + provenance
+ * suffix) plus back. Returns false when the user cancelled the whole editor,
+ * true when it is time to show the group list again.
+ */
+async function runRuleGroupEditor(
+	mode: GuardMode,
+	group: RuleGroup,
+	ctx: ExtensionCommandContext,
+): Promise<boolean> {
+	while (true) {
+		const options = [
+			...group.rules.map(
+				(r) =>
+					`${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(mode, r)}${provenanceSuffix(mode, r)})`,
+			),
+			"back — Back to group list (返回)",
+		];
+		const picked = await ctx.ui.select(
+			`Mode: ${mode} · ${group.label} — pick a rule to set (level + source shown):`,
+			options,
+		);
+		if (!picked) {
+			ctx.ui.notify("Cancelled, rules unchanged", "info");
+			return false;
 		}
+		const op = picked.split(/\s+/)[0];
+		if (op === "back") return true;
+		const rule = group.rules.find((r) => r === op);
+		if (rule) await ruleLevelPicker(mode, rule, ctx);
 	}
 }
 

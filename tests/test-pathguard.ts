@@ -44,6 +44,7 @@ const mod = await import(EXT);
 import { findProjectConfig, mergeLayers, projectEntryPath, readProjectEntry, readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
 import * as explainMod from "../extensions/path-guard/explain.ts";
 import {
+	RULE_DESCRIPTIONS,
 	RULE_GROUPS,
 	RULE_IDS,
 	addPathIn,
@@ -58,6 +59,7 @@ import {
 	persistNote,
 	readSavedConfig,
 	removePathIn,
+	rlFor,
 	setModeIn,
 	setRuleIn,
 	setWriteScope,
@@ -561,12 +563,14 @@ check(
 );
 
 // ── /guard rules interactive menu ────────────────────────────
-// main → rules → mode → normal → rule editor → pick writeHome → set to block
-// (scripted select queue; each select pops the next desired token)
-const setQueue = [
+// main → rules → mode → normal → rule editor → Writes group → writeHome → block
+// (scripted select queue; each select pops the next desired token or resolver)
+const setQueue: (string | ((options: string[]) => string | undefined))[] = [
 	"rules",
 	"mode",
 	"normal",
+	// the rule editor is two-level: pick the group owning writeHome first
+	(options) => options.find((o) => o.startsWith("Writes —")),
 	"writeHome",
 	"block",
 	"back",
@@ -580,7 +584,10 @@ await commands["guard"].handler("", {
 		notify: (m: string) => {
 			if (m.startsWith("Path Guard: set")) setNotif = m;
 		},
-		select: async () => setQueue.shift(),
+		select: async (_msg: string, options: string[]) => {
+			const next = setQueue.shift();
+			return typeof next === "function" ? next(options) : next;
+		},
 		theme: themeMock,
 		setStatus: () => {},
 	},
@@ -4815,6 +4822,164 @@ setWriteScope("global");
 		sessionPassRule("normal", "archiveExtract");
 		check("suffix: session pass", provenanceSuffix("normal", "archiveExtract"), ", session-pass");
 		check("suffix: pairs with level as (level+suffix)", `(pass${provenanceSuffix("normal", "archiveExtract")})`, "(pass, session-pass)");
+	} finally {
+		clearSessionPass();
+		applyConfig({ global: {}, warnings: [] });
+	}
+}
+// ── runModeEditor: two-level group → rule navigation (CLI, phase3) ────
+// The CLI editor mirrors the overlay: first pick a rule group, then a rule in
+// that group, then the existing level picker. reset stays at the group level.
+// provenance ∈ {global, project} drives the per-group override count; a
+// session-only pass must never be counted (it is not persisted).
+{
+	type LoadedCfg = Parameters<typeof applyConfig>[0];
+	const navLayer: LoadedCfg["global"] = {
+		rules: {
+			// 2 persisted overrides in `writes`, 1 in `deletes`, none elsewhere
+			normal: { writeOutside: "pass", writeHome: "block", deleteInProject: "pass" },
+		},
+	};
+	applyConfig({ global: navLayer, warnings: [] });
+	sessionPassRule("normal", "writeInProject"); // must NOT count as an override
+
+	const label = (id: string) => RULE_GROUPS.find((g) => g.id === id)!.label;
+	const writesLabel = label("writes");
+
+	const navRun = async (
+		mode: string,
+		answers: (string | ((options: string[]) => string | undefined))[],
+		confirmAnswer = true,
+	) => {
+		const calls: { title: string; options: string[] }[] = [];
+		const notifies: string[] = [];
+		let confirmTitle = "";
+		const ctx = {
+			cwd: PROJ,
+			isProjectTrusted: () => true,
+			hasUI: true,
+			ui: {
+				notify: (m: string) => notifies.push(m),
+				confirm: async (t: string) => {
+					confirmTitle = t;
+					return confirmAnswer;
+				},
+				select: async (title: string, options: string[]) => {
+					calls.push({ title, options: [...options] });
+					const a = answers.shift();
+					return typeof a === "function" ? a(options) : a;
+				},
+				theme: themeMock,
+				setStatus: () => {},
+			},
+		};
+		await panelMod.runModeEditor(mode as any, ctx as any);
+		return { calls, notifies, confirmTitle };
+	};
+
+	try {
+		// 1. first level = 7 group rows + reset + back, counts from provenance
+		const r1 = await navRun("normal", ["back"]);
+		const opts1 = r1.calls[0]?.options ?? [];
+		check("cli editor: first level = 7 groups + reset + back", String(opts1.length), "9");
+		check(
+			"cli editor: group row = label + rule count + override count",
+			String(opts1[1]),
+			`${writesLabel} (5 rules, 2 overrides)`,
+		);
+		check(
+			"cli editor: session-pass is not counted as an override",
+			String(String(opts1[1] ?? "").includes("2 overrides")),
+			"true",
+		);
+		check(
+			"cli editor: per-group override counts are independent",
+			String(opts1[2]),
+			`${label("deletes")} (2 rules, 1 overrides)`,
+		);
+		check(
+			"cli editor: group with no overrides reports 0",
+			String(opts1[0]),
+			`${label("system")} (2 rules, 0 overrides)`,
+		);
+		check("cli editor: reset stays at group level", String(String(opts1[7] ?? "").startsWith("reset —")), "true");
+		check("cli editor: back at group level", String(String(opts1[8] ?? "").startsWith("back —")), "true");
+		const navTitle = r1.calls[0].title.split("\n");
+		check("cli editor: title summarises 7 groups (no 23-line dump)", String(navTitle.length), "8");
+		check(
+			"cli editor: title shows each group's effective levels",
+			String(navTitle.some((l) => l.includes(writesLabel) && l.includes("writeHome=block"))),
+			"true",
+		);
+		// ruleGroupOptions() is the shared shape reused by the overlay (Task 4)
+		check(
+			"cli editor: ruleGroupOptions matches the first-level menu",
+			String(
+				typeof panelMod.ruleGroupOptions === "function"
+					? JSON.stringify(panelMod.ruleGroupOptions("normal"))
+					: "not exported",
+			),
+			JSON.stringify(opts1),
+		);
+
+		// 2. second level = that group's rules (level + provenance suffix) + back
+		const r2 = await navRun("normal", [(o) => o.find((x) => x.startsWith(writesLabel)), "back", "back"]);
+		const opts2 = r2.calls[1]?.options ?? [];
+		check("cli editor: rule list = group rules + back (no reset)", String(opts2.length), "6");
+		check("cli editor: no reset inside a group", String(opts2.some((o) => o.startsWith("reset"))), "false");
+		check(
+			"cli editor: rule row = rule — description (level + provenance)",
+			String(opts2[1]),
+			`writeHome — ${RULE_DESCRIPTIONS.writeHome} (block [global])`,
+		);
+		check(
+			"cli editor: default provenance has no suffix",
+			String(opts2[3]),
+			`truncateInProject — ${RULE_DESCRIPTIONS.truncateInProject} (${rlFor("normal", "truncateInProject")})`,
+		);
+		check(
+			"cli editor: session-pass is rendered as a suffix",
+			String(String(opts2[2] ?? "").endsWith("(pass, session-pass)")),
+			"true",
+		);
+		check("cli editor: second-level back returns to the group list", String(r2.calls[2]?.options.length), "9");
+
+		// 3. rule → level → back → same group list (several rules in one visit)
+		const r3 = await navRun("normal", [
+			(o) => o.find((x) => x.startsWith(writesLabel)),
+			"writeHome",
+			"pass",
+			"writeInProject",
+			"confirm",
+			"back",
+			"back",
+		]);
+		check("cli editor: level pick returns to the same group list", String(r3.calls[3]?.options.length), "6");
+		check(
+			"cli editor: second rule reached without re-picking the group",
+			String(String(r3.calls[4]?.title).includes("writeInProject")),
+			"true",
+		);
+		check(
+			"cli editor: two rules set in one visit",
+			String(r3.notifies.filter((n) => n.startsWith("Path Guard: set")).length),
+			"2",
+		);
+
+		// 4. reset at group level still confirms and resets the whole mode
+		const r4 = await navRun("normal", ["reset", "back"]);
+		check("cli editor: reset confirm names the mode", r4.confirmTitle, `Reset mode "normal" to built-in defaults?`);
+		check(
+			"cli editor: accepted reset resets the mode",
+			String(r4.notifies.some((n) => n.includes("reset mode normal"))),
+			"true",
+		);
+		const r5 = await navRun("normal", ["reset", "back"], false);
+		check(
+			"cli editor: declined reset leaves the mode alone",
+			String(r5.notifies.some((n) => n.includes("reset mode normal"))),
+			"false",
+		);
 	} finally {
 		clearSessionPass();
 		applyConfig({ global: {}, warnings: [] });

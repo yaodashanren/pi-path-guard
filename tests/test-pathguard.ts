@@ -5241,7 +5241,7 @@ setWriteScope("global");
 }
 // ── GuardPanel: doctor entry in the main menu (phase3 rule-groups) ──
 // /guard doctor is reachable from the overlay too: main → doctor screen
-// (read-only doctorView output + a single back row) → back to main.
+// (scrollable read-only doctorView viewport) → ⏎/esc back to main.
 {
 	const DOCTOR_ROW = "doctor — Show effective config & diagnostics (诊断视图)";
 	check(
@@ -5250,9 +5250,9 @@ setWriteScope("global");
 		"true",
 	);
 	check(
-		"panel doctor: the screen has exactly one back row",
-		JSON.stringify(panelMod.panelOptions({ kind: "doctor", idx: 0 } as any)),
-		JSON.stringify(["back — Back (返回)"]),
+		"panel doctor: the screen has no selectable rows (read-only viewport)",
+		JSON.stringify(panelMod.panelOptions({ kind: "doctor", scroll: 0 } as any)),
+		JSON.stringify([]),
 	);
 
 	const p = await openGuardPanel();
@@ -5268,10 +5268,7 @@ setWriteScope("global");
 	);
 	check(
 		"panel nav: selecting doctor opens the read-only doctor view",
-		String(
-			doctorRender.includes("Path Guard doctor") &&
-				doctorRender.includes("back — Back (返回)"),
-		),
+		String(doctorRender.includes("Path Guard doctor")),
 		"true",
 	);
 	check(
@@ -5279,9 +5276,17 @@ setWriteScope("global");
 		String(doctorRender.includes(doctorMod.doctorView(PROJ).split("\n")[0])),
 		"true",
 	);
-	p.press(KEY_ESC); // back to main
 	check(
-		"panel nav: back from doctor returns to the main menu",
+		"panel doctor: no back row — ⏎/esc own the return",
+		String(
+			!doctorRender.includes("back — Back (返回)") &&
+				doctorRender.includes("↑/↓/PgUp/PgDn scroll · ⏎/esc back"),
+		),
+		"true",
+	);
+	p.press(KEY_ENTER); // ⏎ → back to main
+	check(
+		"panel nav: ⏎ on the doctor screen returns to the main menu",
 		String(p.render().includes("Choose an action:") && !p.closed),
 		"true",
 	);
@@ -5290,9 +5295,9 @@ setWriteScope("global");
 	for (let i = 0; i < doctorIdx; i++) p2.press(KEY_DOWN);
 	p2.press(KEY_ENTER); // main → doctor
 	const opened = p2.render();
-	p2.press(KEY_ENTER); // back row (idx 0) → pop
+	p2.press(KEY_ESC); // esc → back to main
 	check(
-		"panel nav: selecting back on the doctor screen returns to the main menu",
+		"panel nav: esc on the doctor screen returns to the main menu",
 		String(
 			opened.includes("Path Guard doctor") &&
 				p2.render().includes("Choose an action:") &&
@@ -5300,6 +5305,79 @@ setWriteScope("global");
 		),
 		"true",
 	);
+}
+// ── GuardPanel: doctor screen scroll viewport ──
+// With enough protected paths the doctorView report exceeds the 14-row window,
+// so the doctor screen adopts the overview screen's scroll behavior.
+{
+	const prevSettingsEnv = process.env.PI_PATH_GUARD_SETTINGS;
+	process.env.PI_PATH_GUARD_SETTINGS = "/tmp/pgtest-doctor-scroll.json";
+	try {
+		const many = Array.from({ length: 20 }, (_, i) => `/tmp/doc-scroll/p${i}`);
+		applyConfig({ global: { mode: "normal", extraProtected: many }, warnings: [] });
+		check(
+			"panel doctor scroll: fixture makes doctorView exceed the window",
+			String(doctorMod.doctorView(PROJ).split("\n").length > 14),
+			"true",
+		);
+		const p = await openGuardPanel();
+		const doctorIdx = panelMod.GUARD_MAIN_MENU.indexOf(
+			"doctor — Show effective config & diagnostics (诊断视图)",
+		);
+		for (let i = 0; i < doctorIdx; i++) p.press(KEY_DOWN);
+		p.press(KEY_ENTER); // main → doctor
+		const top = p.render();
+		check(
+			"panel doctor scroll: initial render shows ↓ more, no ↑",
+			String(top.includes("↓ ") && !top.includes("↑ ")),
+			"true",
+		);
+		const beforeDown = p.render();
+		p.press(KEY_DOWN);
+		check(
+			"panel doctor scroll: down moves the window",
+			String(p.render() !== beforeDown),
+			"true",
+		);
+		p.press("\x1b[F"); // end
+		const bottom = p.render();
+		check(
+			"panel doctor scroll: end shows ↑ more and no ↓",
+			String(bottom.includes("↑ ") && !bottom.includes("↓ ")),
+			"true",
+		);
+		p.press("\x1b[6~"); // pageDown — already clamped at maxScroll
+		check(
+			"panel doctor scroll: pageDown clamps at the bottom",
+			String(p.render() === bottom),
+			"true",
+		);
+		p.press("\x1b[H"); // home
+		check(
+			"panel doctor scroll: home returns to the top",
+			String(p.render().includes("↓ ") && !p.render().includes("↑ ")),
+			"true",
+		);
+		p.press("\x1b[6~"); // pageDown
+		const afterPage = p.render();
+		p.press("\x1b[H"); // home
+		p.press(KEY_DOWN);
+		const afterDown = p.render();
+		check(
+			"panel doctor scroll: pageDown advances more than down",
+			String(afterPage !== afterDown && afterPage !== top),
+			"true",
+		);
+		p.press(KEY_ESC);
+		check(
+			"panel doctor scroll: esc returns to the main menu",
+			String(p.render().includes("Choose an action:") && !p.closed),
+			"true",
+		);
+	} finally {
+		process.env.PI_PATH_GUARD_SETTINGS = prevSettingsEnv;
+		applyConfig({ global: {}, warnings: [] });
+	}
 }
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {

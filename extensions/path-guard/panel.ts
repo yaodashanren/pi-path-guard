@@ -687,7 +687,7 @@ export type PanelScreen =
 	| { kind: "ruleEditor"; mode: GuardMode; group: RuleGroupId; idx: number }
 	| { kind: "ruleLevel"; mode: GuardMode; rule: RuleId; idx: number }
 	| { kind: "overview"; scroll: number }
-	| { kind: "doctor"; idx: number }
+	| { kind: "doctor"; scroll: number }
 	| { kind: "pathsCategory"; idx: number }
 	| { kind: "pathsActions"; pathKind: PathKind; idx: number }
 	| { kind: "resetModePick"; idx: number }
@@ -769,7 +769,6 @@ export function panelOptions(s: PanelScreen): string[] {
 		case "pathsRemove":
 			return [...pathList(s.pathKind), "back — Back to actions (返回)"];
 		case "doctor":
-			return ["back — Back (返回)"];
 		case "pathsAdd":
 		case "overview":
 			return [];
@@ -936,8 +935,7 @@ export class GuardPanel implements Component, Focusable {
 				else if (id === "rules") this.push({ kind: "rules", idx: 0 });
 				else if (id === "paths")
 					this.push({ kind: "pathsCategory", idx: 0 });
-				else if (id === "doctor")
-					this.push({ kind: "doctor", idx: 0 });
+				else if (id === "doctor") this.push({ kind: "doctor", scroll: 0 });
 				return;
 			case "scope": {
 				if (id === "back") {
@@ -1108,8 +1106,6 @@ export class GuardPanel implements Component, Focusable {
 				return;
 			}
 			case "doctor":
-				if (id === "back") this.pop();
-				return;
 			case "pathsAdd":
 			case "overview":
 				return;
@@ -1143,8 +1139,12 @@ export class GuardPanel implements Component, Focusable {
 			this.requestRender();
 			return;
 		}
-		if (s.kind === "overview") {
-			const maxScroll = Math.max(0, rulesMatrix().split("\n").length - 1);
+		if (s.kind === "overview" || s.kind === "doctor") {
+			const scrollLines =
+				s.kind === "overview"
+					? rulesMatrix().split("\n")
+					: doctorView(this.ctx.cwd).split("\n");
+			const maxScroll = Math.max(0, scrollLines.length - 1);
 			if (matchesKey(data, "up")) s.scroll = Math.max(0, s.scroll - 1);
 			else if (matchesKey(data, "down"))
 				s.scroll = Math.min(maxScroll, s.scroll + 1);
@@ -1209,7 +1209,8 @@ export class GuardPanel implements Component, Focusable {
 		const s = this.current();
 		if (s.kind === "overview")
 			return "↑/↓/PgUp/PgDn scroll · ⏎/esc close";
-		if (s.kind === "doctor") return "⏎/esc back";
+		if (s.kind === "doctor")
+			return "↑/↓/PgUp/PgDn scroll · ⏎/esc back";
 		if (s.kind === "pathsAdd") return "type a path · ⏎ submit · esc back";
 		return `↑/↓ move · ⏎ select · esc back${s.kind === "main" ? " · q quit" : ""}`;
 	}
@@ -1268,8 +1269,9 @@ export class GuardPanel implements Component, Focusable {
 				out.push(...this.overviewLines(rulesMatrix().split("\n"), s.scroll));
 				break;
 			case "doctor":
-				out.push(...doctorView(this.ctx.cwd).split("\n"), "");
-				out.push(...this.listLines(panelOptions(s), s.idx));
+				out.push(
+					...this.overviewLines(doctorView(this.ctx.cwd).split("\n"), s.scroll),
+				);
 				break;
 			case "pathsCategory":
 				out.push("Choose a path category:", "");

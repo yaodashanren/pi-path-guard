@@ -44,6 +44,9 @@ const mod = await import(EXT);
 import { findProjectConfig, mergeLayers, projectEntryPath, readProjectEntry, readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
 import * as explainMod from "../extensions/path-guard/explain.ts";
 import {
+	RULE_DESCRIPTIONS,
+	RULE_GROUPS,
+	RULE_IDS,
 	addPathIn,
 	applyConfig,
 	clearPathsIn,
@@ -56,11 +59,14 @@ import {
 	persistNote,
 	readSavedConfig,
 	removePathIn,
+	rlFor,
 	setModeIn,
 	setRuleIn,
 	setWriteScope,
 	sessionPassRule,
 	clearSessionPass,
+	ruleProvenance,
+	provenanceSuffix,
 } from "../extensions/path-guard/rules.ts";
 const panelMod = await import(
 	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
@@ -295,21 +301,62 @@ check(
 	"loose",
 );
 
-// invalid arg → falls back to main menu (2 options)
-let bogusOptions: string[] = [];
-await commands["guard"].handler("bogus", {
-	hasUI: true,
-	ui: {
-		notify: () => {},
-		select: async (_t: string, options: string[]) => {
-			bogusOptions = options;
-			return undefined;
+// invalid arg → falls back to the main menu, and EVERY main-menu row must
+// dispatch to its own sub-menu/report. Comparing the menu array with itself (as
+// the old assertion did) cannot notice a row with no dispatcher branch — such a
+// row silently falls through to the mode picker instead.
+async function mainMenuRow(row: string) {
+	const titles: string[] = [];
+	const options: string[][] = [];
+	const notes: string[] = [];
+	let calls = 0;
+	await commands["guard"].handler("bogus", {
+		cwd: PROJ,
+		isProjectTrusted: () => true,
+		hasUI: true,
+		ui: {
+			notify: (m: string) => notes.push(m),
+			confirm: async () => false,
+			setWidget: () => {},
+			select: async (t: string, o: string[]) => {
+				calls++;
+				titles.push(t);
+				options.push([...o]);
+				return calls === 1 ? row : undefined;
+			},
 		},
-	},
-});
+	});
+	return { titles, options, notes, calls };
+}
+const MAIN_ROW_SCREEN: Record<string, string> = {
+	switch: "choose one:",
+	rules: "Choose an action:",
+	paths: "choose a path category",
+	scope: "where should edits be saved",
+};
+const menuRows = panelMod.GUARD_MAIN_MENU;
+check("/guard main menu has five rows", String(menuRows.length), "5");
+for (const row of menuRows) {
+	const id = row.split(/\s+/)[0];
+	const reached = await mainMenuRow(row);
+	const hit =
+		id === "doctor"
+			? reached.calls === 2 &&
+				String(reached.notes[0] ?? "").startsWith("Path Guard doctor")
+			: String(reached.titles[1] ?? "").includes(MAIN_ROW_SCREEN[id] ?? "\u0000");
+	check(
+		`/guard main menu row "${id}" dispatches to its own screen`,
+		String(hit),
+		"true",
+	);
+}
+const fallbackMenu = await mainMenuRow(menuRows[0]);
 check(
-	"/guard invalid arg falls back to main menu",
-	bogusOptions.length === 4 ? "menu" : "?",
+	"/guard invalid arg falls back to the main menu",
+	JSON.stringify(fallbackMenu.options[0]) === JSON.stringify(menuRows) &&
+		fallbackMenu.titles[0].includes("choose an action")
+		? "menu"
+		: "?",
 	"menu",
 );
 
@@ -557,12 +604,14 @@ check(
 );
 
 // ── /guard rules interactive menu ────────────────────────────
-// main → rules → mode → normal → rule editor → pick writeHome → set to block
-// (scripted select queue; each select pops the next desired token)
-const setQueue = [
+// main → rules → mode → normal → rule editor → Writes group → writeHome → block
+// (scripted select queue; each select pops the next desired token or resolver)
+const setQueue: (string | ((options: string[]) => string | undefined))[] = [
 	"rules",
 	"mode",
 	"normal",
+	// the rule editor is two-level: pick the group owning writeHome first
+	(options) => options.find((o) => o.startsWith("Writes —")),
 	"writeHome",
 	"block",
 	"back",
@@ -576,7 +625,10 @@ await commands["guard"].handler("", {
 		notify: (m: string) => {
 			if (m.startsWith("Path Guard: set")) setNotif = m;
 		},
-		select: async () => setQueue.shift(),
+		select: async (_msg: string, options: string[]) => {
+			const next = setQueue.shift();
+			return typeof next === "function" ? next(options) : next;
+		},
 		theme: themeMock,
 		setStatus: () => {},
 	},
@@ -703,15 +755,17 @@ const panelPrevMode =
 	await setMode(panelPrevMode); // restore for the rest of the suite
 }
 
-// rule editing: rules → normal → writeHome → block (in-panel)
+// rule editing: rules → normal → Writes → writeHome → block (in-panel)
 {
 	const p = await openGuardPanel();
 	p.press(KEY_DOWN); // main: rules (idx 1)
 	p.press(KEY_ENTER);
 	p.press(KEY_ENTER); // rules → mode list (idx 0)
 	p.press(KEY_DOWN); // → normal (idx 1)
-	p.press(KEY_ENTER); // → normal rule editor
-	for (let i = 0; i < 3; i++) p.press(KEY_DOWN); // blockGroup…writeHome
+	p.press(KEY_ENTER); // → normal rule groups
+	p.press(KEY_DOWN); // system → Writes (idx 1)
+	p.press(KEY_ENTER); // → writes rule list
+	p.press(KEY_DOWN); // writeOutside → writeHome (idx 1)
 	p.press(KEY_ENTER); // → rule level
 	p.press(KEY_ENTER); // block (idx 0) → apply
 	check(
@@ -4598,6 +4652,28 @@ setWriteScope("global");
 	check("explain without argument shows usage", String(/Usage: \/guard explain/.test(exNotifies.join("\n"))), "true");
 }
 
+// ── RULE_GROUPS: two-level picker grouping table (phase3 rule-groups UI) ──
+{
+	const groupIds = RULE_GROUPS.map((g) => g.id);
+	check("ruleGroups: exactly 7 groups", String(groupIds.length), "7");
+	check(
+		"ruleGroups: group ids unique",
+		String(new Set(groupIds).size),
+		String(groupIds.length),
+	);
+	const flatRules = RULE_GROUPS.flatMap((g) => [...g.rules]);
+	check(
+		"ruleGroups cover every rule exactly once",
+		JSON.stringify([...flatRules].sort()),
+		JSON.stringify([...RULE_IDS].sort()),
+	);
+	check(
+		"ruleGroups: no duplicate rule inside groups",
+		String(new Set(flatRules).size),
+		String(flatRules.length),
+	);
+}
+
 // ── 8.5 trusted acceptance: askConfirm behavior (acceptance — failures = real bugs) ──
 {
 	await setMode("trusted");
@@ -4728,6 +4804,475 @@ setWriteScope("global");
 	await setMode("normal");
 }
 
+// ── ruleProvenance: which layer supplies a rule's effective value ─────
+{
+	type LoadedCfg = Parameters<typeof applyConfig>[0];
+	type Layer = LoadedCfg["global"];
+	const provGlobalLayer: Layer = { rules: { normal: { archiveExtract: "pass" } } };
+	const provProjectLayer: Layer = { rules: { normal: { archiveExtract: "confirm" } } };
+	const provAuthoredLayer: Layer = { rules: { normal: { archiveExtract: "pass" } } };
+	const provLookup = (layer: Layer): NonNullable<LoadedCfg["project"]> => ({
+		filePath: join(OUT, "prov-project.json"),
+		projectRoot: PROJ,
+		matchedVia: "exact",
+		layer,
+		warnings: [],
+	});
+	try {
+		// 1. nothing overridden anywhere → built-in default
+		applyConfig({ global: {}, warnings: [] });
+		check("provenance: no override → default", ruleProvenance("normal", "archiveExtract"), "default");
+		// 2. global-layer override only → global
+		applyConfig({ global: provGlobalLayer, warnings: [] });
+		check("provenance: global override → global", ruleProvenance("normal", "archiveExtract"), "global");
+		check("provenance: untouched rule stays default", ruleProvenance("normal", "deleteInProject"), "default");
+		check("provenance: other mode stays default", ruleProvenance("strict", "archiveExtract"), "default");
+		// 3. global + project both set the same rule → project wins
+		applyConfig({ global: provGlobalLayer, project: provLookup(provProjectLayer), warnings: [] });
+		check("provenance: project outranks global", ruleProvenance("normal", "archiveExtract"), "project");
+		// 4. session pass outranks both persisted layers
+		sessionPassRule("normal", "archiveExtract");
+		check("provenance: session pass outranks layers", ruleProvenance("normal", "archiveExtract"), "session-pass");
+		check("provenance: session pass is mode-scoped", ruleProvenance("strict", "archiveExtract"), "default");
+		clearSessionPass();
+		check("provenance: clearing session pass restores layer answer", ruleProvenance("normal", "archiveExtract"), "project");
+		// 5. hand-authored .pi/settings.json counts as global (it is the fallback
+		// overlay only when no project entry matched — same as rl()/mergeLayers)
+		applyConfig(
+			{
+				global: {},
+				authored: { layer: provAuthoredLayer, file: join(PROJ, ".pi", "settings.json"), root: PROJ },
+				warnings: [],
+			},
+		);
+		check("provenance: authored layer reports as global", ruleProvenance("normal", "archiveExtract"), "global");
+		applyConfig(
+			{
+				global: {},
+				project: provLookup({}),
+				authored: { layer: provAuthoredLayer, file: join(PROJ, ".pi", "settings.json"), root: PROJ },
+				warnings: [],
+			},
+		);
+		check("provenance: authored ignored once a project layer matched", ruleProvenance("normal", "archiveExtract"), "default");
+		// 6. suffix rendering, exactly as callers will concatenate it
+		applyConfig({ global: {}, warnings: [] });
+		check("suffix: default is empty", provenanceSuffix("normal", "archiveExtract"), "");
+		applyConfig({ global: provGlobalLayer, warnings: [] });
+		check("suffix: global", provenanceSuffix("normal", "archiveExtract"), " [global]");
+		applyConfig({ global: provGlobalLayer, project: provLookup(provProjectLayer), warnings: [] });
+		check("suffix: project", provenanceSuffix("normal", "archiveExtract"), " [project]");
+		sessionPassRule("normal", "archiveExtract");
+		check("suffix: session pass", provenanceSuffix("normal", "archiveExtract"), ", session-pass");
+		check("suffix: pairs with level as (level+suffix)", `(pass${provenanceSuffix("normal", "archiveExtract")})`, "(pass, session-pass)");
+	} finally {
+		clearSessionPass();
+		applyConfig({ global: {}, warnings: [] });
+	}
+}
+// ── runModeEditor: two-level group → rule navigation (CLI, phase3) ────
+// The CLI editor mirrors the overlay: first pick a rule group, then a rule in
+// that group, then the existing level picker. reset stays at the group level.
+// provenance ∈ {global, project} drives the per-group override count; a
+// session-only pass must never be counted (it is not persisted).
+{
+	type LoadedCfg = Parameters<typeof applyConfig>[0];
+	const navLayer: LoadedCfg["global"] = {
+		rules: {
+			// 2 persisted overrides in `writes`, 1 in `deletes`, none elsewhere
+			normal: { writeOutside: "pass", writeHome: "block", deleteInProject: "pass" },
+		},
+	};
+	applyConfig({ global: navLayer, warnings: [] });
+	// A session pass on a non-`pass` default rule (truncateInProject defaults to
+	// "confirm"): with writeInProject (default "pass") the old coincidence would
+	// hide a level/provenance contradiction.
+	sessionPassRule("normal", "truncateInProject"); // must NOT count as an override
+
+	const label = (id: string) => RULE_GROUPS.find((g) => g.id === id)!.label;
+	const writesLabel = label("writes");
+
+	const navRun = async (
+		mode: string,
+		answers: (string | ((options: string[]) => string | undefined))[],
+		confirmAnswer = true,
+	) => {
+		const calls: { title: string; options: string[] }[] = [];
+		const notifies: string[] = [];
+		let confirmTitle = "";
+		const ctx = {
+			cwd: PROJ,
+			isProjectTrusted: () => true,
+			hasUI: true,
+			ui: {
+				notify: (m: string) => notifies.push(m),
+				confirm: async (t: string) => {
+					confirmTitle = t;
+					return confirmAnswer;
+				},
+				select: async (title: string, options: string[]) => {
+					calls.push({ title, options: [...options] });
+					const a = answers.shift();
+					return typeof a === "function" ? a(options) : a;
+				},
+				theme: themeMock,
+				setStatus: () => {},
+			},
+		};
+		await panelMod.runModeEditor(mode as any, ctx as any);
+		return { calls, notifies, confirmTitle };
+	};
+
+	try {
+		// 1. first level = 7 group rows + reset + back, counts from provenance
+		const r1 = await navRun("normal", ["back"]);
+		const opts1 = r1.calls[0]?.options ?? [];
+		check("cli editor: first level = 7 groups + reset + back", String(opts1.length), "9");
+		check(
+			"cli editor: group row = label + rule count + override count",
+			String(opts1[1]),
+			`${writesLabel} (5 rules, 2 overrides)`,
+		);
+		check(
+			"cli editor: session-pass is not counted as an override",
+			String(String(opts1[1] ?? "").includes("2 overrides")),
+			"true",
+		);
+		check(
+			"cli editor: per-group override counts are independent",
+			String(opts1[2]),
+			`${label("deletes")} (2 rules, 1 overrides)`,
+		);
+		check(
+			"cli editor: group with no overrides reports 0",
+			String(opts1[0]),
+			`${label("system")} (2 rules, 0 overrides)`,
+		);
+		check("cli editor: reset stays at group level", String(String(opts1[7] ?? "").startsWith("reset —")), "true");
+		check("cli editor: back at group level", String(String(opts1[8] ?? "").startsWith("back —")), "true");
+		const navTitle = r1.calls[0].title.split("\n");
+		check("cli editor: title summarises 7 groups (no 23-line dump)", String(navTitle.length), "8");
+		check(
+			"cli editor: title shows each group's effective levels",
+			String(navTitle.some((l) => l.includes(writesLabel) && l.includes("writeHome=block"))),
+			"true",
+		);
+		// ruleGroupOptions() is the shared shape reused by the overlay (Task 4)
+		check(
+			"cli editor: ruleGroupOptions matches the first-level menu",
+			String(
+				typeof panelMod.ruleGroupOptions === "function"
+					? JSON.stringify(panelMod.ruleGroupOptions("normal"))
+					: "not exported",
+			),
+			JSON.stringify(opts1),
+		);
+
+		// 2. second level = that group's rules (level + provenance suffix) + back
+		const r2 = await navRun("normal", [(o) => o.find((x) => x.startsWith(writesLabel)), "back", "back"]);
+		const opts2 = r2.calls[1]?.options ?? [];
+		check("cli editor: rule list = group rules + back (no reset)", String(opts2.length), "6");
+		check("cli editor: no reset inside a group", String(opts2.some((o) => o.startsWith("reset"))), "false");
+		check(
+			"cli editor: rule row = rule — description (level + provenance)",
+			String(opts2[1]),
+			`writeHome — ${RULE_DESCRIPTIONS.writeHome} (block [global])`,
+		);
+		check(
+			"cli editor: default provenance has no suffix",
+			String(opts2[4]),
+			`truncateOutside — ${RULE_DESCRIPTIONS.truncateOutside} (${rlFor("normal", "truncateOutside")})`,
+		);
+		// The level shown for a session-passed rule must be `pass` (what rl()
+		// returns), never the persisted/default level next to a `, session-pass`
+		// suffix. truncateInProject defaults to "confirm", so this cannot pass by
+		// coincidence the way writeInProject (default "pass") could.
+		check(
+			"cli editor: session-pass shows the effective pass level + suffix",
+			String(opts2[3]),
+			`truncateInProject — ${RULE_DESCRIPTIONS.truncateInProject} (pass, session-pass)`,
+		);
+		check("cli editor: second-level back returns to the group list", String(r2.calls[2]?.options.length), "9");
+
+		// 3. rule → level → back → same group list (several rules in one visit)
+		const r3 = await navRun("normal", [
+			(o) => o.find((x) => x.startsWith(writesLabel)),
+			"writeHome",
+			"pass",
+			"writeInProject",
+			"confirm",
+			"back",
+			"back",
+		]);
+		check("cli editor: level pick returns to the same group list", String(r3.calls[3]?.options.length), "6");
+		check(
+			"cli editor: second rule reached without re-picking the group",
+			String(String(r3.calls[4]?.title).includes("writeInProject")),
+			"true",
+		);
+		check(
+			"cli editor: two rules set in one visit",
+			String(r3.notifies.filter((n) => n.startsWith("Path Guard: set")).length),
+			"2",
+		);
+
+		// 4. reset at group level still confirms and resets the whole mode
+		const r4 = await navRun("normal", ["reset", "back"]);
+		check("cli editor: reset confirm names the mode", r4.confirmTitle, `Reset mode "normal" to built-in defaults?`);
+		check(
+			"cli editor: accepted reset resets the mode",
+			String(r4.notifies.some((n) => n.includes("reset mode normal"))),
+			"true",
+		);
+		const r5 = await navRun("normal", ["reset", "back"], false);
+		check(
+			"cli editor: declined reset leaves the mode alone",
+			String(r5.notifies.some((n) => n.includes("reset mode normal"))),
+			"false",
+		);
+	} finally {
+		clearSessionPass();
+		applyConfig({ global: {}, warnings: [] });
+	}
+}
+// ── GuardPanel: two-level group → rule navigation (phase3 rule-groups) ──
+// The overlay mirrors the CLI editor: ruleMode → ruleGroup → ruleEditor →
+// ruleLevel, with reset living on the group screen (whole-mode reset).
+{
+	const PANEL2_SETTINGS = "/tmp/pgtest/panel-rulesettings.json";
+	const prevEnv2 = process.env.PI_PATH_GUARD_SETTINGS;
+	rmSync(PANEL2_SETTINGS, { force: true });
+	process.env.PI_PATH_GUARD_SETTINGS = PANEL2_SETTINGS;
+	applyConfig({ global: {}, warnings: [] });
+	const label = (id: string) => RULE_GROUPS.find((g) => g.id === id)!.label;
+	try {
+		// 1. ruleGroup screen mirrors the shared CLI group list verbatim
+		const groupOpts: string[] =
+			panelMod.panelOptions({
+				kind: "ruleGroup",
+				mode: "normal",
+				idx: 0,
+			} as any) ?? [];
+		check(
+			"panel ruleGroup: options mirror the shared group list",
+			String(
+				JSON.stringify(groupOpts) ===
+					JSON.stringify(panelMod.ruleGroupOptions("normal")),
+			),
+			"true",
+		);
+		check(
+			"panel ruleGroup: 7 groups + reset + back",
+			String(groupOpts.length),
+			"9",
+		);
+		check(
+			"panel ruleGroup: reset lives at the group level",
+			String(groupOpts.some((o) => o.startsWith("reset —"))),
+			"true",
+		);
+
+		// 2. ruleEditor screen = only that group's rules (+ back, no reset)
+		const writes = RULE_GROUPS.find((g) => g.id === "writes")!;
+		const ruleOpts: string[] =
+			panelMod.panelOptions({
+				kind: "ruleEditor",
+				mode: "normal",
+				group: "writes",
+				idx: 0,
+			} as any) ?? [];
+		check(
+			"panel ruleEditor: rows are the selected group's rules + back",
+			String(
+				typeof panelMod.ruleRowOptions === "function" &&
+					JSON.stringify(ruleOpts) ===
+						JSON.stringify(panelMod.ruleRowOptions("normal", writes)),
+			),
+			"true",
+		);
+		check(
+			"panel ruleEditor: only the group's rules (+ back)",
+			String(ruleOpts.length),
+			"6",
+		);
+		check(
+			"panel ruleEditor: no reset row",
+			String(ruleOpts.some((o) => o.startsWith("reset"))),
+			"false",
+		);
+		check(
+			"panel ruleEditor: row carries level + provenance suffix",
+			String(ruleOpts[0]),
+			`writeOutside — ${RULE_DESCRIPTIONS.writeOutside} (${rlFor("normal", "writeOutside")}${provenanceSuffix("normal", "writeOutside")})`,
+		);
+
+		// 3. navigation: rules → mode list → normal → group list
+		const p = await openGuardPanel();
+		p.press(KEY_DOWN);
+		p.press(KEY_ENTER); // main → rules
+		p.press(KEY_ENTER); // rules → mode list (mode row idx 0)
+		p.press(KEY_DOWN);
+		p.press(KEY_ENTER); // → normal
+		const groupRender = p.render();
+		check(
+			"panel nav: mode selection lands on the group list",
+			String(groupRender.includes("Pick a rule group (mode: normal)")),
+			"true",
+		);
+		check(
+			"panel nav: the group list shows the groups' override counts",
+			String(
+				groupRender.includes(`${label("writes")} (5 rules, 0 overrides)`),
+			),
+			"true",
+		);
+
+		// 4. group selection opens that group's rule list (index-based)
+		p.press(KEY_DOWN);
+		p.press(KEY_ENTER); // system → writes
+		const editorRender = p.render();
+		check(
+			"panel nav: group selection opens its rule list",
+			String(editorRender.includes("Mode: normal · Group:")),
+			"true",
+		);
+		check(
+			"panel nav: the rule list only has that group's rules",
+			String(
+				editorRender.includes("writeHome") &&
+					!editorRender.includes("archiveExtract") &&
+					!editorRender.includes("deleteInProject"),
+			),
+			"true",
+		);
+
+		// 5. back chain: ruleEditor → ruleGroup → ruleMode
+		p.press(KEY_ESC);
+		check(
+			"panel nav: back from the rule list returns to the group list",
+			String(p.render().includes("Pick a rule group (mode: normal)")),
+			"true",
+		);
+		p.press(KEY_ESC);
+		check(
+			"panel nav: back from the group list returns to the mode list",
+			String(p.render().includes("Pick a mode to customize:")),
+			"true",
+		);
+
+		// 6. rule → level, and the edit is applied
+		const p2 = await openGuardPanel();
+		p2.press(KEY_DOWN);
+		p2.press(KEY_ENTER); // main → rules
+		p2.press(KEY_ENTER); // rules → mode list
+		p2.press(KEY_DOWN);
+		p2.press(KEY_ENTER); // → normal
+		p2.press(KEY_DOWN);
+		p2.press(KEY_ENTER); // → writes
+		p2.press(KEY_DOWN);
+		p2.press(KEY_ENTER); // → writeHome → rule level
+		check(
+			"panel nav: selecting a rule opens the level picker",
+			String(p2.render().includes("Mode: normal · Rule: writeHome")),
+			"true",
+		);
+		p2.press(KEY_ENTER); // block (idx 0) → apply
+		check(
+			"panel nav: the level picked from a group is applied",
+			String(p2.render().includes("set normal.writeHome = block")),
+			"true",
+		);
+
+		// 7. reset at the group level asks the in-panel confirmation
+		const p3 = await openGuardPanel();
+		p3.press(KEY_DOWN);
+		p3.press(KEY_ENTER); // main → rules
+		p3.press(KEY_ENTER); // rules → mode list
+		p3.press(KEY_DOWN);
+		p3.press(KEY_ENTER); // → normal group list
+		for (let i = 0; i < RULE_GROUPS.length; i++) p3.press(KEY_DOWN);
+		p3.press(KEY_ENTER); // reset row → in-panel confirm
+		check(
+			"panel ruleGroup: reset asks the in-panel confirmation",
+			String(p3.render().includes('Reset mode "normal" to built-in defaults?')),
+			"true",
+		);
+		p3.press(KEY_ENTER); // yes
+		check(
+			"panel ruleGroup: accepted reset keeps the group list visible",
+			String(
+				p3.render().includes("reset mode normal") &&
+					p3.render().includes("Pick a rule group (mode: normal)"),
+			),
+			"true",
+		);
+	} finally {
+		process.env.PI_PATH_GUARD_SETTINGS = prevEnv2;
+		applyConfig({ global: {}, warnings: [] });
+	}
+}
+// ── GuardPanel: doctor entry in the main menu (phase3 rule-groups) ──
+// /guard doctor is reachable from the overlay too: main → doctor screen
+// (read-only doctorView output + a single back row) → back to main.
+{
+	const DOCTOR_ROW = "doctor — Show effective config & diagnostics (诊断视图)";
+	check(
+		"panel main menu: offers the doctor entry",
+		String(panelMod.GUARD_MAIN_MENU.includes(DOCTOR_ROW)),
+		"true",
+	);
+	check(
+		"panel doctor: the screen has exactly one back row",
+		JSON.stringify(panelMod.panelOptions({ kind: "doctor", idx: 0 } as any)),
+		JSON.stringify(["back — Back (返回)"]),
+	);
+
+	const p = await openGuardPanel();
+	const doctorIdx = panelMod.GUARD_MAIN_MENU.indexOf(DOCTOR_ROW);
+	for (let i = 0; i < doctorIdx; i++) p.press(KEY_DOWN); // main → doctor
+	const mainBefore = p.render();
+	p.press(KEY_ENTER); // open the doctor screen
+	const doctorRender = p.render();
+	check(
+		"panel nav: the main menu shows the doctor entry",
+		String(mainBefore.includes(DOCTOR_ROW)),
+		"true",
+	);
+	check(
+		"panel nav: selecting doctor opens the read-only doctor view",
+		String(
+			doctorRender.includes("Path Guard doctor") &&
+				doctorRender.includes("back — Back (返回)"),
+		),
+		"true",
+	);
+	check(
+		"panel doctor: renders the live doctorView output",
+		String(doctorRender.includes(doctorMod.doctorView(PROJ).split("\n")[0])),
+		"true",
+	);
+	p.press(KEY_ESC); // back to main
+	check(
+		"panel nav: back from doctor returns to the main menu",
+		String(p.render().includes("Choose an action:") && !p.closed),
+		"true",
+	);
+
+	const p2 = await openGuardPanel();
+	for (let i = 0; i < doctorIdx; i++) p2.press(KEY_DOWN);
+	p2.press(KEY_ENTER); // main → doctor
+	const opened = p2.render();
+	p2.press(KEY_ENTER); // back row (idx 0) → pop
+	check(
+		"panel nav: selecting back on the doctor screen returns to the main menu",
+		String(
+			opened.includes("Path Guard doctor") &&
+				p2.render().includes("Choose an action:") &&
+				!p2.closed,
+		),
+		"true",
+	);
+}
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

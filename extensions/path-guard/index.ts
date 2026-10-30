@@ -38,9 +38,12 @@ import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.10.0. /guard explain — a read-only
+ * recent release/tag is 1.11.0. /guard explain — a read-only
  * classification trace (/guard explain <command>) backed by the
  * TraceCollector in trace.ts, with zero verdict behavior change.
+ * /guard rules — a two-level picker (mode -> rule group -> rule) whose rows
+ * show each rule's effective level plus its provenance (default / [global] /
+ * [project] / session-pass), shared by the CLI editor and the /guard overlay.
  */
 
 /** Entry point: register event handlers and the /guard command. */
@@ -193,6 +196,7 @@ export default function (pi: ExtensionAPI) {
 				if (option === "paths") await runPathsMenu(ctx);
 				else if (option === "rules") await runRulesMenu(ctx);
 				else if (option === "scope") await runScopeMenu(ctx);
+				else if (option === "doctor") ctx.ui.notify(doctorView(ctx.cwd), "info");
 				else await runModePicker(ctx);
 			}
 		},

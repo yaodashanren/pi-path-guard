@@ -6,12 +6,23 @@ import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/
 import { NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, TRUSTED_SWITCH_WARNING, TRUST_PATH_WARNING } from "./constants.ts";
 import { projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
 import { resolveReal } from "./paths.ts";
+import { doctorView } from "./doctor.ts";
 import { applyConfig, getConfigWarnings, getLayers, projectSettingsPath, readSavedConfig } from "./rules.ts";
-import type { ConfigWarning, PathGuardLayer } from "./schema.ts";
-import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
+import type { ConfigWarning, PathGuardLayer, RuleGroup, RuleGroupId } from "./schema.ts";
+import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_GROUPS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, isSessionPassed, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, ruleProvenance, provenanceSuffix, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
 
 // path-guard — /guard interactive UI: chained menus, actions, rules matrix,
 // the single self-contained overlay panel, and warning confirmations.
+
+/**
+ * Level shown in the UI for a (mode, rule) pair. A session pass outranks every
+ * persisted layer and is what `rl()` returns, so the displayed level must honour
+ * it — otherwise a row reads `(confirm, session-pass)` while the real verdict is
+ * `pass`, contradicting the judgement precedence the suffix claims to mirror.
+ */
+function displayLevel(mode: GuardMode, rule: RuleId): RuleLevel {
+	return isSessionPassed(mode, rule) ? "pass" : rlFor(mode, rule);
+}
 
 /** Switch the active mode: update config, refresh the footer, persist. Confirm first. */
 export function actionSwitchMode(
@@ -149,6 +160,7 @@ export const GUARD_MAIN_MENU = [
 	"rules — Customize per-mode guard rules (定制每模式守护规则)",
 	"paths — Manage protected & trusted paths (管理保护/信任路径)",
 	"scope — Where edits are saved: global or this project (切换保存位置)",
+	"doctor — Show effective config & diagnostics (诊断视图)",
 ];
 
 /** First step inside /guard paths: pick a category (loops until back/cancel). */
@@ -438,7 +450,7 @@ export async function ruleLevelPicker(
 	ctx: ExtensionCommandContext,
 ): Promise<void> {
 	const dflt = DEFAULT_MODES[mode][rule];
-	const cur = rlFor(mode, rule);
+	const cur = displayLevel(mode, rule);
 	const options = [
 		...RULE_LEVELS.map(
 			(l) =>
@@ -465,9 +477,51 @@ export async function ruleLevelPicker(
 }
 
 /**
- * Rule editor for one mode: shows all 17 rules with their current levels, lets
- * the user set several in a row (each level pick returns here), and offers
- * reset (this mode) + back.
+ * Options for the first (group) level of the rule editor: one row per rule
+ * group (`${label} (${N} rules, ${M} overrides)`) plus reset and back.
+ *
+ * `M` counts only PERSISTED overrides — provenance ∈ {global, project}. A
+ * session-only pass is not a stored override, so it is not counted.
+ *
+ * Shared verbatim with the /guard overlay (Task 4) so both entries render the
+ * identical list; `reset` stays at this level (it resets the whole mode).
+ */
+export function ruleGroupOptions(mode: GuardMode): string[] {
+	return [
+		...RULE_GROUPS.map((g) => {
+			const overrides = g.rules.filter((r) => {
+				const p = ruleProvenance(mode, r);
+				return p === "global" || p === "project";
+			}).length;
+			return `${g.label} (${g.rules.length} rules, ${overrides} overrides)`;
+		}),
+		"reset — Reset this mode to built-in defaults (恢复该模式默认)",
+		"back — Back to mode list (返回)",
+	];
+}
+
+/**
+ * Options for the second (rule) level of the rule editor: the rows of ONE
+ * group (`${rule} — ${description} (${level}${provenanceSuffix})`) plus back.
+ * `reset` is deliberately absent — it resets the whole mode, so it stays on
+ * the group level. Shared by the CLI editor and the /guard overlay so the two
+ * entries cannot drift apart.
+ */
+export function ruleRowOptions(mode: GuardMode, group: RuleGroup): string[] {
+	return [
+		...group.rules.map(
+			(r) =>
+				`${r} — ${RULE_DESCRIPTIONS[r]} (${displayLevel(mode, r)}${provenanceSuffix(mode, r)})`,
+		),
+		"back — Back to group list (返回)",
+	];
+}
+
+/**
+ * Rule editor for one mode, two levels deep: first pick a rule group (the
+ * per-group override counts are shown on each row), then a rule inside it.
+ * The level pick returns to the same group list, so several rules can be set
+ * in a row; reset (whole mode) and back live on the group level.
  */
 export async function runModeEditor(
 	mode: GuardMode,
@@ -475,14 +529,12 @@ export async function runModeEditor(
 ): Promise<void> {
 	while (true) {
 		const title =
-			`Mode: ${mode} — pick a rule to set (current levels shown):\n` +
-			RULE_IDS.map((r) => `  ${r} = ${rlFor(mode, r)}`).join("\n");
-		const options = [
-			...RULE_IDS.map((r) => `${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(mode, r)})`),
-			"reset — Reset this mode to built-in defaults (恢复该模式默认)",
-			"back — Back to mode list (返回)",
-		];
-		const picked = await ctx.ui.select(title, options);
+			`Mode: ${mode} — pick a rule group (current levels shown):\n` +
+			RULE_GROUPS.map(
+				(g) =>
+					`  ${g.label}: ${g.rules.map((r) => `${r}=${displayLevel(mode, r)}`).join(", ")}`,
+			).join("\n");
+		const picked = await ctx.ui.select(title, ruleGroupOptions(mode));
 		if (!picked) {
 			ctx.ui.notify("Cancelled, rules unchanged", "info");
 			return;
@@ -498,9 +550,38 @@ export async function runModeEditor(
 			ctx.ui.notify(actionResetMode(mode, ctx), "info");
 			continue;
 		}
-		if ((RULE_IDS as readonly string[]).includes(op)) {
-			await ruleLevelPicker(mode, op as RuleId, ctx);
+		const group = RULE_GROUPS.find(
+			(g) => picked.startsWith(g.label) || g.id === op,
+		);
+		if (!group) continue;
+		if (!(await runRuleGroupEditor(mode, group, ctx))) return;
+	}
+}
+
+/**
+ * Second level of the rule editor: the group's rules (level + provenance
+ * suffix) plus back. Returns false when the user cancelled the whole editor,
+ * true when it is time to show the group list again.
+ */
+async function runRuleGroupEditor(
+	mode: GuardMode,
+	group: RuleGroup,
+	ctx: ExtensionCommandContext,
+): Promise<boolean> {
+	while (true) {
+		const options = ruleRowOptions(mode, group);
+		const picked = await ctx.ui.select(
+			`Mode: ${mode} · ${group.label} — pick a rule to set (level + source shown):`,
+			options,
+		);
+		if (!picked) {
+			ctx.ui.notify("Cancelled, rules unchanged", "info");
+			return false;
 		}
+		const op = picked.split(/\s+/)[0];
+		if (op === "back") return true;
+		const rule = group.rules.find((r) => r === op);
+		if (rule) await ruleLevelPicker(mode, rule, ctx);
 	}
 }
 
@@ -602,9 +683,11 @@ export type PanelScreen =
 	| { kind: "mode"; idx: number }
 	| { kind: "rules"; idx: number }
 	| { kind: "ruleMode"; idx: number }
-	| { kind: "ruleEditor"; mode: GuardMode; idx: number }
+	| { kind: "ruleGroup"; mode: GuardMode; idx: number }
+	| { kind: "ruleEditor"; mode: GuardMode; group: RuleGroupId; idx: number }
 	| { kind: "ruleLevel"; mode: GuardMode; rule: RuleId; idx: number }
 	| { kind: "overview"; scroll: number }
+	| { kind: "doctor"; idx: number }
 	| { kind: "pathsCategory"; idx: number }
 	| { kind: "pathsActions"; pathKind: PathKind; idx: number }
 	| { kind: "resetModePick"; idx: number }
@@ -662,19 +745,19 @@ export function panelOptions(s: PanelScreen): string[] {
 				...GUARD_MODES.map((mo) => `${mo} — ${MODE_DESCRIPTIONS[mo]}`),
 				"back — Back (返回)",
 			];
-		case "ruleEditor":
-			return [
-				...RULE_IDS.map(
-					(r) => `${r} — ${RULE_DESCRIPTIONS[r]} (${rlFor(s.mode, r)})`,
-				),
-				"reset — Reset this mode to built-in defaults (恢复该模式默认)",
-				"back — Back to mode list (返回)",
-			];
+		case "ruleGroup":
+			return ruleGroupOptions(s.mode);
+		case "ruleEditor": {
+			const group = RULE_GROUPS.find((g) => g.id === s.group);
+			return group
+				? ruleRowOptions(s.mode, group)
+				: ["back — Back to group list (返回)"];
+		}
 		case "ruleLevel":
 			return [
 				...RULE_LEVELS.map(
 					(l) =>
-						`${RULE_LEVEL_LABELS[l]}${l === rlFor(s.mode, s.rule) ? " (current)" : ""}${l === DEFAULT_MODES[s.mode][s.rule] ? " [default]" : ""}`,
+						`${RULE_LEVEL_LABELS[l]}${l === displayLevel(s.mode, s.rule) ? " (current)" : ""}${l === DEFAULT_MODES[s.mode][s.rule] ? " [default]" : ""}`,
 				),
 				`reset — back to built-in default (${DEFAULT_MODES[s.mode][s.rule]}) (恢复该条默认)`,
 				"back — Back to rule list (返回)",
@@ -685,6 +768,8 @@ export function panelOptions(s: PanelScreen): string[] {
 			return pathsActionsMenu(s.pathKind);
 		case "pathsRemove":
 			return [...pathList(s.pathKind), "back — Back to actions (返回)"];
+		case "doctor":
+			return ["back — Back (返回)"];
 		case "pathsAdd":
 		case "overview":
 			return [];
@@ -851,6 +936,8 @@ export class GuardPanel implements Component, Focusable {
 				else if (id === "rules") this.push({ kind: "rules", idx: 0 });
 				else if (id === "paths")
 					this.push({ kind: "pathsCategory", idx: 0 });
+				else if (id === "doctor")
+					this.push({ kind: "doctor", idx: 0 });
 				return;
 			case "scope": {
 				if (id === "back") {
@@ -900,7 +987,7 @@ export class GuardPanel implements Component, Focusable {
 				if (id === "reset") this.push({ kind: "resetModePick", idx: 0 });
 				else if (id === "back") this.pop();
 				else if (isGuardMode(id))
-					this.push({ kind: "ruleEditor", mode: id, idx: 0 });
+					this.push({ kind: "ruleGroup", mode: id, idx: 0 });
 				return;
 			case "resetModePick": {
 				if (id === "back") {
@@ -919,7 +1006,7 @@ export class GuardPanel implements Component, Focusable {
 				);
 				return;
 			}
-			case "ruleEditor": {
+			case "ruleGroup": {
 				const mode = s.mode;
 				if (id === "reset")
 					this.askConfirm(
@@ -931,13 +1018,31 @@ export class GuardPanel implements Component, Focusable {
 						},
 					);
 				else if (id === "back") this.pop();
-				else if ((RULE_IDS as readonly string[]).includes(id))
-					this.push({
-						kind: "ruleLevel",
-						mode,
-						rule: id as RuleId,
-						idx: 0,
-					});
+				else {
+					// Groups are rows 0..RULE_GROUPS.length-1 of this screen and the
+					// shared option builder preserves that order — resolve by index
+					// (matching on label text would be brittle) and let the explicit
+					// reset/back id checks above exclude their rows.
+					const group = RULE_GROUPS[s.idx];
+					if (group)
+						this.push({
+							kind: "ruleEditor",
+							mode,
+							group: group.id,
+							idx: 0,
+						});
+				}
+				return;
+			}
+			case "ruleEditor": {
+				const { mode, group: groupId } = s;
+				if (id === "back") this.pop();
+				else {
+					// Rules are rows 0..group.rules.length-1 of this screen.
+					const group = RULE_GROUPS.find((g) => g.id === groupId);
+					const rule = group?.rules[s.idx];
+					if (rule) this.push({ kind: "ruleLevel", mode, rule, idx: 0 });
+				}
 				return;
 			}
 			case "ruleLevel": {
@@ -1002,6 +1107,9 @@ export class GuardPanel implements Component, Focusable {
 				this.pop();
 				return;
 			}
+			case "doctor":
+				if (id === "back") this.pop();
+				return;
 			case "pathsAdd":
 			case "overview":
 				return;
@@ -1101,6 +1209,7 @@ export class GuardPanel implements Component, Focusable {
 		const s = this.current();
 		if (s.kind === "overview")
 			return "↑/↓/PgUp/PgDn scroll · ⏎/esc close";
+		if (s.kind === "doctor") return "⏎/esc back";
 		if (s.kind === "pathsAdd") return "type a path · ⏎ submit · esc back";
 		return `↑/↓ move · ⏎ select · esc back${s.kind === "main" ? " · q quit" : ""}`;
 	}
@@ -1133,24 +1242,34 @@ export class GuardPanel implements Component, Focusable {
 				out.push("Reset which mode to its built-in defaults?", "");
 				out.push(...this.listLines(panelOptions(s), s.idx));
 				break;
-			case "ruleEditor":
+			case "ruleGroup":
+				out.push(`Pick a rule group (mode: ${s.mode}):`);
+				out.push(...this.listLines(panelOptions(s), s.idx));
+				break;
+			case "ruleEditor": {
+				const group = RULE_GROUPS.find((g) => g.id === s.group);
 				out.push(
-					`Mode: ${s.mode} — pick a rule to set (current levels shown):`,
+					`Mode: ${s.mode} · Group: ${group ? group.label : s.group} — pick a rule to set (level + source shown):`,
 				);
 				out.push(...this.listLines(panelOptions(s), s.idx, 16));
 				break;
+			}
 			case "ruleLevel":
 				out.push(
 					`Mode: ${s.mode} · Rule: ${s.rule} — ${RULE_DESCRIPTIONS[s.rule]}`,
 				);
 				out.push(
-					`Current: ${rlFor(s.mode, s.rule)} · Built-in default: ${DEFAULT_MODES[s.mode][s.rule]}`,
+					`Current: ${displayLevel(s.mode, s.rule)} · Built-in default: ${DEFAULT_MODES[s.mode][s.rule]}`,
 					"",
 				);
 				out.push(...this.listLines(panelOptions(s), s.idx));
 				break;
 			case "overview":
 				out.push(...this.overviewLines(rulesMatrix().split("\n"), s.scroll));
+				break;
+			case "doctor":
+				out.push(...doctorView(this.ctx.cwd).split("\n"), "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
 				break;
 			case "pathsCategory":
 				out.push("Choose a path category:", "");

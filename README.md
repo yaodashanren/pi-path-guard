@@ -9,7 +9,7 @@ Intercepts destructive operations in tool calls (`bash`, `write`, `edit`): prote
 
 ## Feature highlights
 
-- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 22 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 22 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 22 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，22 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
+- **🛡 5 modes, every rule tunable** — `strict` / `normal` (default) / `loose` / `trusted` / `naked` run off one built-in matrix of 23 guard rules; switching modes tightens or loosens the whole guard, and the active mode persists across sessions (`/guard` or `/guard <mode>`). Inside **every** mode, each of the 23 rules is individually re-tunable to **block / confirm / pass** (or reset to its built-in default) via `/guard → rules` — no code changes; only your overrides are stored. **五种防护模式，规则逐条可调**：`strict`/`normal`/`loose`/`trusted`/`naked` 共用一套内置的 23 条守护规则矩阵；切换模式即整体收紧或放宽防护，当前模式跨会话保留。而每种模式下，23 条规则每一条都能独立调整为 **阻止/询问/放行**（或恢复内置默认），经 `/guard → rules` 即可，无需改代码，仅保存你的覆盖项。
 - **📁 Protected & trusted paths** — `/guard → paths` splits into two categories: **protected paths** (`/guard paths protected …`, the default) are guarded in **every** mode (incl. naked); **trusted paths** (`/guard paths trusted …`) are **always allowed** — operations on them pass like trusted mode, in any mode. System-important paths can never be trusted (see below). 管理**受保护路径**与**信任路径**两类路径。
 - **🔒 Three-way verdict** — every intercepted operation resolves to **block / confirm / pass**: block refuses outright, confirm asks you, pass executes. How strict the guard is depends entirely on your rules.
 
@@ -37,8 +37,8 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 
 ### `/guard` command
 
-- `/guard` — interactive main menu with three actions: **Switch mode** (title shows the full decision matrix; choices are bilingual), **Customize per-mode guard rules**, and **Manage custom protected paths**. When the host supports custom components the whole interactive flow opens as a **single floating popup (overlay)** — navigate with ↑/↓, ⏎ select, esc back, `q` quit at the main menu; all confirmations (incl. the naked double-confirm) and the add-path text input are drawn inside the popup. The main menu loops: a sub-menu's **back** returns to the previous menu, and eventually back to this main menu; only cancelling at the top level (no selection) exits the command. 交互式主菜单，三个动作：**切换防护模式**（标题展示完整判定矩阵，选项中英双语）、**定制每模式守护规则**、**管理自定义受保护路径**。宿主支持自定义组件时，整个交互流程以一个**浮动弹窗（overlay）**打开——↑/↓ 移动、⏎ 选择、esc 返回、主菜单 `q` 退出；所有确认（含 naked 两级确认）与添加路径的文本输入都在弹窗内完成。主菜单为循环：子菜单的 **back** 逐级返回上一级，最终回到本主菜单；只有顶层取消（不选）才退出命令
-- `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 22 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 22 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
+- `/guard` — interactive main menu with five actions: **Switch mode** (title shows the full decision matrix; choices are bilingual), **Customize per-mode guard rules**, **Manage custom protected paths**, **Choose where edits are saved** (global settings vs this project), and **Show effective config & diagnostics** (the same layered report as `/guard doctor`, rendered read-only inside the popup). When the host supports custom components the whole interactive flow opens as a **single floating popup (overlay)** — navigate with ↑/↓, ⏎ select, esc back, `q` quit at the main menu; all confirmations (incl. the naked double-confirm) and the add-path text input are drawn inside the popup. The main menu loops: a sub-menu's **back** returns to the previous menu, and eventually back to this main menu; only cancelling at the top level (no selection) exits the command. 交互式主菜单，五个动作：**切换防护模式**（标题展示完整判定矩阵，选项中英双语）、**定制每模式守护规则**、**管理自定义受保护路径**、**切换保存位置**（全局配置或本项目）、**查看生效配置与诊断报告**（即 `/guard doctor` 的分层报告，在弹窗内只读展示）。宿主支持自定义组件时，整个交互流程以一个**浮动弹窗（overlay）**打开——↑/↓ 移动、⏎ 选择、esc 返回、主菜单 `q` 退出；所有确认（含 naked 两级确认）与添加路径的文本输入都在弹窗内完成。主菜单为循环：子菜单的 **back** 逐级返回上一级，最终回到本主菜单；只有顶层取消（不选）才退出命令
+- `/guard` → **rules** sub-menu (two-level navigation): pick a **mode** → pick a **rule group** (7 groups — System / Writes / Deletes / Overwrite / Git & Pipes / Scripts / Unknowable — each row showing its size and persistent override count, e.g. `Writes — 写入/截断 (5 rules, 2 overrides)`) → the group's rules list shows each rule's **effective level plus where it comes from**; the provenance suffix mirrors the judgement precedence (session-pass → project → global → built-in default): no suffix = built-in default, `(confirm [global])` / `(confirm [project])` = an override stored in that layer, `(pass, session-pass)` = allowed for this session only (in memory, never persisted). Pick a rule → set **block / confirm / pass** (or reset to the built-in default). The back chain is rule → group → mode, so you can set several rules per group before backing out; **reset** on the group screen still clears every override for that mode. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close). Stored as `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单（两级导航）：选**模式** → 选**规则分组**（7 组 —— 系统 / 写入 / 删除 / 覆盖 / Git 与管道 / 运行脚本 / 不可解析，每行显示组内规则数与持久化覆盖数，如 `Writes — 写入/截断 (5 rules, 2 overrides)`）→ 组内规则列表显示每条规则的**生效级别与来源**；来源后缀与判定优先级一致（会话放行 → 项目 → 全局 → 内置默认）：无后缀即内置默认，`[global]`/`[project]` 表示该层有覆盖，`(pass, session-pass)` 表示仅本会话放行（仅内存、不落盘）。选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。返回链路为规则 → 分组 → 模式，可在同一组内连续改多条；分组屏的 **reset** 仍清空该模式全部覆盖。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - `/guard doctor` — one-shot plain-text status report (works with or without a UI): active mode and where it came from, every config layer (global settings / project entry / hand-authored block) with mode/path/rule counts, config warnings, protected & trusted paths, session-pass rules, and the current session's cwd (with a marker when cwd is HOME). See the Doctor section below. 一次性纯文本诊断报告（有无 UI 均可用）：当前模式及来源、各配置层（全局 / 项目条目 / 手写块）与计数、配置告警、受保护与信任路径、会话放行规则、当前会话 cwd（HOME 下有标记）。见下文 Doctor 小节
 - `/guard explain <command>` — read-only plain-text classification trace (works with or without a UI, **never executes the command**): the live Config (mode + source, session passes, cwd), a per-segment Trace of how the command would be judged (recursion indented like the real walk), the aggregated Verdict (block / confirm with rules — confirm notes `no UI → blocked` in headless sessions), and a Hint for the narrowest unblock. See the Explain section below. 只读纯文本判定诊断（有无 UI 均可用，**绝不执行命令**）：实时 Config（模式及来源、会话放行、cwd）、逐段 Trace（递归缩进与真实判定一致）、聚合 Verdict（block / confirm 含规则；无 UI 时注明 `no UI → blocked`）与最窄解除路径的 Hint。见下文 Explain 小节
@@ -92,8 +92,8 @@ Also settable statically:
 
 ### Tunable rules / 可调规则
 
-Each mode's judgement is a set of 22 rules; override any per mode in settings.json (`rule = "block" | "confirm" | "pass"`; invalid values are ignored):
-每个模式的判定由 22 条规则组成；可在 settings.json 里按模式覆盖（`rule` 取 `"block"|"confirm"|"pass"`，非法值忽略）：
+Each mode's judgement is a set of 23 rules; override any per mode in settings.json (`rule = "block" | "confirm" | "pass"`; invalid values are ignored):
+每个模式的判定由 23 条规则组成；可在 settings.json 里按模式覆盖（`rule` 取 `"block"|"confirm"|"pass"`，非法值忽略）：
 
 ```jsonc
 "pathGuard": {
@@ -161,7 +161,7 @@ Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInPro
 
 ### Doctor / 诊断报告
 
-`/guard doctor` prints a layered status report in one `info` notification — pure text, so it works even in headless (no-UI) sessions:
+`/guard doctor` prints a layered status report in one `info` notification — pure text, so it works even in headless (no-UI) sessions. The very same report is available inside the panel (`/guard` → **doctor**, a read-only screen; ⏎/esc goes back):
 
 ```text
 /guard doctor
@@ -214,13 +214,13 @@ Hint:    tune just this rule first (/guard rules targetUnresolved = pass|block),
 
 ## Development / 开发与测试
 
-Automated tests (640 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
+Automated tests (705 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（640 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
+自动化测试（705 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
@@ -228,7 +228,7 @@ cd tests && node --experimental-strip-types test-pathguard.ts
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.10.0**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history (aligned with `package.json`); the latest release is **v1.11.0**.
 
 ## License
 

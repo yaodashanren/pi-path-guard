@@ -14,6 +14,7 @@ import { expandHome, isDirectory, isOutsideCwd, isUnresolvedTarget, isRemoteTarg
 	matchesProtectedPath, resolveReal } from "./paths.ts";
 import { inNaked, isSessionPassed, isTrustedPath, isUserProtectedPath, pathList, rl, rlFor,
 	ruleVerdict } from "./rules.ts";
+import type { TraceCollector } from "./trace.ts";
 import { extractCommandSubstitutions, extractHeredocs, extractPathArgs, extractRedirectTargets,
 	hasForceFlag, hasShortFlag, hasLongFlag, isDeleteCommand,
 	isTruncatingOp, parseCommand, splitSegments, splitShellTokens,
@@ -276,6 +277,7 @@ export function classifySubstitutions(
 	realCwd: string,
 	hasUI: boolean,
 	depth: number,
+	trace?: TraceCollector,
 ): SegmentVerdict {
 	const blockReasons: string[] = [];
 	const confirmRules = new Set<RuleId>();
@@ -284,7 +286,7 @@ export function classifySubstitutions(
 		for (const seg of splitSegments(body)) {
 			const s = seg.trim();
 			if (!s) continue;
-			const v = classifySegment(s, realCwd, hasUI, depth);
+			const v = classifySegment(s, realCwd, hasUI, depth, trace);
 			if (v.kind === "block") blockReasons.push(v.reason);
 			else if (v.kind === "confirm") {
 				confirm = true;
@@ -309,9 +311,18 @@ export function classifySegment(
 	realCwd: string,
 	hasUI: boolean,
 	depth = 0,
+	trace?: TraceCollector,
 ): SegmentVerdict {
 	// Recursion depth guard (nested bash -c / eval / $() too deep to statically check → conservative confirm)
-	if (depth > 4) return { kind: "confirm" };
+	if (depth > 4) {
+		trace?.add({
+			depth,
+			label: `…depth limit… ${trimmed}`,
+			verdict: "confirm",
+			rules: [],
+		});
+		return { kind: "confirm" };
+	}
 
 	// ⓪ Command substitutions run before the outer command, so judge their content
 	//    too — `echo "$(rm -rf x)"` must not slip through.
@@ -324,6 +335,7 @@ export function classifySegment(
 			realCwd,
 			hasUI,
 			depth + 1,
+			trace,
 		);
 		if (subVerdict.kind === "block") {
 			return {
@@ -337,15 +349,26 @@ export function classifySegment(
 		}
 	}
 
-	const outer = classifySegmentOuter(trimmed, realCwd, hasUI, depth);
-	if (outer.kind === "block") return outer;
+	const outer = classifySegmentOuter(trimmed, realCwd, hasUI, depth, trace);
+	if (outer.kind === "block") {
+		trace?.add({
+			depth,
+			label: trimmed,
+			verdict: "block",
+			rules: [],
+			reason: outer.reason.split("\n")[0],
+		});
+		return outer;
+	}
 	if (outer.kind === "confirm" || subConfirm) {
 		const rules = new Set<RuleId>(subConfirmRules);
 		if (outer.kind === "confirm") {
 			for (const rule of outer.rules ?? []) rules.add(rule);
 		}
+		trace?.add({ depth, label: trimmed, verdict: "confirm", rules: [...rules] });
 		return { kind: "confirm", rules: [...rules] };
 	}
+	trace?.add({ depth, label: trimmed, verdict: "pass", rules: [] });
 	return { kind: "pass" };
 }
 
@@ -412,6 +435,7 @@ export function classifySegmentOuter(
 	realCwd: string,
 	hasUI: boolean,
 	depth = 0,
+	trace?: TraceCollector,
 ): SegmentVerdict {
 	// ① Judge every output redirect; no safe first target may hide a later one.
 	const blockReasons: string[] = [];
@@ -429,7 +453,13 @@ export function classifySegmentOuter(
 	// ② Judge the command itself. Redirect confirms must not short-circuit this:
 	// `rm -rf .env > "$X"` is still a protected delete (block wins), and a
 	// `git reset --hard > "$X"` keeps both of its confirm rules.
-	const outer = classifyCommandAfterRedirects(trimmed, realCwd, hasUI, depth);
+	const outer = classifyCommandAfterRedirects(
+		trimmed,
+		realCwd,
+		hasUI,
+		depth,
+		trace,
+	);
 	if (outer.kind === "block") blockReasons.push(outer.reason);
 	else if (outer.kind === "confirm") {
 		confirm = true;
@@ -449,6 +479,7 @@ function classifyCommandAfterRedirects(
 	realCwd: string,
 	hasUI: boolean,
 	depth: number,
+	trace?: TraceCollector,
 ): SegmentVerdict {
 	// ② Dangerous commands → per blockGroup / confirmGroup rule
 	const danger = dangerousLevel(trimmed);
@@ -497,6 +528,7 @@ function classifyCommandAfterRedirects(
 		realCwd,
 		hasUI,
 		depth,
+		trace,
 	);
 	if (wrapperVerdict.kind !== "pass") return wrapperVerdict;
 
@@ -520,6 +552,7 @@ export function judgeShellWrapper(
 	realCwd: string,
 	hasUI: boolean,
 	depth: number,
+	trace?: TraceCollector,
 ): SegmentVerdict {
 	const inner = unwrapShellWrapper(cmdInfo);
 	if (!inner) return { kind: "pass" };
@@ -544,7 +577,7 @@ export function judgeShellWrapper(
 	for (const seg of splitSegments(inner)) {
 		const s = seg.trim();
 		if (!s) continue;
-		const v = classifySegment(s, realCwd, hasUI, depth + 1);
+		const v = classifySegment(s, realCwd, hasUI, depth + 1, trace);
 		if (v.kind === "block") blockReasons.push(v.reason);
 		else if (v.kind === "confirm") {
 			confirmNeeded.push(s);

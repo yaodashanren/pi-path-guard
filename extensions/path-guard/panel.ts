@@ -6,6 +6,7 @@ import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/
 import { NAKED_SWITCH_WARNING_1, NAKED_SWITCH_WARNING_2, TRUSTED_SWITCH_WARNING, TRUST_PATH_WARNING } from "./constants.ts";
 import { projectEntryPath, readSettingsFile, writeFileAtomic } from "./store.ts";
 import { resolveReal } from "./paths.ts";
+import { doctorView } from "./doctor.ts";
 import { applyConfig, getConfigWarnings, getLayers, projectSettingsPath, readSavedConfig } from "./rules.ts";
 import type { ConfigWarning, PathGuardLayer, RuleGroup, RuleGroupId } from "./schema.ts";
 import { DEFAULT_MODES, GUARD_MODES, MODE_DESCRIPTIONS, RULE_DESCRIPTIONS, RULE_GROUPS, RULE_IDS, RULE_LEVELS, RULE_LEVEL_LABELS, addPathIn, clearPathsIn, ensureProjectLayer, getConfig, globalSettingsPath, getMode, getWriteScope, pathEntries, setWriteScope, isGuardMode, isRuleLevel, normalizeInScope, normalizeProtectedEntry, pathList, persistNote, removePathIn, resetAllRulesIn, resetModeIn, rlFor, ruleProvenance, provenanceSuffix, setModeIn, setRuleIn, sessionPassList, setMode, untrustableReason, type ConfigScope, type GuardMode, type PathKind, type RuleId, type RuleLevel } from "./rules.ts";
@@ -149,6 +150,7 @@ export const GUARD_MAIN_MENU = [
 	"rules — Customize per-mode guard rules (定制每模式守护规则)",
 	"paths — Manage protected & trusted paths (管理保护/信任路径)",
 	"scope — Where edits are saved: global or this project (切换保存位置)",
+	"doctor — Show effective config & diagnostics (诊断视图)",
 ];
 
 /** First step inside /guard paths: pick a category (loops until back/cancel). */
@@ -675,6 +677,7 @@ export type PanelScreen =
 	| { kind: "ruleEditor"; mode: GuardMode; group: RuleGroupId; idx: number }
 	| { kind: "ruleLevel"; mode: GuardMode; rule: RuleId; idx: number }
 	| { kind: "overview"; scroll: number }
+	| { kind: "doctor"; idx: number }
 	| { kind: "pathsCategory"; idx: number }
 	| { kind: "pathsActions"; pathKind: PathKind; idx: number }
 	| { kind: "resetModePick"; idx: number }
@@ -755,6 +758,8 @@ export function panelOptions(s: PanelScreen): string[] {
 			return pathsActionsMenu(s.pathKind);
 		case "pathsRemove":
 			return [...pathList(s.pathKind), "back — Back to actions (返回)"];
+		case "doctor":
+			return ["back — Back (返回)"];
 		case "pathsAdd":
 		case "overview":
 			return [];
@@ -921,6 +926,8 @@ export class GuardPanel implements Component, Focusable {
 				else if (id === "rules") this.push({ kind: "rules", idx: 0 });
 				else if (id === "paths")
 					this.push({ kind: "pathsCategory", idx: 0 });
+				else if (id === "doctor")
+					this.push({ kind: "doctor", idx: 0 });
 				return;
 			case "scope": {
 				if (id === "back") {
@@ -1090,6 +1097,9 @@ export class GuardPanel implements Component, Focusable {
 				this.pop();
 				return;
 			}
+			case "doctor":
+				if (id === "back") this.pop();
+				return;
 			case "pathsAdd":
 			case "overview":
 				return;
@@ -1189,6 +1199,7 @@ export class GuardPanel implements Component, Focusable {
 		const s = this.current();
 		if (s.kind === "overview")
 			return "↑/↓/PgUp/PgDn scroll · ⏎/esc close";
+		if (s.kind === "doctor") return "⏎/esc back";
 		if (s.kind === "pathsAdd") return "type a path · ⏎ submit · esc back";
 		return `↑/↓ move · ⏎ select · esc back${s.kind === "main" ? " · q quit" : ""}`;
 	}
@@ -1245,6 +1256,10 @@ export class GuardPanel implements Component, Focusable {
 				break;
 			case "overview":
 				out.push(...this.overviewLines(rulesMatrix().split("\n"), s.scroll));
+				break;
+			case "doctor":
+				out.push(...doctorView(this.ctx.cwd).split("\n"), "");
+				out.push(...this.listLines(panelOptions(s), s.idx));
 				break;
 			case "pathsCategory":
 				out.push("Choose a path category:", "");

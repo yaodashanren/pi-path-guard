@@ -301,7 +301,7 @@ check(
 	"loose",
 );
 
-// invalid arg → falls back to main menu (2 options)
+// invalid arg → falls back to main menu (same rows as the panel main menu)
 let bogusOptions: string[] = [];
 await commands["guard"].handler("bogus", {
 	hasUI: true,
@@ -315,7 +315,9 @@ await commands["guard"].handler("bogus", {
 });
 check(
 	"/guard invalid arg falls back to main menu",
-	bogusOptions.length === 4 ? "menu" : "?",
+	JSON.stringify(bogusOptions) === JSON.stringify(panelMod.GUARD_MAIN_MENU)
+		? "menu"
+		: "?",
 	"menu",
 );
 
@@ -5162,6 +5164,68 @@ setWriteScope("global");
 		process.env.PI_PATH_GUARD_SETTINGS = prevEnv2;
 		applyConfig({ global: {}, warnings: [] });
 	}
+}
+// ── GuardPanel: doctor entry in the main menu (phase3 rule-groups) ──
+// /guard doctor is reachable from the overlay too: main → doctor screen
+// (read-only doctorView output + a single back row) → back to main.
+{
+	const DOCTOR_ROW = "doctor — Show effective config & diagnostics (诊断视图)";
+	check(
+		"panel main menu: offers the doctor entry",
+		String(panelMod.GUARD_MAIN_MENU.includes(DOCTOR_ROW)),
+		"true",
+	);
+	check(
+		"panel doctor: the screen has exactly one back row",
+		JSON.stringify(panelMod.panelOptions({ kind: "doctor", idx: 0 } as any)),
+		JSON.stringify(["back — Back (返回)"]),
+	);
+
+	const p = await openGuardPanel();
+	const doctorIdx = panelMod.GUARD_MAIN_MENU.indexOf(DOCTOR_ROW);
+	for (let i = 0; i < doctorIdx; i++) p.press(KEY_DOWN); // main → doctor
+	const mainBefore = p.render();
+	p.press(KEY_ENTER); // open the doctor screen
+	const doctorRender = p.render();
+	check(
+		"panel nav: the main menu shows the doctor entry",
+		String(mainBefore.includes(DOCTOR_ROW)),
+		"true",
+	);
+	check(
+		"panel nav: selecting doctor opens the read-only doctor view",
+		String(
+			doctorRender.includes("Path Guard doctor") &&
+				doctorRender.includes("back — Back (返回)"),
+		),
+		"true",
+	);
+	check(
+		"panel doctor: renders the live doctorView output",
+		String(doctorRender.includes(doctorMod.doctorView(PROJ).split("\n")[0])),
+		"true",
+	);
+	p.press(KEY_ESC); // back to main
+	check(
+		"panel nav: back from doctor returns to the main menu",
+		String(p.render().includes("Choose an action:") && !p.closed),
+		"true",
+	);
+
+	const p2 = await openGuardPanel();
+	for (let i = 0; i < doctorIdx; i++) p2.press(KEY_DOWN);
+	p2.press(KEY_ENTER); // main → doctor
+	const opened = p2.render();
+	p2.press(KEY_ENTER); // back row (idx 0) → pop
+	check(
+		"panel nav: selecting back on the doctor screen returns to the main menu",
+		String(
+			opened.includes("Path Guard doctor") &&
+				p2.render().includes("Choose an action:") &&
+				!p2.closed,
+		),
+		"true",
+	);
 }
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {

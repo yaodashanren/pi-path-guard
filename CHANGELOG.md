@@ -6,6 +6,16 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Added
+- **Two-level rule groups with provenance in both rule editors.** `/guard rules` (CLI select) and the `/guard` overlay panel now go **mode → rule group → rule** instead of listing every rule on one screen: 7 groups (`System` / `Writes` / `Deletes` / `Overwrite` / `Git & Pipes` / `Scripts` / `Unknowable`, from a new pure `RULE_GROUPS` constant in `schema.ts` whose flattening is pinned by a test to equal `RULE_IDS`). Each group row shows its size and persistent override count (`Writes — 写入/截断 (5 rules, 2 overrides)`); each rule row shows its effective level **plus where it comes from** via `ruleProvenance()` + `provenanceSuffix()` (`rules.ts`), mirroring `rl()`'s precedence exactly: no suffix = built-in default, `[global]` / `[project]` = an override in that layer, `(pass, session-pass)` = an in-memory session pass. The back chain is rule → group → mode, and `reset` for a whole mode lives on the group screen. Zero judgement drift: `judges.ts`, `rl()` and persistence are untouched.
+- **`doctor` in the panel main menu.** `/guard` → **doctor** opens the same layered status report as `/guard doctor` (`doctorView()`) as a read-only overlay screen with a single **back** row, so the diagnostics no longer require remembering a CLI argument.
+
+### Changed
+- The rule-row builders are shared pure functions (`ruleGroupOptions()`, `ruleRowOptions()`, `provenanceSuffix()`), so the CLI and the overlay can never drift apart.
+
+### Tests
+- 705 assertions passing (was 698 after the grouped-rule UI tasks; +7 for the doctor panel entry).
+
 ## [1.10.0] — 2026-10-30: /guard explain and trusted acceptance tests
 
 ### Added

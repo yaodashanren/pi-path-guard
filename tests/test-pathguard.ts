@@ -42,6 +42,7 @@ const fakePi = {
 
 const mod = await import(EXT);
 import { findProjectConfig, mergeLayers, projectEntryPath, readProjectEntry, readSettingsFile, writeFileAtomic } from "../extensions/path-guard/store.ts";
+import * as explainMod from "../extensions/path-guard/explain.ts";
 import {
 	addPathIn,
 	applyConfig,
@@ -4415,6 +4416,56 @@ setWriteScope("global");
   }
 
   rmSync(TTD, { recursive: true, force: true });
+}
+
+// ── explain.hintFor — verdict-aware escape-hint ladder ──────────
+{
+	const h = explainMod.hintFor;
+	// 1. confirm with a non-excluded rule: rule tweak first, then session pass, then mode lowering
+	{
+		const s = h("confirm", ["gitDestructive"], "normal");
+		check(
+			"hint: confirm rule → mentions /guard rules before mode lowering",
+			String(s.indexOf("/guard rules") >= 0 && s.indexOf("/guard rules") < s.indexOf("/guard loose")),
+			"true",
+		);
+		check("hint: confirm rule → mentions session pass", String(/session/i.test(s)), "true");
+	}
+	// 2. confirm where all rules are session-pass-excluded: by-design, no session mention
+	{
+		const s = h("confirm", ["confirmGroup"], "normal");
+		check("hint: confirmGroup → by-design phrasing", String(/by design/i.test(s)), "true");
+		check("hint: confirmGroup → no session mention", String(/session/i.test(s)), "false");
+	}
+	// 3. block with no rules: built-in protected path copy, no naked suggestion
+	{
+		const s = h("block", [], "strict");
+		check(
+			"hint: block [] → suggests different target or copying out",
+			String(/different target|copy .*out|copy the file out/i.test(s)),
+			"true",
+		);
+		check("hint: block [] → no naked suggestion", String(/naked/i.test(s)), "false");
+	}
+	// 4. naked mode: last-resort phrasing only, no rule-tweak ladder
+	{
+		const s = h("confirm", ["targetUnresolved"], "naked");
+		check("hint: naked → no /guard rules suggestion", String(/\/guard rules/i.test(s)), "false");
+		check(
+			"hint: naked → last-resort phrasing",
+			String(/last resort|last-resort/i.test(s)),
+			"true",
+		);
+	}
+	// 5. pass: short allowed-as-is line
+	{
+		const s = h("pass", [], "naked");
+		check(
+			"hint: pass → allowed-as-is phrasing",
+			String(/allowed as-is|allowed as is/i.test(s)),
+			"true",
+		);
+	}
 }
 
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);

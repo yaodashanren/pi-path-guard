@@ -41,6 +41,7 @@ After installing, run `/reload` or restart pi. 安装后 `/reload` 或重启 pi 
 - `/guard` → **rules** sub-menu: pick a **mode** → the rule editor lists all 22 rules with their current levels; pick one → set **block / confirm / pass** (or reset to the built-in default). Stays in the editor so you can set several rules per mode before choosing **back**. Also offers a read-only full **overview** matrix in a scrollable viewer (↑/↓/PgUp/PgDn scroll, q/⏎/esc to close) and **reset** (clear all overrides). `pathGuard.rules.{mode}.{rule}` in settings.json. `/guard rules` 子菜单：选**模式** → 规则编辑器列出全部 22 条规则及其当前级别；选一条 → 设为 **block / confirm / pass**（或恢复内置默认）。改完停留在编辑器可连续改多条，再选 **back**。另提供只读 **overview** 全矩阵（可滚动查看，↑/↓/PgUp/PgDn 滚动，q/⏎/esc 关闭）与 **reset**（清空全部覆盖），存于 settings.json 的 `pathGuard.rules.{mode}.{rule}`
 - `/guard <strict|normal|loose|trusted|naked>` — quick switch (trusted requires a warning; naked requires a double warning) 快捷切换（trusted 需警告确认；naked 需两级确认）
 - `/guard doctor` — one-shot plain-text status report (works with or without a UI): active mode and where it came from, every config layer (global settings / project entry / hand-authored block) with mode/path/rule counts, config warnings, protected & trusted paths, session-pass rules, and the current session's cwd (with a marker when cwd is HOME). See the Doctor section below. 一次性纯文本诊断报告（有无 UI 均可用）：当前模式及来源、各配置层（全局 / 项目条目 / 手写块）与计数、配置告警、受保护与信任路径、会话放行规则、当前会话 cwd（HOME 下有标记）。见下文 Doctor 小节
+- `/guard explain <command>` — read-only plain-text classification trace (works with or without a UI, **never executes the command**): the live Config (mode + source, session passes, cwd), a per-segment Trace of how the command would be judged (recursion indented like the real walk), the aggregated Verdict (block / confirm with rules — confirm notes `no UI → blocked` in headless sessions), and a Hint for the narrowest unblock. See the Explain section below. 只读纯文本判定诊断（有无 UI 均可用，**绝不执行命令**）：实时 Config（模式及来源、会话放行、cwd）、逐段 Trace（递归缩进与真实判定一致）、聚合 Verdict（block / confirm 含规则；无 UI 时注明 `no UI → blocked`）与最窄解除路径的 Hint。见下文 Explain 小节
 - Invalid argument → falls back to the interactive main menu 非法参数 → 兜底弹出交互主菜单
 - Config is layered and persisted per layer: **global** settings.json (`~/.pi/agent/settings.json`) plus, optionally, one **project** entry file. `/guard` writes to the layer you chose (global by default; `--project` for this project) and only that layer — an inherited project value is never frozen into the global file. 配置分层持久化：**全局** settings.json 加可选的**项目**条目文件；`/guard` 只写你选定的那一层（默认全局，`--project` 为本项目），继承来的项目值绝不会被固化进全局文件
 - **Project-scoped config lives in the pi agent dir, not in the project.** `<agent dir>/path-guard/projects/<slug>-<hash>.json` (`<agent dir>` = `PI_CODING_AGENT_DIR`, default `~/.pi/agent`). Because that file is user-level, pi never treats it as a trust-requiring project resource: `defaultProjectTrust: "never"`, `--no-approve` and print/JSON/RPC sessions all read it normally. The lookup is exact-first, then the nearest ancestor directory (a subdirectory session inherits the repo root's config, and writes that same file). `PI_PATH_GUARD_PROJECTS_DIR` overrides the whole directory (tests use it). 项目级配置存放在 pi agent 目录下的 `path-guard/projects/`，不在项目内：因此 pi 不会把它当作需信任的项目资源，`--no-approve`、`defaultProjectTrust: "never"`、无 UI 会话都能正常读取；查找为先精确匹配、再找最近的祖先目录。`PI_PATH_GUARD_PROJECTS_DIR` 可覆盖整个目录
@@ -179,6 +180,30 @@ Confirm-dialog scopes: when a prompt offers the 🔓 option, choosing plain **Al
 
 确认弹窗的三种放行作用域：**Allow** 仅放行本次；**Allow & set … = pass (session)** 将该规则放行至本会话结束（仅内存，不落盘，新会话清除）；要永久放行请改规则本身（`/guard rules` 或 settings.json 的 `pathGuard.rules.{mode}.{rule}`）。`confirmGroup`（sudo/ssh 类）按设计从不提供会话放行，弹窗上有一句解释，每次都会再问。
 
+### Explain / 判定诊断
+
+`/guard explain <command>` renders the same classification walk `checkBashCommand` performs — pure text in one `info` notification, so it works in headless (no-UI) sessions, and the command is **never executed**. It reflects the live session state: active mode and its source, in-memory session passes, and the current cwd. In a no-UI session a confirm verdict honestly notes it would be blocked:
+
+```text
+/guard explain echo ok && rm "$TARGET"
+```
+
+```text
+Config:  mode: strict (source: project) · session passes: none · cwd: /x
+Trace:
+  pass echo ok
+  confirm rm "$TARGET" (rules: targetUnresolved) — delete target unresolved (bare $TARGET)
+Verdict: confirm (rules: targetUnresolved) — would prompt (no UI → blocked)
+Hint:    tune just this rule first (/guard rules targetUnresolved = pass|block), or allow it for the rest of this session with a session pass (Allow & set … = pass (session)); loosening the whole mode (/guard loose|trusted) is a bigger step
+```
+
+- **Config** — the live effective mode with its source layer (`project` / `authored` / `global` / `default`), any session-pass rules (in-memory only), and the resolved cwd (with a HOME marker).
+- **Trace** — per-segment verdicts in evaluation order: heredoc bodies line by line, the pipe-to-shell scan, then each compound-command segment; recursion (`bash -c`, command substitution) is indented by depth, matching the real walk.
+- **Verdict** — aggregated exactly like the pipeline (any block → block, else any confirm → confirm, else pass), with the fired rule ids; a confirm in a no-UI session notes `would prompt (no UI → blocked)`.
+- **Hint** — the narrowest way through, ladder-ordered: tune just the fired rule (`/guard rules`) first, a session pass next, mode loosening (`/guard loose|trusted`) as the bigger step; built-in protected paths suggest a different target instead; naked mode is only ever mentioned as a last resort.
+
+与 `checkBashCommand` 同一条判定路径的只读文本渲染：无 UI 也可用，**绝不执行命令**；反映实时会话状态（当前模式及来源、内存中的会话放行、当前 cwd）。四块固定输出：Config（实时配置）、Trace（逐段判定，递归缩进与真实判定一致）、Verdict（聚合结果与命中规则；无 UI 时诚实注明会被阻止）、Hint（按阶梯给出的最窄解除路径：先调规则、再会话放行、最后放宽模式；内置保护路径建议换目标；naked 仅作最后手段）。
+
 ### Known limitations / 已知边界
 
 - **Static heuristics, not a sandbox / 静态启发式，不是沙箱**: the guard inspects the `bash` command text and the `write`/`edit` target paths; it is meant to catch **accidental** destructive operations, not to defeat a determined adversary or prompt injection. Run untrusted code in a real sandbox / VM / container under a least-privilege account — 本扩展只检查 `bash` 命令文本与 `write`/`edit` 目标路径，用于拦截**误操作**，并非对抗恶意输入或 prompt injection 的完整沙箱；不可信代码请放到真正的沙箱/容器/虚拟机里运行。
@@ -189,13 +214,13 @@ Confirm-dialog scopes: when a prompt offers the 🔓 option, choosing plain **Al
 
 ## Development / 开发与测试
 
-Automated tests (551 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
+Automated tests (640 assertions) load the real extension with a mocked pi API, covering the 5 modes × protected paths / dangerous commands / truncation / git destructive / dangerous pipe-to-shell matrix, plus `/guard` command interaction, trusted-mode confirmation, naked-mode double confirmation, the footer status indicator, settings.json mode persistence, custom protected paths (incl. naked), trusted paths (always-allowed, incl. protected-path refusal and strict-mode pass), run-script judging (`source`/`.`/`bash` × in/out/protected/trusted), redirect/download/dd outside+variable targets, command-substitution recursion, and per-mode rule overrides:
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts
 ```
 
-自动化测试（551 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
+自动化测试（640 断言）模拟 pi API 加载真实扩展，覆盖 5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道到 shell 等判定矩阵，以及 `/guard` 命令交互、trusted 确认与 naked 两级确认、底部状态栏指示、settings.json 模式持久化、自定义受保护路径（含 naked）、信任路径（始终放行，含受保护路径拒绝与 strict 下放行）、运行脚本判定（`source`/`.`/`bash` × 项目内/外/受保护/信任）、重定向/下载/dd 的项目外与变量目标判定、命令替换递归、按模式规则覆盖等流程：
 
 ```bash
 cd tests && node --experimental-strip-types test-pathguard.ts

@@ -38,7 +38,9 @@ import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.9.0.
+ * recent release/tag is 1.9.0. Unreleased work adds /guard explain — a
+ * read-only classification trace (/guard explain <command>) backed by the
+ * TraceCollector in trace.ts, with zero verdict behavior change.
  */
 
 /** Entry point: register event handlers and the /guard command. */
@@ -97,7 +99,7 @@ export default function (pi: ExtensionAPI) {
 	// /guard slash command: view / switch mode, and manage custom protected paths
 	pi.registerCommand("guard", {
 		description:
-			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> add|rm|list|clear <path> manages paths, /guard doctor shows the layered-config status report",
+			"Path Guard: /guard shows mode, /guard <strict|normal|loose|trusted|naked> switches, /guard paths <protected|trusted> add|rm|list|clear <path> manages paths, /guard doctor shows the layered-config status report, /guard explain <command> previews how a command would be judged (read-only)",
 		handler: async (args, ctx) => {
 			let raw = args?.trim() ?? "";
 			// `/guard --project <anything>` saves the edit to this project's entry file.

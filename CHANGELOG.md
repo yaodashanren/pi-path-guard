@@ -6,6 +6,8 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-30: /guard explain and trusted acceptance tests
+
 ### Added
 - **`/guard explain <command>`** — read-only plain-text classification trace (works with or without a UI, never executes the command): a fixed four-block output — **Config** (live mode + source layer, in-memory session passes, resolved cwd with HOME marker), **Trace** (per-segment verdicts in evaluation order — heredoc bodies line by line, pipe-to-shell scan, compound-command segments — with recursion indented by depth, matching the real walk), **Verdict** (aggregated exactly like the pipeline: any block → block, else any confirm → confirm, else pass, with fired rule ids; a confirm in a no-UI session honestly notes it would be blocked), and **Hint** (ladder-ordered unblock guidance: tune just the fired rule first, then a session pass, mode loosening as the bigger step; built-in protected paths suggest a different target; naked only as a last resort). Backed by a new read-only `TraceCollector` (`trace.ts`) threaded through the existing judgement path — zero verdict behavior change.
 

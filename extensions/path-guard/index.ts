@@ -38,8 +38,8 @@ import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";
  * Path Guard Extension — protects against accidental deletes / overwrites / edits
  *
  * Version history lives in CHANGELOG.md (aligned with package.json); the most
- * recent release/tag is 1.9.0. Unreleased work adds /guard explain — a
- * read-only classification trace (/guard explain <command>) backed by the
+ * recent release/tag is 1.10.0. /guard explain — a read-only
+ * classification trace (/guard explain <command>) backed by the
  * TraceCollector in trace.ts, with zero verdict behavior change.
  */
 

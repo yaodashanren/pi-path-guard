@@ -8,6 +8,7 @@ import { expandHome, isOutsideCwd, matchesProtectedPath, resolveReal } from "./p
 import { SESSION_PASS_EXCLUDED, getMode, isTrustedPath, isUserProtectedPath, rl, sessionPassRule, type GuardVerdict, type RuleId } from "./rules.ts";
 import { extractHeredocs, splitSegments } from "./shell-parse.ts";
 import { classifySegment, scanPipeToShell } from "./judges.ts";
+import type { TraceCollector } from "./trace.ts";
 
 // path-guard — tool_call pipeline: write/edit check and bash command check.
 
@@ -92,6 +93,7 @@ export function checkWriteEdit(
 export function checkBashCommand(
 	input: BashToolInput,
 	ctx: ExtensionContext,
+	trace?: TraceCollector,
 ): GuardVerdict {
 	const command = input.command ?? "";
 	if (!command.trim()) return;
@@ -117,6 +119,13 @@ export function checkBashCommand(
 			const t = line.trim();
 			if (!t) continue;
 			const v = classifySegment(t, realCwd, ctx.hasUI);
+			trace?.add({
+				depth: 0,
+				label: `heredoc: ${t}`,
+				verdict: v.kind,
+				rules: v.rules ?? [],
+				reason: v.kind === "block" ? v.reason.split("\n")[0] : undefined,
+			});
 			if (v.kind === "block") blockReasons.push(`heredoc: ${v.reason}`);
 			else if (v.kind === "confirm") {
 				confirmNeeded.push(`(heredoc) ${t}`);
@@ -125,6 +134,13 @@ export function checkBashCommand(
 		}
 	}
 	const pipeVerdict = scanPipeToShell(bareCommand, realCwd);
+	trace?.add({
+		depth: 0,
+		label: command.trim(),
+		verdict: pipeVerdict.kind,
+		rules: pipeVerdict.rules ?? [],
+		reason: pipeVerdict.kind === "block" ? pipeVerdict.reason.split("\n")[0] : undefined,
+	});
 	if (pipeVerdict.kind === "block") {
 		blockReasons.push(pipeVerdict.reason);
 	} else if (pipeVerdict.kind === "confirm") {
@@ -136,7 +152,7 @@ export function checkBashCommand(
 		const trimmed = seg.trim();
 		if (!trimmed) continue;
 
-		const verdict = classifySegment(trimmed, realCwd, ctx.hasUI);
+		const verdict = classifySegment(trimmed, realCwd, ctx.hasUI, 0, trace);
 		if (verdict.kind === "block") {
 			blockReasons.push(verdict.reason);
 		} else if (verdict.kind === "confirm") {

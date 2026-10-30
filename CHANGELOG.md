@@ -4,6 +4,14 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`/guard explain <command>`** — read-only plain-text classification trace (works with or without a UI, never executes the command): a fixed four-block output — **Config** (live mode + source layer, in-memory session passes, resolved cwd with HOME marker), **Trace** (per-segment verdicts in evaluation order — heredoc bodies line by line, pipe-to-shell scan, compound-command segments — with recursion indented by depth, matching the real walk), **Verdict** (aggregated exactly like the pipeline: any block → block, else any confirm → confirm, else pass, with fired rule ids; a confirm in a no-UI session honestly notes it would be blocked), and **Hint** (ladder-ordered unblock guidance: tune just the fired rule first, then a session pass, mode loosening as the bigger step; built-in protected paths suggest a different target; naked only as a last resort). Backed by a new read-only `TraceCollector` (`trace.ts`) threaded through the existing judgement path — zero verdict behavior change.
+
+### Tests
+- 640 assertions passing (was 551 at v1.9.0; +89 across 3b Tasks 1–5, incl. the new 8.5 trusted acceptance group asserting `askConfirm` call behavior).
+
 ## [1.9.0] — 2026-10-29: diagnostics and unblock guidance
 
 ### Added

@@ -4583,6 +4583,21 @@ setWriteScope("global");
 	}
 }
 
+// ── /guard explain: command dispatch (Task 5) ─────────────
+{
+	await setMode("normal");
+	newSession();
+	const exNotifies: string[] = [];
+	const exCtx = { cwd: "/tmp/pgtest/task3", hasUI: false, ui: { notify: (m: string) => exNotifies.push(m) } };
+	await commands["guard"].handler('explain bash -c "git reset --hard"', exCtx as any);
+	const exOut = exNotifies.join("\n");
+	check("explain dispatch shows Config block", String(/Config:/.test(exOut)), "true");
+	check("explain dispatch shows Verdict block", String(/Verdict: confirm/.test(exOut)), "true");
+	exNotifies.length = 0;
+	await commands["guard"].handler("explain", exCtx as any);
+	check("explain without argument shows usage", String(/Usage: \/guard explain/.test(exNotifies.join("\n"))), "true");
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

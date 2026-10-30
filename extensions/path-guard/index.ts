@@ -31,6 +31,7 @@ import {
 	runScopeMenu,
 } from "./panel.ts";
 import { doctorView } from "./doctor.ts";
+import { explainView } from "./explain.ts";
 import { checkBashCommand, checkWriteEdit } from "./pipeline.ts";
 
 /**
@@ -113,6 +114,17 @@ export default function (pi: ExtensionAPI) {
 			// ── /guard doctor : layered-config status report (works without UI) ──
 			if (m === "doctor") {
 				ctx.ui.notify(doctorView(ctx.cwd), "info");
+				return;
+			}
+			// ── /guard explain <command> : read-only classification trace (works without UI) ──
+			if (m === "explain" || m.startsWith("explain ")) {
+				const target = raw.slice("explain".length).trim();
+				ctx.ui.notify(
+					target
+						? explainView(target, { cwd: ctx.cwd, hasUI: ctx.hasUI })
+						: "Usage: /guard explain <command>",
+					"info",
+				);
 				return;
 			}
 			if (projectScope) {

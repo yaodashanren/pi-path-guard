@@ -52,6 +52,47 @@ export function rlFor(mode: GuardMode, rule: RuleId): RuleLevel {
 	return config.rules[mode]?.[rule] ?? DEFAULT_MODES[mode][rule];
 }
 
+/** Which layer currently supplies the effective value for a (mode, rule) pair. */
+export type RuleProvenance = "session-pass" | "project" | "global" | "default";
+
+/**
+ * Which layer currently supplies the effective value for (mode, rule).
+ * Precedence mirrors rl(): session-pass > project > global > default. Pure
+ * lookup over the raw layers — the merged `config.rules` cannot answer this.
+ *
+ * A hand-authored `cwd/.pi/settings.json` block reports as "global": it is the
+ * fallback overlay only when no project entry matched (same rule as
+ * rebuildEffective/mergeLayers), so once a project layer exists the authored
+ * rules no longer contribute to rl() and must not claim provenance here.
+ */
+export function ruleProvenance(mode: GuardMode, rule: RuleId): RuleProvenance {
+	if (isSessionPassed(mode, rule)) return "session-pass";
+	const { global: globalLayer, project, authored } = getLayers();
+	if (project?.rules?.[mode]?.[rule] !== undefined) return "project";
+	if (globalLayer?.rules?.[mode]?.[rule] !== undefined) return "global";
+	if (!project && authored?.layer.rules?.[mode]?.[rule] !== undefined)
+		return "global";
+	return "default";
+}
+
+/**
+ * Suffix rendered after the level in rule labels: `(${level}${suffix})`.
+ * default → "", global → " [global]", project → " [project]",
+ * session-pass → ", session-pass".
+ */
+export function provenanceSuffix(mode: GuardMode, rule: RuleId): string {
+	switch (ruleProvenance(mode, rule)) {
+		case "project":
+			return " [project]";
+		case "global":
+			return " [global]";
+		case "session-pass":
+			return ", session-pass";
+		default:
+			return "";
+	}
+}
+
 /** Map a rule to a segment verdict: block (with reason) / confirm / pass. */
 export function ruleVerdict(rule: RuleId, blockReason: string): SegmentVerdict {
 	const lvl = rl(rule);

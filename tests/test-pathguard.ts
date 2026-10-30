@@ -63,6 +63,8 @@ import {
 	setWriteScope,
 	sessionPassRule,
 	clearSessionPass,
+	ruleProvenance,
+	provenanceSuffix,
 } from "../extensions/path-guard/rules.ts";
 const panelMod = await import(
 	new URL("../extensions/path-guard/panel.ts", import.meta.url).href,
@@ -4752,6 +4754,72 @@ setWriteScope("global");
 	await setMode("normal");
 }
 
+// ── ruleProvenance: which layer supplies a rule's effective value ─────
+{
+	type LoadedCfg = Parameters<typeof applyConfig>[0];
+	type Layer = LoadedCfg["global"];
+	const provGlobalLayer: Layer = { rules: { normal: { archiveExtract: "pass" } } };
+	const provProjectLayer: Layer = { rules: { normal: { archiveExtract: "confirm" } } };
+	const provAuthoredLayer: Layer = { rules: { normal: { archiveExtract: "pass" } } };
+	const provLookup = (layer: Layer): NonNullable<LoadedCfg["project"]> => ({
+		filePath: join(OUT, "prov-project.json"),
+		projectRoot: PROJ,
+		matchedVia: "exact",
+		layer,
+		warnings: [],
+	});
+	try {
+		// 1. nothing overridden anywhere → built-in default
+		applyConfig({ global: {}, warnings: [] });
+		check("provenance: no override → default", ruleProvenance("normal", "archiveExtract"), "default");
+		// 2. global-layer override only → global
+		applyConfig({ global: provGlobalLayer, warnings: [] });
+		check("provenance: global override → global", ruleProvenance("normal", "archiveExtract"), "global");
+		check("provenance: untouched rule stays default", ruleProvenance("normal", "deleteInProject"), "default");
+		check("provenance: other mode stays default", ruleProvenance("strict", "archiveExtract"), "default");
+		// 3. global + project both set the same rule → project wins
+		applyConfig({ global: provGlobalLayer, project: provLookup(provProjectLayer), warnings: [] });
+		check("provenance: project outranks global", ruleProvenance("normal", "archiveExtract"), "project");
+		// 4. session pass outranks both persisted layers
+		sessionPassRule("normal", "archiveExtract");
+		check("provenance: session pass outranks layers", ruleProvenance("normal", "archiveExtract"), "session-pass");
+		check("provenance: session pass is mode-scoped", ruleProvenance("strict", "archiveExtract"), "default");
+		clearSessionPass();
+		check("provenance: clearing session pass restores layer answer", ruleProvenance("normal", "archiveExtract"), "project");
+		// 5. hand-authored .pi/settings.json counts as global (it is the fallback
+		// overlay only when no project entry matched — same as rl()/mergeLayers)
+		applyConfig(
+			{
+				global: {},
+				authored: { layer: provAuthoredLayer, file: join(PROJ, ".pi", "settings.json"), root: PROJ },
+				warnings: [],
+			},
+		);
+		check("provenance: authored layer reports as global", ruleProvenance("normal", "archiveExtract"), "global");
+		applyConfig(
+			{
+				global: {},
+				project: provLookup({}),
+				authored: { layer: provAuthoredLayer, file: join(PROJ, ".pi", "settings.json"), root: PROJ },
+				warnings: [],
+			},
+		);
+		check("provenance: authored ignored once a project layer matched", ruleProvenance("normal", "archiveExtract"), "default");
+		// 6. suffix rendering, exactly as callers will concatenate it
+		applyConfig({ global: {}, warnings: [] });
+		check("suffix: default is empty", provenanceSuffix("normal", "archiveExtract"), "");
+		applyConfig({ global: provGlobalLayer, warnings: [] });
+		check("suffix: global", provenanceSuffix("normal", "archiveExtract"), " [global]");
+		applyConfig({ global: provGlobalLayer, project: provLookup(provProjectLayer), warnings: [] });
+		check("suffix: project", provenanceSuffix("normal", "archiveExtract"), " [project]");
+		sessionPassRule("normal", "archiveExtract");
+		check("suffix: session pass", provenanceSuffix("normal", "archiveExtract"), ", session-pass");
+		check("suffix: pairs with level as (level+suffix)", `(pass${provenanceSuffix("normal", "archiveExtract")})`, "(pass, session-pass)");
+	} finally {
+		clearSessionPass();
+		applyConfig({ global: {}, warnings: [] });
+	}
+}
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

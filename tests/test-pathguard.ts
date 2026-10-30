@@ -12,6 +12,7 @@ import {
 	readdirSync,
 	realpathSync,
 	symlinkSync,
+	lstatSync,
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -3524,6 +3525,33 @@ await setMode("normal");
 }
 
 
+// ── config storage: symlink-through atomic writes ────────────────────
+{
+  const symDir = "/tmp/pgtest-atomic-sym";
+  const realDir = "/tmp/pgtest-atomic-sym-real";
+  rmSync(symDir, { recursive: true, force: true });
+  rmSync(realDir, { recursive: true, force: true });
+  mkdirSync(realDir, { recursive: true });
+  mkdirSync(symDir, { recursive: true });
+  const realFile = join(realDir, "settings.json");
+  writeFileSync(realFile, JSON.stringify({ pathGuard: { mode: "normal" } }));
+  const linkFile = join(symDir, "settings.json");
+  symlinkSync(realFile, linkFile);
+  writeFileAtomic(linkFile, JSON.stringify({ pathGuard: { mode: "loose" } }));
+  check("atomic write keeps a symlinked settings.json a symlink", String(lstatSync(linkFile).isSymbolicLink()), "true");
+  check("atomic write follows the symlink to the real target", JSON.parse(readFileSync(realFile, "utf8")).pathGuard.mode, "loose");
+  check("atomic write leaves no temp files behind the link", String(readdirSync(realDir).filter((f) => f.startsWith(".tmp-")).length), "0");
+  const dangling = join(symDir, "dangling.json");
+  symlinkSync(join(symDir, "nope.json"), dangling);
+  let threw = false; let msg = "";
+  try { writeFileAtomic(dangling, "{}"); } catch (e) { threw = true; msg = String((e as Error).message); }
+  check("atomic write throws on a dangling symlink", String(threw), "true");
+  check("dangling symlink error names the path and says dangling symlink", String(msg.includes(dangling) && msg.includes("dangling symlink")), "true");
+  check("dangling symlink write creates nothing", String(existsSync(join(symDir, "nope.json"))), "false");
+  check("dangling symlink write leaves no temp files", String(readdirSync(symDir).filter((f) => f.startsWith(".tmp-")).length), "0");
+  rmSync(symDir, { recursive: true, force: true });
+  rmSync(realDir, { recursive: true, force: true });
+}
 // ── config storage: project entry files + lookup (Task 3) ────────────
 {
 	const prevProjectsEnv = process.env.PI_PATH_GUARD_PROJECTS_DIR;

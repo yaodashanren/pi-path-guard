@@ -4,10 +4,12 @@
 // module is safe to import from rules.ts and from tests.
 import {
 	closeSync,
+	lstatSync,
 	existsSync,
 	fsyncSync,
 	openSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -61,11 +63,28 @@ export function writeFileAtomic(
 	data: string,
 	mode?: number,
 ): void {
-	const dir = dirname(filePath);
+	// Follow symlinks: write through to the real target instead of replacing
+	// the link with a plain file (e.g. symlinked settings.json must stay a link).
+	let target = filePath;
+	try {
+		if (lstatSync(filePath).isSymbolicLink()) {
+			try {
+				target = realpathSync(filePath);
+			} catch {
+				throw new Error(
+					`writeFileAtomic: ${filePath} is a dangling symlink`,
+				);
+			}
+		}
+	} catch (e) {
+		if (e instanceof Error && e.message.includes("dangling symlink")) throw e;
+		// path does not exist yet → normal create path
+	}
+	const dir = dirname(target);
 	let fileMode = mode ?? 0o600;
-	if (mode === undefined && existsSync(filePath)) {
+	if (mode === undefined && existsSync(target)) {
 		try {
-			fileMode = statSync(filePath).mode & 0o777;
+			fileMode = statSync(target).mode & 0o777;
 		} catch {
 			// keep the default when the mode cannot be read
 		}
@@ -82,7 +101,7 @@ export function writeFileAtomic(
 		} finally {
 			closeSync(fd);
 		}
-		renameSync(tmp, filePath);
+		renameSync(tmp, target);
 	} catch (e) {
 		try {
 			rmSync(tmp, { force: true });

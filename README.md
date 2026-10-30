@@ -192,7 +192,7 @@ Confirm-dialog scopes: when a prompt offers the 🔓 option, choosing plain **Al
 Config:  mode: strict (source: project) · session passes: none · cwd: /x
 Trace:
   pass echo ok
-  confirm rm "$TARGET" (rules: targetUnresolved) — delete target unresolved (bare $TARGET)
+  confirm rm "$TARGET" (rules: targetUnresolved)
 Verdict: confirm (rules: targetUnresolved) — would prompt (no UI → blocked)
 Hint:    tune just this rule first (/guard rules targetUnresolved = pass|block), or allow it for the rest of this session with a session pass (Allow & set … = pass (session)); loosening the whole mode (/guard loose|trusted) is a bigger step
 ```

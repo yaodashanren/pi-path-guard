@@ -1105,6 +1105,7 @@ export class GuardPanel implements Component, Focusable {
 				this.pop();
 				return;
 			}
+			// doctor is read-only; ⏎/esc handled in handleInput
 			case "doctor":
 			case "pathsAdd":
 			case "overview":

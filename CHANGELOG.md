@@ -4,6 +4,17 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.11.1] — 2026-10-30: scrollable doctor screen and symlink-safe atomic writes
+
+### Added
+- **Scrollable doctor screen in the `/guard` panel.** `/guard` → **doctor** now renders in a 14-line scrollable viewport: ↑/↓ move one line, PgUp/PgDn page, with an `↑/↓ N more` indicator when content is off-screen (matching the rules overview viewer); the dedicated **back** row is gone — ⏎/esc returns to the main menu, so the report uses the full height of the popup. 面板内的 doctor 屏改为 14 行滚动视口：↑/↓ 逐行、PgUp/PgDn 翻页，内容超出时显示 `↑/↓ N more` 指示；移除独立 back 行，⏎/esc 返回主菜单，报告可用弹窗全部高度。
+
+### Fixed
+- **`writeFileAtomic` no longer replaces symlinks with plain files.** Atomic settings.json writes (temp file + rename) previously followed the write through by replacing a symlinked `settings.json` with a regular file; the write now resolves the symlink and lands on the real target, and a dangling symlink raises a clear error naming the path instead of silently materializing a plain file. 原子写 `settings.json` 不再把软链替换成普通文件：写入解析软链并落在真实目标上；悬挂软链抛出含路径的明确错误。
+
+### Tests
+- 727 assertions passing (was 711 at v1.11.0; +16 for the scrollable doctor screen and symlink-through atomic-write coverage).
+
 ## [1.11.0] — 2026-10-30: grouped rule picker with configuration provenance
 
 ### Added

@@ -4248,6 +4248,39 @@ rmSync(T5, { recursive: true, force: true });
 setWriteScope("global");
 }
 
+// ── trace collector (phase3b) — read-only TraceCollector over TraceEntry ──
+{
+  const { TraceCollector } = await import("../extensions/path-guard/trace.ts");
+  const c = new TraceCollector();
+  c.add({ depth: 0, label: "echo hi", verdict: "pass", rules: [] });
+  c.add({
+    depth: 1,
+    label: "heredoc: body",
+    verdict: "confirm",
+    rules: ["confirmGroup"],
+    reason: "heredoc contents require confirmation",
+  });
+  c.add({
+    depth: 0,
+    label: "rm suspicious.txt",
+    verdict: "block",
+    rules: ["deleteOutside"],
+    reason: "path is protected",
+    pathResolution: { raw: "suspicious.txt", normalized: "/etc/suspicious.txt" },
+  });
+  const snapshot = c.entries();
+  check("trace: entries in insertion order", String(snapshot.map((e) => e.depth).join(",")), "0,1,0");
+  check("trace: label with prefix preserved", snapshot[1].label, "heredoc: body");
+  check("trace: pathResolution preserved", String(snapshot[2].pathResolution?.normalized), "/etc/suspicious.txt");
+  const mutated = c.entries() as unknown as { verdict: string }[];
+  mutated.pop();
+  mutated[0].verdict = "block";
+  check("trace: mutating returned array does not affect collector", String(c.entries().length), "3");
+  check("trace: mutation did not touch internal entries", c.entries()[0].verdict, "pass");
+  c.clear();
+  check("trace: clear empties collector", String(c.entries().length), "0");
+}
+
 console.log(`\n✅ ${pass} passed, ❌ ${fail} failed`);
 if (failures.length) {
 	console.log("Failures:");

@@ -4,7 +4,7 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.11.0] — 2026-10-30: grouped rule picker with configuration provenance
 
 ### Added
 - **Two-level rule groups with provenance in both rule editors.** `/guard rules` (CLI select) and the `/guard` overlay panel now go **mode → rule group → rule** instead of listing every rule on one screen: 7 groups (`System` / `Writes` / `Deletes` / `Overwrite` / `Git & Pipes` / `Scripts` / `Unknowable`, from a new pure `RULE_GROUPS` constant in `schema.ts` whose flattening is pinned by a test to equal `RULE_IDS`). Each group row shows its size and persistent override count (`Writes — 写入/截断 (5 rules, 2 overrides)`); each rule row shows its effective level **plus where it comes from** via `ruleProvenance()` + `provenanceSuffix()` (`rules.ts`), mirroring `rl()`'s precedence exactly: no suffix = built-in default, `[global]` / `[project]` = an override in that layer, `(pass, session-pass)` = an in-memory session pass. The back chain is rule → group → mode, and `reset` for a whole mode lives on the group screen. Zero judgement drift: `judges.ts`, `rl()` and persistence are untouched.
@@ -13,8 +13,12 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 ### Changed
 - The rule-row builders are shared pure functions (`ruleGroupOptions()`, `ruleRowOptions()`, `provenanceSuffix()`), so the CLI and the overlay can never drift apart.
 
+### Fixed
+- **`doctor` was a dead row in the CLI fallback menu.** On hosts without a custom-component overlay (and for `/guard <invalid>`), choosing **doctor** in the chained menu fell through to the mode picker instead of showing the report; it now notifies `doctorView()`. Covered by a dispatch-level test that scripts every main-menu row and asserts it reaches its own screen.
+- **Session-passed rules showed a contradicting level.** Rule rows rendered the persisted level (`rlFor()`, which ignores session passes) next to a `session-pass` suffix, so an allowed `confirm` rule read `(confirm, session-pass)` while its effective level was `pass`. Rows (and the level pickers) now derive the displayed level from the same lookup as the provenance, so the pair reads `(pass, session-pass)` as documented.
+
 ### Tests
-- 705 assertions passing (was 698 after the grouped-rule UI tasks; +7 for the doctor panel entry).
+- 711 assertions passing (was 640 at v1.10.0; +7 for the doctor panel entry, +6 from the final-review fix wave).
 
 ## [1.10.0] — 2026-10-30: /guard explain and trusted acceptance tests
 

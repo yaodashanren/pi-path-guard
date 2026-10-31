@@ -16,6 +16,41 @@ It intercepts destructive operations in `bash` / `write` / `edit` tool calls and
 - `>` 截断已有文件
   `>` truncation of existing files
 
+## 快速上手 / Quick start
+
+```bash
+/guard              # 打开交互面板（切换模式 / 调规则 / 管路径 / 诊断）
+                    # open the interactive panel (mode / rules / paths / diagnostics)
+/guard strict       # 切到最严模式（其余：normal / loose / trusted / naked）
+                    # switch to the strictest mode (also: normal / loose / trusted / naked)
+/guard explain "rm $TARGET"   # 预演一条命令会怎么被判定，不会真的执行
+                              # preview how a command would be judged — never executed
+/guard doctor       # 输出配置与状态的分层体检报告
+                    # print a layered status report of your config
+```
+
+一条命令被拦时，不需要猜：`/guard explain <command>` 会告诉你它命中了哪条规则、为什么会拦、以及最窄的放行路径（见下文 Explain 一节）。
+
+When a command gets blocked you don't have to guess: `/guard explain <command>` shows which rule fired, why, and the narrowest way through (see the Explain section).
+
+## 目录 / Contents
+
+- [它能做什么 / What it does](#它能做什么--what-it-does)
+- [安装 / Install](#安装--install)
+- [使用 / Usage](#使用--usage)
+  - [/guard 命令 / The /guard command](#guard-命令--the-guard-command)
+  - [被拦时你会看到什么 / What a block looks like](#被拦时你会看到什么--what-a-block-looks-like)
+  - [配置怎么存 / How config is stored](#配置怎么存--how-config-is-stored)
+  - [受保护路径与信任路径 / Protected & trusted paths](#受保护路径与信任路径--protected--trusted-paths)
+  - [可调规则 / Tunable rules](#可调规则--tunable-rules)
+  - [防护模式矩阵 / Guard mode matrix](#防护模式矩阵--guard-mode-matrix)
+  - [拦截了什么 / What gets intercepted](#拦截了什么--what-gets-intercepted)
+  - [常见场景速查 / Common recipes](#常见场景速查--common-recipes)
+  - [Doctor / 诊断报告](#doctor--诊断报告)
+  - [Explain / 判定诊断](#explain--判定诊断)
+- [已知边界 / Known limitations](#已知边界--known-limitations)
+- [开发与测试 / Development](#开发与测试--development)
+
 ## 它能做什么 / What it does
 
 **5 种模式，23 条规则都能单独调 / 5 modes, every rule tunable**
@@ -84,6 +119,36 @@ After installing, run `/reload` or restart pi.
 
 参数不合法时回落到交互主菜单。
 Invalid arguments fall back to the interactive main menu.
+
+**举例 / Example** — 项目里 `rm` 一个裸变量目标，normal 模式下会弹窗；切到 loose 就不再问：
+
+**Example** — deleting a bare-variable target gets a prompt in `normal`; switch to `loose` and it stops asking:
+
+```bash
+/guard normal   # rm "$TMPFILE" → 弹窗 / prompts
+/guard loose    # rm "$TMPFILE" → 直接放行 / passes
+```
+
+### 被拦时你会看到什么 / What a block looks like
+
+拦截消息自带"为什么"和"怎么办"两段。比如试图写 `.env`（内置保护路径，任何模式下硬拦）：
+
+Every block message carries both the *why* and the *how-to-proceed*. Writing to `.env` (a built-in protected path, hard-blocked in every mode) shows:
+
+```text
+Command blocked:
+Path is protected: /home/you/project/.env
+
+To run anyway / 如需执行:
+· built-in protected path — use a different target path, or copy the file out
+  first; only /guard naked bypasses it — last resort
+  内置保护路径，请换一个目标路径，或先把文件拷出再操作；
+  仅 /guard naked 可整体放行——最后手段
+```
+
+确认类拦截则弹窗，除了 Allow / Deny 还常有第三个选项 🔓（本会话放行该规则）；`sudo` / `ssh` 这类每次必问的操作没有 🔓 选项，弹窗会解释原因。详见下文 [Doctor 一节的弹窗作用域说明](#doctor--诊断报告)。
+
+Confirm-grade checks open a dialog; besides Allow / Deny it usually offers a third 🔓 option (session pass for the fired rule). `sudo` / `ssh`-class prompts have no 🔓 option — the dialog explains why. See the confirm-dialog scopes under [Doctor](#doctor--诊断报告).
 
 ### 配置怎么存 / How config is stored
 
@@ -188,6 +253,21 @@ Each mode's judgement is a set of 23 rules; override any of them per mode in set
 ```
 
 规则 ID / Rule IDs: `blockGroup`, `confirmGroup`, `writeOutside`, `writeHome`, `writeInProject`, `deleteOutside`, `deleteInProject`, `overwriteOutsideExisting`, `overwriteOutsideNew`, `overwriteInProject`, `truncateInProject`, `truncateOutside`, `gitDestructive`, `pipeToShellInProject`, `pipeToShellOutside`, `runScriptInProject`, `runScriptOutside`, `runScriptProtected`, `scriptUnresolved`, `redirectUnresolved`, `archiveExtract`, `targetUnresolved`, `commandNameUnresolved`. 默认值与下面的矩阵完全一致 / Defaults reproduce the matrix below exactly.
+
+**举例 / Example** — 上面的配置含义：
+
+**Example** — what the config above means:
+
+- `normal` 模式下，删除项目外文件（`deleteOutside`）从"直接阻止"放宽为"弹窗询问"——比如把旧构建产物移到 `/tmp` 不会再被拦。
+  in `normal`, out-of-project deletes (`deleteOutside`) are downgraded from block to confirm — moving old build output to `/tmp` no longer gets refused.
+- `trusted` 模式下，`sudo` / `ssh`（`confirmGroup`）不再默认放行，而是恢复确认。
+  in `trusted`, `sudo` / `ssh` (`confirmGroup`) confirms again instead of silently passing.
+- `naked` 模式下，系统级破坏命令（`blockGroup`，如 `mkfs`）从"问一次"收紧为"直接阻止"。
+  in `naked`, system-destructive commands (`blockGroup`, e.g. `mkfs`) tighten from confirm to block.
+
+不想手写 JSON 就用面板：`/guard → rules` 里逐条设，效果等同。
+
+Prefer not to hand-edit JSON: set the same thing in `/guard → rules`.
 
 ### 防护模式矩阵 / Guard mode matrix
 
@@ -313,6 +393,37 @@ Hint:    tune just this rule first (/guard rules targetUnresolved = pass|block),
   aggregated exactly like the pipeline, with the fired rule ids.
 - **Hint** — 最窄的解除路径，按阶梯排序：先只调触发的规则（`/guard rules`），再考虑会话放行，最后才是放宽模式；内置保护路径建议换目标；naked 只作最后手段。
   the narrowest way through: tune the rule first, then a session pass, then mode loosening; built-in protected paths suggest a different target; naked is the last resort.
+
+### 常见场景速查 / Common recipes
+
+| 场景 / Scenario | 怎么做 / What to do |
+| --- | --- |
+| 命令被拦，想知道为什么 / a command got blocked, want to know why | `/guard explain <command>` — 逐段展示判定、命中规则与放行阶梯 |
+| 某类操作反复弹窗，临时放行 / a check keeps prompting, silence it for now | 弹窗里选 🔓 **Allow & set … = pass (session)** — 只在本会话有效，新会话恢复 |
+| 某类操作永久放行 / allow it for good | `/guard → rules` 把对应规则设为 pass，或写 `pathGuard.rules.{mode}.{rule}` |
+| 只想在某个项目里放宽 / loosen only in one project | `/guard --project <mode\|rules…>` — 写进项目条目文件，不影响全局 |
+| 构建 / 临时目录想完全不查 / skip checks for a build or scratch dir | `/guard paths trusted add /path/to/scratch` — 里面的一切操作一律放行 |
+| 重要目录希望任何模式都保护 / guard an important dir in every mode | `/guard paths protected add ~/secrets` — 含 naked 在内全部拦截 |
+| 每次 `sudo` 都问，能不能不问 / `sudo` asks every time — can it not? | 不能，by design（`confirmGroup` 无会话放行）。`/guard explain sudo ls` 可见判定来源 |
+| 想全面了解当前生效配置 / see the whole effective config | `/guard doctor`（CLI 无 UI 也能用）或面板 → overview |
+
+完整示例 / A full example:
+
+```bash
+# 前端项目的 node_modules 老是被误保护，想把 dist/ 和 scratch/ 完全放开：
+# want dist/ and scratch/ completely unchecked in a frontend project:
+/guard paths trusted add ./dist      # 相对路径，按项目根解析 / resolved against the project root
+/guard paths trusted add ./scratch
+
+# 但仓库根的 .secrets/ 反而要全局保护（即使以后切到 naked）：
+# but protect .secrets/ even under naked:
+/guard paths protected add ./.secrets
+
+# 验证效果（不会执行命令）：
+# verify without running anything:
+/guard explain "rm -rf scratch/*"
+/guard doctor
+```
 
 ### 已知边界 / Known limitations
 

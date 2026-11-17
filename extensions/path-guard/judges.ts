@@ -654,6 +654,28 @@ export function tarIsExtraction(args: string[]): boolean {
 }
 
 /** git destructive commands: clean -f / reset --hard / checkout -- . / restore . / branch -D / push --force / stash drop */
+/**
+ * Conservative whole-tree/ambiguous pathspec check for `git checkout` / `git switch`.
+ * Returns true (keep gitDestructive) unless we can statically prove a path-limited
+ * restore: tokens after `--` that are plain literal file paths. Whole-tree forms
+ * (`.`, `./`, `./.`), bare `--` with no path, options/variables/globs/directories
+ * after `--` (cannot prove a single-file restore) all stay destructive. Without
+ * `--`, only the whole-tree `.` argument is treated as destructive (branch
+ * checkout etc. stays pass), preserving the pre-fix behavior.
+ */
+function checkoutPathspecAmbiguous(args: string[]): boolean {
+	const dd = args.indexOf("--");
+	if (dd === -1) return args.includes(".");
+	const rest = args.slice(dd + 1);
+	if (rest.length === 0) return true; // bare `--` with no pathspec
+	for (const t of rest) {
+		if (t.startsWith("-")) return true; // option after `--`: unclear
+		if (t === "." || t === "./" || t === "./." || t.startsWith("./")) return true; // whole-tree
+		if (t.endsWith("/")) return true; // directory restore: not provably single-file
+		if (/^[$`]/.test(t) || /[*?[]/.test(t)) return true; // variable / glob: unresolvable
+	}
+	return false;
+}
 export function judgeGit(
 	_trimmed: string,
 	cmdInfo: CmdInfo,
@@ -691,7 +713,7 @@ export function judgeGit(
 		return ruleVerdict("gitDestructive", "git reset --hard blocked by rule");
 	if (
 		(sub === "checkout" || sub === "switch") &&
-		(args.includes("--") || args.includes(".") || hasForceFlag(args))
+		(hasForceFlag(args) || checkoutPathspecAmbiguous(args))
 	)
 		return ruleVerdict(
 			"gitDestructive",

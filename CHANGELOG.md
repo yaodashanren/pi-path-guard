@@ -4,6 +4,14 @@ All notable changes to this project are documented here, aligned with
 `package.json`. The current mode/tag is always the latest `## [Unreleased]` /
 released entry below. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — path-limited `git checkout`/`git switch` restore no longer fires gitDestructive
+
+### Fixed
+- **Path-limited `git checkout -- <path>` / `git switch -- <path>` no longer triggers the `gitDestructive` confirm.** Only a whole-tree restore (`-- .`), a bare `--` with no path, an unresolvable pathspec (option/variable/glob/directory after `--`), or `-f`/`--force` is still treated as destructive; a single literal file path after `--` is routine, matching the existing `restore -- <path>` semantics. 带明确单文件路径的 `checkout -- <path>` / `switch -- <path>` 不再按整树破坏性操作确认；整树 `.`、裸 `--`、无法静态解析的 pathspec 及强制标志仍照旧确认，与 `restore -- <path>` 语义一致。trusted 模式下不再反复弹窗。
+
+### Tests
+- 27 new assertions; 754 passing (was 727).
+
 ## [1.11.1] — 2026-10-30: scrollable doctor screen and symlink-safe atomic writes
 
 ### Added

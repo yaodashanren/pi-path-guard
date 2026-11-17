@@ -1552,6 +1552,90 @@ for (const mode of ["strict", "normal", "loose", "trusted"]) {
 	}
 }
 
+// ── trusted-checkout-path: path-limited checkout/switch restore ──
+{
+	await setMode("normal");
+	// allow: path-limited restore via double dash (single file) — normal & trusted
+	for (const mode of ["normal", "trusted"] as const) {
+		await setMode(mode);
+		const r = await runCmd("git checkout -- tests/test_refcat_photometry.py", PROJ);
+		check(`tc-path ${mode}: checkout -- single file → pass`, r.verdict, "pass");
+		check(`tc-path ${mode}: checkout -- single file no prompt`, String(r.selectCalls), "0");
+	}
+	await setMode("normal");
+	check(
+		"tc-path normal: checkout -- quoted path with space → pass",
+		(await runCmd('git checkout -- "tests/a b.py"', PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"tc-path normal: bash -c wrapper single-file checkout → pass",
+		(await runCmd(`bash -c 'git checkout -- tests/test_refcat_photometry.py'`, PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"tc-path normal: checkout HEAD -- single file → pass",
+		(await runCmd("git checkout HEAD -- tests/test_refcat_photometry.py", PROJ)).verdict,
+		"pass",
+	);
+	// regressions: adjacent pass behavior preserved
+	check(
+		"tc-path normal: git switch main → pass",
+		(await runCmd("git switch main", PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"tc-path normal: git restore -- single file → pass",
+		(await runCmd("git restore -- file.txt", PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"tc-path normal: git checkout -b newbranch → pass",
+		(await runCmd("git checkout -b newbranch", PROJ)).verdict,
+		"pass",
+	);
+	// still confirm: whole-tree / bare -- / force / other destructive
+	for (const cmd of [
+		"git checkout -- .",
+		"git checkout -- ./",
+		"git checkout --",
+		"git checkout -f main",
+		"git checkout --force main",
+		"git switch --force main",
+		"git checkout -f -- tests/test_refcat_photometry.py",
+	] as const) {
+		const r = await runCmd(cmd, PROJ);
+		check(`tc-path normal: ${cmd} → confirm`, r.verdict, "confirm");
+		check(
+			`tc-path normal: ${cmd} rule is gitDestructive`,
+			selectOptions.flat().some((o) => o.includes("gitDestructive")) ? "yes" : "no",
+			"yes",
+		);
+	}
+	await setMode("trusted");
+	check(
+		"tc-path trusted: checkout -- dot → confirm",
+		(await runCmd("git checkout -- .", PROJ)).verdict,
+		"confirm",
+	);
+	check(
+		"tc-path trusted: reset --hard → confirm",
+		(await runCmd("git reset --hard", PROJ)).verdict,
+		"confirm",
+	);
+	// no UI: path-limited single-file checkout passes without degrading to block
+	check(
+		"tc-path no-UI: checkout -- single file → pass",
+		(
+			await runTool(
+				"bash",
+				{ command: "git checkout -- tests/test_refcat_photometry.py" },
+				{ cwd: PROJ, hasUI: false },
+			)
+		).verdict,
+		"pass",
+	);
+}
 // ── #4 rsync remote target ──────────────────────────────────
 {
 	await setMode("normal");

@@ -657,21 +657,25 @@ export function tarIsExtraction(args: string[]): boolean {
 /**
  * Conservative whole-tree/ambiguous pathspec check for `git checkout` / `git switch`.
  * Returns true (keep gitDestructive) unless we can statically prove a path-limited
- * restore: tokens after `--` that are plain literal file paths. Whole-tree forms
- * (`.`, `./`, `./.`), bare `--` with no path, options/variables/globs/directories
- * after `--` (cannot prove a single-file restore) all stay destructive. Without
- * `--`, only the whole-tree `.` argument is treated as destructive (branch
- * checkout etc. stays pass), preserving the pre-fix behavior.
+ * restore: tokens after `--` that are plain literal file paths. Whole-tree/parent
+ * forms (`.`, `..`, with or without trailing `/`), bare `--` with no path, options,
+ * pathspec magic (`:...`), variables/globs, and existing directories after `--`
+ * (cannot prove a single-file restore) all stay destructive. Without `--`, only
+ * the whole-tree `.` argument is treated as destructive (branch checkout etc.
+ * stays pass), preserving the pre-fix behavior.
  */
-function checkoutPathspecAmbiguous(args: string[]): boolean {
+function checkoutPathspecAmbiguous(args: string[], realCwd: string): boolean {
 	const dd = args.indexOf("--");
 	if (dd === -1) return args.includes(".");
 	const rest = args.slice(dd + 1);
 	if (rest.length === 0) return true; // bare `--` with no pathspec
 	for (const t of rest) {
 		if (t.startsWith("-")) return true; // option after `--`: unclear
-		if (t === "." || t === "./" || t === "./." || t.startsWith("./")) return true; // whole-tree
-		if (t.endsWith("/")) return true; // directory restore: not provably single-file
+		if (t.startsWith(":")) return true; // pathspec magic: cannot prove local
+		if (t === "." || t === ".." || t === "./" || t === "../" || t === "./.")
+			return true; // whole-tree / parent-dir
+		if (t.endsWith("/")) return true; // directory pathspec
+		if (isDirectory(resolve(realCwd, t))) return true; // existing dir, no trailing slash
 		if (/^[$`]/.test(t) || /[*?[]/.test(t)) return true; // variable / glob: unresolvable
 	}
 	return false;
@@ -679,7 +683,7 @@ function checkoutPathspecAmbiguous(args: string[]): boolean {
 export function judgeGit(
 	_trimmed: string,
 	cmdInfo: CmdInfo,
-	_realCwd: string,
+	realCwd: string,
 ): SegmentVerdict {
 	if (cmdInfo.command !== "git") return { kind: "pass" };
 
@@ -713,7 +717,7 @@ export function judgeGit(
 		return ruleVerdict("gitDestructive", "git reset --hard blocked by rule");
 	if (
 		(sub === "checkout" || sub === "switch") &&
-		(hasForceFlag(args) || checkoutPathspecAmbiguous(args))
+		(hasForceFlag(args) || checkoutPathspecAmbiguous(args, realCwd))
 	)
 		return ruleVerdict(
 			"gitDestructive",

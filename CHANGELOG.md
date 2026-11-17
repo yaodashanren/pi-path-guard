@@ -7,10 +7,10 @@ released entry below. Versions follow [Semantic Versioning](https://semver.org/)
 ## [Unreleased] — path-limited `git checkout`/`git switch` restore no longer fires gitDestructive
 
 ### Fixed
-- **Path-limited `git checkout -- <path>` / `git switch -- <path>` no longer triggers the `gitDestructive` confirm.** Only a whole-tree restore (`-- .`), a bare `--` with no path, an unresolvable pathspec (option/variable/glob/directory after `--`), or `-f`/`--force` is still treated as destructive; a single literal file path after `--` is routine, matching the existing `restore -- <path>` semantics. 带明确单文件路径的 `checkout -- <path>` / `switch -- <path>` 不再按整树破坏性操作确认；整树 `.`、裸 `--`、无法静态解析的 pathspec 及强制标志仍照旧确认，与 `restore -- <path>` 语义一致。trusted 模式下不再反复弹窗。
+- **Path-limited `git checkout -- <path>` / `git switch -- <path>` no longer triggers the `gitDestructive` confirm.** Only a whole-tree or parent-dir pathspec (`-- .` / `-- ..`, with or without trailing slash), a bare `--` with no path, an ambiguous pathspec (option, `:`-prefixed pathspec magic, variable, glob, or an existing directory after `--`), or `-f`/`--force` is still treated as destructive; literal file paths after `--` (including `./file`, multiple paths) are routine, matching the existing `restore -- <path>` semantics. 带明确字面文件路径（含 `./file`、多路径）的 `checkout -- <path>` / `switch -- <path>` 不再按整树破坏性操作确认；整树/父目录 `.`、`..`，裸 `--`，`--` 后接选项/`:` 路径魔法/变量/通配符/目录（含无尾斜杠）及强制标志仍照旧确认，与 `restore -- <path>` 语义一致。trusted 模式下不再反复弹窗。
 
 ### Tests
-- 27 new assertions; 754 passing (was 727).
+- 39 new assertions total for the checkout-path fix (27 in the first pass + 12 closing the review round 1 gaps: parent-dir `..`/`../`, directory without trailing slash, `:`-magic pathspec, `./file`, multi-path); 766 passing (was 727).
 
 ## [1.11.1] — 2026-10-30: scrollable doctor screen and symlink-safe atomic writes
 

@@ -1623,6 +1623,33 @@ for (const mode of ["strict", "normal", "loose", "trusted"]) {
 		(await runCmd("git reset --hard", PROJ)).verdict,
 		"confirm",
 	);
+	// reviewer round 1 gaps: parent-dir / directory / dot-slash-file / magic pathspec
+	mkdirSync(join(PROJ, "src"), { recursive: true });
+	for (const cmd of [
+		"git checkout -- ..",
+		"git checkout -- ../",
+		"git checkout -- src",
+		"git checkout -- src/",
+		"git checkout -- :/README.md",
+	] as const) {
+		const r = await runCmd(cmd, PROJ);
+		check(`tc-path normal: ${cmd} → confirm`, r.verdict, "confirm");
+		check(
+			`tc-path normal: ${cmd} rule is gitDestructive`,
+			selectOptions.flat().some((o) => o.includes("gitDestructive")) ? "yes" : "no",
+			"yes",
+		);
+	}
+	check(
+		"tc-path normal: checkout -- ./single file → pass",
+		(await runCmd("git checkout -- ./file.txt", PROJ)).verdict,
+		"pass",
+	);
+	check(
+		"tc-path normal: checkout -- two literal files → pass",
+		(await runCmd("git checkout -- file.txt other.txt", PROJ)).verdict,
+		"pass",
+	);
 	// no UI: path-limited single-file checkout passes without degrading to block
 	check(
 		"tc-path no-UI: checkout -- single file → pass",

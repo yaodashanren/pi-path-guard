@@ -455,8 +455,8 @@ cd tests && PI_PACKAGES_ROOT=<pi 安装目录>/node_modules/@earendil-works \
 
 ## 更新日志 / Changelog
 
-完整版本历史见 [CHANGELOG.md](CHANGELOG.md)（与 `package.json` 同步）；最新版本 **v1.11.1**。
-See [CHANGELOG.md](CHANGELOG.md) for the full history (aligned with `package.json`); latest release **v1.11.1**.
+完整版本历史见 [CHANGELOG.md](CHANGELOG.md)（与 `package.json` 同步）；最新版本 **v1.11.2**。
+See [CHANGELOG.md](CHANGELOG.md) for the full history (aligned with `package.json`); latest release **v1.11.2**.
 
 ## License
 

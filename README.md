@@ -440,9 +440,9 @@ Hint:    tune just this rule first (/guard rules targetUnresolved = pass|block),
 
 ## 开发与测试 / Development
 
-测试加载真实扩展、用 mock 的 pi API 跑，共 727 条断言，覆盖：5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道的判定矩阵，`/guard` 命令交互、trusted 确认、naked 两级确认、底部状态栏、settings.json 持久化、自定义保护路径（含 naked）、信任路径、运行脚本判定、重定向/下载/dd 目标判定、命令替换递归、按模式规则覆盖等。
+测试加载真实扩展、用 mock 的 pi API 跑，共 766 条断言，覆盖：5 种模式 × 受保护路径 / 危险命令 / 截断 / git 破坏性 / 危险管道的判定矩阵，`/guard` 命令交互、trusted 确认、naked 两级确认、底部状态栏、settings.json 持久化、自定义保护路径（含 naked）、信任路径、运行脚本判定、重定向/下载/dd 目标判定、命令替换递归、按模式规则覆盖等。
 
-The tests load the real extension with a mocked pi API — 727 assertions covering the mode × checkpoint matrix, `/guard` interactions, trusted/naked confirmations, the footer indicator, settings persistence, custom paths, script and redirect judging, command-substitution recursion, and per-mode rule overrides:
+The tests load the real extension with a mocked pi API — 766 assertions covering the mode × checkpoint matrix, `/guard` interactions, trusted/naked confirmations, the footer indicator, settings persistence, custom paths, script and redirect judging, command-substitution recursion, and per-mode rule overrides:
 
 ```bash
 cd tests && PI_PACKAGES_ROOT=<pi 安装目录>/node_modules/@earendil-works \
